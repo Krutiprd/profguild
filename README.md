@@ -41,8 +41,9 @@ Only the owner changes it and raises its version; everybody stores and forwards 
 
 Answers wait a random 1–4 s (the owner 0.3–0.8 s) and are cancelled when someone else sends the
 same record first, so each record is usually sent once per need. Higher version always wins. If the
-owner sees its own record with a higher version (lost SavedVariables, forged data), it jumps above it
-and republishes. Nothing is sent in instances, in combat or from trial accounts; messages wait in a
+owner sees its own record with a higher version (lost SavedVariables, forged data), it fetches that
+copy, keeps the recipes of professions it has not rescanned yet, jumps above it and republishes.
+A holder that sees the owner announce a known version with different content sends its copy back. Nothing is sent in instances, in combat or from trial accounts; messages wait in a
 queue and go out afterwards.
 
 Messages are serialized with LibSerialize, compressed with LibDeflate and split by AceComm /

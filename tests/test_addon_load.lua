@@ -128,5 +128,90 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.ok(own.recipes[197][8000], "recipe stored under Tailoring (197), not 2540")
 	H.eq(own.recipes[2540], nil)
 
+	-- debounce: steady skill-ups cannot postpone the update, a learned recipe is not held back
+	local realRefresh, refreshes = ns.RefreshOwn, 0
+	ns.RefreshOwn = function(...) refreshes = refreshes + 1 return realRefresh(...) end
+	M.advance(120)
+	refreshes = 0
+	for _ = 1, 12 do
+		M.fire("SKILL_LINES_CHANGED")
+		M.advance(10)
+	end
+	H.ok(refreshes >= 1, "skill-ups every 10 s still refresh within 120 s (" .. refreshes .. ")")
+	M.advance(120)
+	refreshes = 0
+	M.fire("SKILL_LINES_CHANGED")
+	M.advance(1)
+	ns.ScheduleRefresh() -- learned recipe / scan: short delay
+	M.advance(5)
+	H.eq(refreshes, 1, "short delay wins over the pending 60 s one")
+	M.advance(70)
+	H.eq(refreshes, 1, "and the merged refresh is not run twice")
+	ns.RefreshOwn = realRefresh
+
+	-- whisper and link fall back to ChatFrameUtil, then to a chat message
+	local oldTell, oldOpen, oldInsert = ChatFrame_SendTell, ChatFrame_OpenChat, ChatEdit_InsertLink
+	ChatFrame_SendTell, ChatFrame_OpenChat = nil, nil
+	ChatFrameUtil = { SendTell = function(name) M.utilTell = name end, OpenChat = function(text) M.utilOpen = text end }
+	ns.UI.OpenWhisper("Ana Brightwood")
+	H.eq(M.utilTell, "Ana Brightwood", "ChatFrameUtil.SendTell used")
+	ChatFrameUtil.SendTell = function() error("protected") end
+	ns.UI.OpenWhisper("Ana Brightwood")
+	H.eq(M.utilOpen, "/w Ana Brightwood ", "falls back to opening chat with /w")
+	ChatEdit_InsertLink = function() return false end -- no edit box open
+	ns.UI.InsertLink(17187, 12360)
+	H.ok(M.utilOpen:find("item:12360", 1, true), "link opens a chat box when none is open")
+	ChatFrameUtil = nil
+	local chatBefore = #M.chat
+	ns.UI.OpenWhisper("Ana Brightwood")
+	H.ok(M.chat[chatBefore + 1] and M.chat[chatBefore + 1]:find("/w Ana Brightwood", 1, true), "tells the player what to type")
+	ChatFrame_SendTell, ChatFrame_OpenChat, ChatEdit_InsertLink = oldTell, oldOpen, oldInsert
+
+	-- /pg debug survives an API that errors and still saves everything else
+	local oldGetProfessions, oldRoster = GetProfessions, GetGuildRosterInfo
+	GetProfessions = function() error("boom") end
+	GetGuildRosterInfo = function() error("roster boom") end
+	ProfguildDB.debug = nil
+	SlashCmdList.PROFGUILD("debug")
+	local dump = table.concat(ProfguildDB.debug and ProfguildDB.debug.lines or {}, "\n")
+	H.ok(dump:find("GetProfessions: ERROR", 1, true), "error reported")
+	H.ok(dump:find("TooltipDataProcessor: table", 1, true), "later sections still run")
+	H.ok(dump:find("ChatFrameUtil.SendTell", 1, true), "chat API reported")
+	GetProfessions, GetGuildRosterInfo = oldGetProfessions, oldRoster
+
+	H.eq(ns.lastError, nil, "no handler errors: " .. tostring(ns.lastError))
+end)
+
+H.test("addon: roster without GUIDs prunes former members by name", function()
+	M.install()
+	M.events, M.timers, M.sent, M.chat = {}, {}, {}, {}
+	ProfguildDB = nil
+	local ns = {}
+	loadToc(ns)
+	M.fire("ADDON_LOADED", "Profguild")
+	-- roster rows without GUIDs (field 17 nil)
+	local rows = {
+		{ "Frost Winterborn", "Member", 3, 60, "Mage", "Zone", "", "", true, 0, "MAGE" },
+		{ "Ana Brightwood", "Member", 3, 60, "Priest", "Zone", "", "", false, 0, "PRIEST" },
+	}
+	GetNumGuildMembers = function() return #rows, 1 end
+	GetGuildRosterInfo = function(i) local r = rows[i] if r then return unpack(r, 1, 11) end end
+	M.fire("PLAYER_LOGIN")
+	M.advance(8)
+	M.fire("GUILD_ROSTER_UPDATE")
+	M.advance(5)
+	local function deliver(guid, name)
+		local text = ns.Comm.Encode({ t = "D", pv = 1, s = guid, r = { g = guid, v = 2, n = name, p = {} } })
+		ns.Comm:OnCommReceived("Profguild", text, "GUILD", name)
+	end
+	deliver("Player-1-00000002", "Ana Brightwood")
+	deliver("Player-1-00000003", "Gone Away")
+	H.ok(ns.store:Get("Player-1-00000003"), "former member known before the roster update")
+	-- own record must carry the roster name for the name match to be trusted
+	M.advance(5)
+	H.eq(ns.store:Get("Player-1-00000001").n, "Frost Winterborn", "own record uses the roster name")
+	M.fire("GUILD_ROSTER_UPDATE")
+	H.eq(ns.store:Get("Player-1-00000003"), nil, "former member removed by name")
+	H.ok(ns.store:Get("Player-1-00000002") and ns.store:Get("Player-1-00000001"), "members kept")
 	H.eq(ns.lastError, nil, "no handler errors: " .. tostring(ns.lastError))
 end)

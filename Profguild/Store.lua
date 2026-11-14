@@ -30,6 +30,14 @@ local function shortStr(s, max)
 	return type(s) == "string" and #s > 0 and #s <= max
 end
 
+-- Names from the network are shown in chat, tooltips and the window, so they must not carry
+-- UI escape sequences ("|T" texture, "|c" color, "|H" link) or control characters.
+local function cleanName(s)
+	if not shortStr(s, L.maxStr) then return "?" end
+	s = s:gsub("[|%c]", "")
+	return s ~= "" and s or "?"
+end
+
 -- Returns a sanitized deep copy of a record, or nil + reason when the record is unusable.
 -- Unknown fields are dropped. Malformed professions or recipes are skipped, not fatal.
 function Store.Validate(rec)
@@ -40,8 +48,8 @@ function Store.Validate(rec)
 	local out = {
 		g = rec.g,
 		v = rec.v,
-		n = shortStr(rec.n, L.maxStr) and rec.n or "?",
-		c = shortStr(rec.c, L.maxClass) and rec.c or nil,
+		n = cleanName(rec.n),
+		c = shortStr(rec.c, L.maxClass) and rec.c:find("^%u+$") and rec.c or nil, -- class file name, e.g. "MAGE"
 		a = shortStr(rec.a, L.maxStr) and rec.a or nil,
 		t = isInt(rec.t, 0, 4102444800) and rec.t or 0,
 		p = {},
@@ -209,22 +217,46 @@ function StoreMT:PruneToRoster(rosterGuids, keep)
 	return removed
 end
 
+-- Fallback for clients whose roster has no GUIDs: removes records whose name is not in the roster.
+-- rosterNames: set of normalized names. normalize(name) -> name in the same form (optional).
+-- keep: set of guids never pruned. Returns the removed guids, or nil + reason when it refused:
+-- names are a weaker key than GUIDs, so nothing is removed when the record of selfGuid (our own
+-- character) does not match the roster by name, i.e. when names are in a different form.
+function StoreMT:PruneToRosterNames(rosterNames, normalize, keep, selfGuid)
+	if type(rosterNames) ~= "table" or next(rosterNames) == nil then return nil, "empty roster" end
+	normalize = normalize or function(n) return n end
+	local me = selfGuid and self.db.records[selfGuid]
+	if not me or not me.n or not rosterNames[normalize(me.n)] then return nil, "names do not match" end
+	local removed = {}
+	for guid, rec in pairs(self.db.records) do
+		if not (keep and keep[guid]) and not (rec.n and rosterNames[normalize(rec.n)]) then
+			removed[#removed + 1] = guid
+		end
+	end
+	for _, guid in ipairs(removed) do self.db.records[guid] = nil end
+	if #removed > 0 then touch(self) end
+	return removed
+end
+
 ---------------------------------------------------------------------------
 -- Roster bookkeeping (local only, never synced)
 ---------------------------------------------------------------------------
 
 -- entries: array of { guid=, name=, online=bool, daysOffline=number|nil, classFile= }
 -- Entries without a GUID are matched to records by name instead (if the client's roster
--- does not return GUIDs).
-function StoreMT:SetRoster(entries)
+-- does not return GUIDs). normalize(name) -> name in the form used for that match (optional):
+-- the roster may carry a realm suffix that the name in a record does not have.
+function StoreMT:SetRoster(entries, normalize)
+	normalize = normalize or function(n) return n end
 	local roster, byName = {}, {}
 	for _, e in ipairs(entries) do
 		local entry = { name = e.name, online = e.online and true or false, days = e.daysOffline, c = e.classFile }
 		if e.guid then roster[e.guid] = entry end
-		if e.name then byName[e.name] = entry end
+		if e.name then byName[normalize(e.name)] = entry end
 	end
 	self.db.roster = roster
 	self.rosterByName = byName
+	self.normalizeName = normalize
 	touch(self)
 end
 
@@ -232,7 +264,7 @@ function StoreMT:RosterEntry(guid)
 	local entry = self.db.roster[guid]
 	if entry then return entry end
 	local rec = self.db.records[guid]
-	if rec and self.rosterByName then return self.rosterByName[rec.n] end
+	if rec and self.rosterByName then return self.rosterByName[self.normalizeName(rec.n)] end
 	return nil
 end
 
@@ -304,6 +336,17 @@ end
 -- Owner side: turning snapshots of the player's own character into a record
 ---------------------------------------------------------------------------
 
+-- Builds the publishable record (without v / t) from the owner's state.
+local function buildRecord(own, guid, name, class, account)
+	local rec = { g = guid, n = name, c = class, a = account, p = {} }
+	for skillLine, info in pairs(own.profs or {}) do
+		local r = {}
+		for recipeID, itemID in pairs(own.recipes and own.recipes[skillLine] or {}) do r[recipeID] = itemID end
+		rec.p[skillLine] = { s = info.s, m = info.m, k = own.scanned and own.scanned[skillLine] or nil, r = r }
+	end
+	return rec
+end
+
 -- own: persisted state for one of the player's characters:
 --   { v = version, rec = last published record, recipes = { [skillLine] = { [recipeID] = itemID } },
 --     scanned = { [skillLine] = true }, missing = { [skillLine] = count } }
@@ -317,6 +360,12 @@ function Store.BuildOwnRecord(own, snap, now)
 	own.missing = own.missing or {}
 	own.profs = own.profs or {}
 	own.v = own.v or 0
+	-- a saved version outside the valid range can never be published: start again from 0,
+	-- the copies held by the guild raise it through the self-heal
+	if not isInt(own.v, 0, L.maxVersion) then
+		own.v = 0
+		own.rec = nil
+	end
 
 	if snap.ok then
 		for skillLine, info in pairs(snap.profs) do
@@ -336,18 +385,7 @@ function Store.BuildOwnRecord(own, snap, now)
 		end
 	end
 
-	local rec = {
-		g = snap.guid,
-		n = snap.name,
-		c = snap.class,
-		a = snap.account,
-		p = {},
-	}
-	for skillLine, info in pairs(own.profs) do
-		local r = {}
-		for recipeID, itemID in pairs(own.recipes[skillLine] or {}) do r[recipeID] = itemID end
-		rec.p[skillLine] = { s = info.s, m = info.m, k = own.scanned[skillLine] or nil, r = r }
-	end
+	local rec = buildRecord(own, snap.guid, snap.name, snap.class, snap.account)
 
 	local prev = own.rec
 	local changed = true
@@ -355,7 +393,7 @@ function Store.BuildOwnRecord(own, snap, now)
 		changed = not (deepEqual(prev.p, rec.p) and prev.n == rec.n and prev.c == rec.c and prev.a == rec.a)
 	end
 	if changed then
-		own.v = own.v + 1
+		own.v = math.min(own.v + 1, L.maxVersion)
 		rec.v = own.v
 		rec.t = now or 0
 		own.rec = rec
@@ -379,6 +417,53 @@ function Store.AddLearnedRecipe(own, skillLine, recipeID, itemID)
 	own.recipes[skillLine] = own.recipes[skillLine] or {}
 	own.recipes[skillLine][recipeID] = itemID or 0
 	return true
+end
+
+-- Self-heal: someone holds our record with version seenVersion >= ours (lost SavedVariables,
+-- a second PC, or a forged copy). received is that copy, already validated, or nil when only
+-- the version is known. Recipes of professions we still have but have not scanned on this
+-- install are taken over from the copy, so the guild does not lose them; scanned professions,
+-- skill levels and the profession list stay ours. When we have no profession snapshot yet,
+-- the professions of the copy are taken over too (the next snapshots correct them).
+-- Raises our version above seenVersion and returns the record to publish (nil without identity).
+-- A seenVersion that no valid record can carry is ignored (returns nil), and our version never
+-- passes the maximum, so the record stays publishable.
+function Store.HealOwn(own, seenVersion, received, now)
+	if not isInt(seenVersion, 0, L.maxVersion) then return nil end
+	own.recipes = own.recipes or {}
+	own.scanned = own.scanned or {}
+	own.profs = own.profs or {}
+	own.v = own.v or 0
+	if not isInt(own.v, 0, L.maxVersion) then own.v = 0 end
+
+	if type(received) == "table" and type(received.p) == "table" then
+		local noSnapshot = next(own.profs) == nil
+		for skillLine, prof in pairs(received.p) do
+			if noSnapshot and not own.profs[skillLine] then
+				own.profs[skillLine] = { s = prof.s or 0, m = prof.m or 0 }
+			end
+			if own.profs[skillLine] and not own.scanned[skillLine] and prof.k and type(prof.r) == "table" then
+				local mine = own.recipes[skillLine] or {}
+				for recipeID, itemID in pairs(prof.r) do
+					if mine[recipeID] == nil or mine[recipeID] == 0 then mine[recipeID] = itemID end
+				end
+				own.recipes[skillLine] = mine
+				own.scanned[skillLine] = true
+			end
+		end
+	end
+
+	local base = own.rec or received
+	if not base or not base.g then
+		if seenVersion > own.v then own.v = seenVersion end
+		return nil
+	end
+	local rec = buildRecord(own, base.g, base.n, base.c, (own.rec and own.rec.a) or base.a)
+	own.v = math.min(math.max(own.v, seenVersion) + 1, L.maxVersion)
+	rec.v = own.v
+	rec.t = now or 0
+	own.rec = rec
+	return rec
 end
 
 -- Raise our own version above a version seen elsewhere (self-heal after lost SavedVariables).

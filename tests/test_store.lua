@@ -153,3 +153,104 @@ H.test("Roster without GUIDs is matched by name", function()
 	H.ok(s:IsOnline("A"), "online by name")
 	H.eq(s:RosterEntry("A").name, "Ana Brightwood")
 end)
+
+H.test("HealOwn keeps recipes from the guild copy of unscanned professions", function()
+	-- lost SavedVariables: professions known again from the snapshot, recipes not scanned yet
+	local own = {}
+	Store.BuildOwnRecord(own, { guid = "ME", name = "Me", ok = true,
+		profs = { [197] = { s = 300, m = 300 }, [333] = { s = 120, m = 150 } } }, 1)
+	Store.SetScannedRecipes(own, 333, { [9000] = 0 }) -- enchanting already scanned again
+	Store.AddLearnedRecipe(own, 197, 3867, 0)          -- learned since, output still unknown
+	local copy = Store.Validate({ g = "ME", v = 12, n = "Me", a = "acc", p = {
+		[197] = { s = 280, m = 300, k = true, r = { [3865] = 4305, [3867] = 4307 } },
+		[333] = { s = 100, m = 150, k = true, r = { [8000] = 0 } },
+		[171] = { s = 50, m = 75, k = true, r = { [2330] = 118 } }, -- dropped since
+	} })
+	local rec = Store.HealOwn(own, 12, copy, 5)
+	H.eq(rec.v, 13, "above the seen version"); H.eq(own.v, 13); H.eq(own.rec, rec)
+	H.eq(rec.p[197].r[3865], 4305, "recipe taken over from the copy")
+	H.eq(rec.p[197].r[3867], 4307, "unknown output item filled in")
+	H.ok(rec.p[197].k and own.scanned[197], "profession counts as scanned")
+	H.eq(rec.p[197].s, 300, "own skill level kept")
+	H.eq(rec.p[333].r[8000], nil, "scanned profession not touched")
+	H.eq(rec.p[171], nil, "profession we no longer have not taken over")
+end)
+
+H.test("HealOwn without a snapshot takes the professions of the copy", function()
+	local own = {}
+	local copy = Store.Validate({ g = "ME", v = 4, n = "Me", p = { [185] = { s = 75, m = 150, k = true, r = { [7827] = 5095 } } } })
+	local rec = Store.HealOwn(own, 4, copy, 1)
+	H.eq(rec.v, 5); H.eq(rec.n, "Me"); H.eq(rec.p[185].r[7827], 5095)
+	H.eq(Store.HealOwn({}, 4, nil, 1), nil, "no identity, nothing to publish")
+end)
+
+H.test("HealOwn without a copy only raises the version", function()
+	local own = {}
+	Store.BuildOwnRecord(own, { guid = "ME", name = "Me", ok = true, profs = { [197] = { s = 1, m = 75 } } }, 1)
+	local rec = Store.HealOwn(own, 9, nil, 2)
+	H.eq(rec.v, 10); H.eq(rec.p[197].s, 1)
+end)
+
+H.test("PruneToRosterNames removes former members, refuses when names do not match", function()
+	local norm = function(n) return (n:gsub("%-.*$", "")) end
+	local s = Store.New({})
+	s:Apply({ g = "ME", v = 1, n = "Frost Winterborn", p = {} })
+	s:Apply({ g = "A", v = 1, n = "Ana Brightwood", p = {} })
+	s:Apply({ g = "X", v = 1, n = "Gone Away", p = {} })
+	local removed, why = s:PruneToRosterNames({ ["Frost"] = true, ["Ana"] = true }, norm, { ME = true }, "ME")
+	H.eq(removed, nil, "own name not in roster form"); H.eq(why, "names do not match")
+	H.ok(s:Get("X"), "nothing removed")
+	removed = s:PruneToRosterNames({ ["Frost Winterborn"] = true, ["Ana Brightwood"] = true }, norm, { ME = true }, "ME")
+	H.eq(#removed, 1); H.eq(removed[1], "X")
+	H.ok(s:Get("A") and s:Get("ME") and not s:Get("X"))
+	H.eq(s:PruneToRosterNames({}, norm, nil, "ME"), nil, "empty roster")
+end)
+
+H.test("Validate strips chat escapes and control characters from names", function()
+	local clean = Store.Validate({ g = "G", v = 1, n = "|TInterface/Icons/x:0|t|cffff0000Evil\nName|r", c = "MAGE|r", p = {} })
+	H.eq(clean.n, "TInterface/Icons/x:0tcffff0000EvilNamer", "no pipe, no line break")
+	H.eq(clean.c, nil, "class with other characters dropped")
+	H.eq(Store.Validate({ g = "G", v = 1, n = "||\n|", p = {} }).n, "?", "nothing left of the name")
+	H.eq(Store.Validate({ g = "G", v = 1, n = "Ana Brightwood", c = "DEATHKNIGHT", p = {} }).n, "Ana Brightwood")
+	H.eq(Store.Validate({ g = "G", v = 1, n = "Žofia Čierna", c = "DEATHKNIGHT", p = {} }).n, "Žofia Čierna", "UTF-8 kept")
+end)
+
+H.test("Own version never leaves the valid range", function()
+	local max = Store.LIMITS.maxVersion
+	local function fresh()
+		local own = {}
+		Store.BuildOwnRecord(own, { guid = "ME", name = "Me", ok = true, profs = { [197] = { s = 1, m = 75 } } }, 1)
+		return own
+	end
+	for _, bad in ipairs({ 5.5, 1e300, -3, 0 / 0, max + 1 }) do
+		local own = fresh()
+		H.eq(Store.HealOwn(own, bad, nil, 2), nil, "version " .. tostring(bad) .. " refused")
+		H.eq(own.v, 1, "own version untouched")
+	end
+	local own = fresh()
+	local rec = Store.HealOwn(own, max, nil, 2)
+	H.eq(rec.v, max, "capped at the maximum"); H.ok(Store.Validate(rec), "still a valid record")
+	-- a later change must not push it over the limit either
+	local rec2, changed = Store.BuildOwnRecord(own, { guid = "ME", name = "Me", ok = true, profs = { [197] = { s = 2, m = 75 } } }, 3)
+	H.ok(changed); H.eq(rec2.v, max); H.ok(Store.Validate(rec2))
+end)
+
+H.test("BuildOwnRecord repairs a saved version outside the valid range", function()
+	for _, bad in ipairs({ 6.5, 1e300, 2147483648 }) do
+		local own = {}
+		local snap = { guid = "ME", name = "Me", ok = true, profs = { [197] = { s = 1, m = 75 } } }
+		Store.BuildOwnRecord(own, snap, 1)
+		own.v, own.rec.v = bad, bad
+		local rec, changed = Store.BuildOwnRecord(own, snap, 2)
+		H.ok(changed, "republished"); H.eq(rec.v, 1); H.ok(Store.Validate(rec), "valid again")
+	end
+end)
+
+H.test("Roster without GUIDs matches names in a different form", function()
+	local norm = function(n) return (n:gsub("%-.*$", "")) end
+	local s = Store.New({})
+	s:Apply({ g = "A", v = 1, n = "Ana Brightwood", p = {} })
+	s:SetRoster({ { name = "Ana Brightwood-Realm", online = true, daysOffline = 0 } }, norm)
+	H.ok(s:IsOnline("A"), "online although the roster name carries the realm")
+	H.eq(s:RosterEntry("A").name, "Ana Brightwood-Realm", "roster name kept for whispers")
+end)

@@ -43,14 +43,32 @@ local function whisperName(guid)
 	return rec and rec.n
 end
 
+-- Chat helpers moved between client versions (global functions vs. ChatFrameUtil), so each
+-- candidate is tried in turn. Returns true when one of them worked.
+local function tryCalls(candidates, ...)
+	-- candidates may contain nils (missing functions), so ipairs would stop early
+	for i = 1, table.maxn(candidates) do
+		local fn = candidates[i]
+		if type(fn) == "function" and pcall(fn, ...) then return true end
+	end
+	return false
+end
+
+local function chatUtil(key)
+	return ChatFrameUtil and ChatFrameUtil[key]
+end
+
+local function openChat(text)
+	return tryCalls({ chatUtil("OpenChat"), ChatFrame_OpenChat }, text)
+end
+
 local function openWhisper(name)
 	if not name then return end
-	if ChatFrame_SendTell then
-		ChatFrame_SendTell(name)
-	elseif ChatFrame_OpenChat then
-		ChatFrame_OpenChat("/w " .. name .. " ")
-	end
+	if tryCalls({ ChatFrame_SendTell, chatUtil("SendTell") }, name) then return end
+	if openChat("/w " .. name .. " ") then return end
+	ns.Say("WHISPER_FAILED", name)
 end
+UI.OpenWhisper = openWhisper
 
 local function insertLink(recipeID, itemID)
 	local link
@@ -63,8 +81,20 @@ local function insertLink(recipeID, itemID)
 		local ok, l = pcall(C_Spell.GetSpellLink, recipeID)
 		if ok then link = l end
 	end
-	if link and ChatEdit_InsertLink then ChatEdit_InsertLink(link) end
+	if not link then return end
+	-- InsertLink returns false when no chat edit box is open: then open one with the link
+	local candidates = { ChatEdit_InsertLink, chatUtil("InsertLink") }
+	for i = 1, table.maxn(candidates) do
+		local fn = candidates[i]
+		if type(fn) == "function" then
+			local ok, inserted = pcall(fn, link)
+			if ok and inserted ~= false then return end
+		end
+	end
+	if openChat(link) then return end
+	ns.Print("%s", link)
 end
+UI.InsertLink = insertLink
 
 local function daysText(rec)
 	if not rec or not rec.t or rec.t == 0 then return "" end

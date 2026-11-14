@@ -244,11 +244,12 @@ function Scanner.RequestRoster()
 	end
 end
 
--- Returns entries, complete. complete is true when every member came with a GUID.
+-- Returns entries, complete, namesComplete. complete is true when every member came with a
+-- GUID; namesComplete when every member came with a name (the roster is fully loaded).
 function Scanner.ReadRoster()
 	local entries = {}
 	local total = GetNumGuildMembers and GetNumGuildMembers() or 0
-	if total == 0 then return entries, false end
+	if total == 0 then return entries, false, false end
 	local withGuid = 0
 	for i = 1, total do
 		local name, _, _, _, _, _, _, _, isOnline, _, classFile, _, _, _, _, _, guid = GetGuildRosterInfo(i)
@@ -264,5 +265,5 @@ function Scanner.ReadRoster()
 			if guid then withGuid = withGuid + 1 end
 		end
 	end
-	return entries, (#entries == total and withGuid == total)
+	return entries, (#entries == total and withGuid == total), #entries == total
 end

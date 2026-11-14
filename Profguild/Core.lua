@@ -105,10 +105,31 @@ local function ownState()
 end
 ns.OwnState = ownState
 
+-- Without GUIDs in the roster, find our own row: the only online member of our class whose
+-- name is our name, or starts with our name followed by a surname.
+local function ownRosterNameByName()
+	local store = ns.store
+	if not store or not store.rosterByName then return nil end
+	local me = UnitName("player")
+	local _, classFile = UnitClass("player")
+	if not me then return nil end
+	local found
+	for name, entry in pairs(store.rosterByName) do
+		local short = ns.NormalizeName(name)
+		if entry.online and (not entry.c or entry.c == classFile)
+			and (short == me or short:sub(1, #me + 1) == me .. " ") then
+			if found then return nil end -- ambiguous
+			found = entry.name or name
+		end
+	end
+	return found
+end
+
 local function ownDisplayName(guid)
-	local entry = ns.store and ns.store:RosterEntry(guid)
-	if entry and entry.name then
-		return (Ambiguate and Ambiguate(entry.name, "guild")) or entry.name
+	local entry = ns.store and ns.store.db.roster[guid]
+	local name = entry and entry.name or ownRosterNameByName()
+	if name then
+		return (Ambiguate and Ambiguate(name, "guild")) or name
 	end
 	return UnitName("player")
 end
@@ -131,13 +152,21 @@ function ns.RefreshOwn()
 	return changed
 end
 
-local refreshToken = 0
--- Merges bursts of changes (skill-ups, recipe scans) into one update.
+local refreshToken, refreshAt = 0, nil
+-- Merges bursts of changes (skill-ups, recipe scans) into one update. A pending refresh is
+-- only ever moved earlier, never later: steady skill-ups cannot postpone an update forever,
+-- and a learned recipe (short delay) is not held back by a pending skill-up (long delay).
 function ns.ScheduleRefresh(delay)
+	delay = delay or ns.Config.changeDebounce
+	local now = GetTime()
+	if refreshAt and refreshAt <= now + delay then return end
 	refreshToken = refreshToken + 1
+	refreshAt = now + delay
 	local token = refreshToken
-	C_Timer.After(delay or ns.Config.changeDebounce, function()
-		if token == refreshToken then ns.RefreshOwn() end
+	C_Timer.After(delay, function()
+		if token ~= refreshToken then return end
+		refreshAt = nil
+		ns.RefreshOwn()
 	end)
 end
 
@@ -158,19 +187,33 @@ function ns.RemindToScan()
 	end
 end
 
-local function onOwnConflict(guid, seenVersion)
+-- received: the copy of our record someone else holds (validated), or nil.
+local function onOwnConflict(guid, seenVersion, received)
 	local own = ownState()
 	if not own then return end
 	if not own.rec then ns.RefreshOwn() end
-	if Store.BumpOwnVersion(own, seenVersion, GetServerTime()) and own.rec then
-		ns.Debug("own record seen with version %d, publishing %d", seenVersion, own.v)
-		ns.sync:PublishOwn(own.rec)
+	local rec = Store.HealOwn(own, seenVersion, received, GetServerTime())
+	if rec then
+		ns.Debug("own record seen with version %d (%s), publishing %d", seenVersion,
+			received and "copy received" or "no copy", own.v)
+		ns.sync:PublishOwn(rec)
+		ns.OnDataChanged()
 	end
 end
 
 ---------------------------------------------------------------------------
 -- Guild context
 ---------------------------------------------------------------------------
+
+-- Character name without a realm suffix, the form used to compare roster names with records.
+function ns.NormalizeName(name)
+	if type(name) ~= "string" then return name end
+	if Ambiguate then
+		local ok, short = pcall(Ambiguate, name, "none")
+		if ok and type(short) == "string" then return short end
+	end
+	return (name:gsub("%-.*$", ""))
+end
 
 local dataChangedToken = 0
 function ns.OnDataChanged()
@@ -224,16 +267,28 @@ end
 
 function ns.OnRosterUpdate()
 	if not ns.store then return end
-	local entries, complete = Scanner.ReadRoster()
+	local entries, complete, namesComplete = Scanner.ReadRoster()
 	if #entries == 0 then return end
-	ns.store:SetRoster(entries)
+	ns.store:SetRoster(entries, ns.NormalizeName)
 	ns.rosterHasGuids = complete
+	local myGuid = UnitGUID("player")
+	local keep = { [myGuid or ""] = true }
 	if complete then
 		local set = {}
 		for _, e in ipairs(entries) do set[e.guid] = true end
-		local keep = { [UnitGUID("player") or ""] = true }
 		local removed = ns.store:PruneToRoster(set, keep)
 		if #removed > 0 then ns.Debug("removed %d former members", #removed) end
+	elseif namesComplete then
+		-- the roster has no GUIDs on this client: fall back to names
+		local names = {}
+		for _, e in ipairs(entries) do names[ns.NormalizeName(e.name)] = true end
+		local removed, why = ns.store:PruneToRosterNames(names, ns.NormalizeName, keep, myGuid)
+		ns.rosterPruneByName = removed and "on" or ("off: " .. tostring(why))
+		if removed and #removed > 0 then
+			ns.Debug("removed %d former members (by name)", #removed)
+		elseif not removed then
+			ns.Debug("roster has no GUIDs, not pruning by name: %s", tostring(why))
+		end
 	end
 	-- our display name may now come from the roster
 	local own, guid = ownState()
@@ -373,77 +428,122 @@ end
 -- Prints what the game API really returns on this client and saves it to SavedVariables.
 function ns.DebugDump()
 	local lines = {}
-	local function add(fmt, ...) lines[#lines + 1] = select("#", ...) > 0 and string.format(fmt, ...) or fmt end
-	local function exists(path, t, key) add("%s: %s", path, type(t) == "table" and type(t[key]) or "missing") end
-
-	local version, build, date, interface = GetBuildInfo()
-	add("Profguild %s, client %s (%s) %s, interface %s, lang %s", ns.version, tostring(version), tostring(build), tostring(date), tostring(interface), GetLocale())
-	add("UnitGUID=%s UnitName=%s", tostring(UnitGUID("player")), tostring(UnitName("player")))
-	if UnitFullName then add("UnitFullName=%s", describe({ UnitFullName("player") })) end
-
-	if GetProfessions then
-		local list = { GetProfessions() }
-		add("GetProfessions -> %s", describe(list))
-		for i = 1, 8 do
-			if list[i] then add("  GetProfessionInfo(%d) -> %s", list[i], describe({ GetProfessionInfo(list[i]) })) end
+	local function add(fmt, ...)
+		local args, n = { ... }, select("#", ...)
+		if n == 0 then lines[#lines + 1] = tostring(fmt) return end
+		for i = 1, n do
+			if type(args[i]) ~= "number" then args[i] = tostring(args[i]) end
 		end
-	else
-		add("GetProfessions: missing")
+		local ok, text = pcall(string.format, fmt, unpack(args, 1, n))
+		lines[#lines + 1] = ok and text or (tostring(fmt) .. " [format error]")
 	end
-	if C_TradeSkillUI and C_TradeSkillUI.GetAllProfessionTradeSkillLines then
+	local function exists(path, t, key) add("%s: %s", path, type(t) == "table" and type(t[key]) or "missing") end
+	-- Each section is protected: an API that errors on this client is reported, not fatal.
+	local function section(name, fn)
+		local ok, err = pcall(fn)
+		if not ok then add("%s: ERROR %s", name, tostring(err)) end
+	end
+
+	section("Client", function()
+		local version, build, date, interface = GetBuildInfo()
+		add("Profguild %s, client %s (%s) %s, interface %s, lang %s", ns.version, version, build, date, interface, GetLocale())
+		add("UnitGUID=%s UnitName=%s", UnitGUID("player"), UnitName("player"))
+		if UnitFullName then add("UnitFullName=%s", describe({ UnitFullName("player") })) end
+	end)
+
+	section("GetProfessions", function()
+		if GetProfessions then
+			local list = { GetProfessions() }
+			add("GetProfessions -> %s", describe(list))
+			for i = 1, 8 do
+				if list[i] then
+					section("  GetProfessionInfo(" .. tostring(list[i]) .. ")", function()
+						add("  GetProfessionInfo(%d) -> %s", list[i], describe({ GetProfessionInfo(list[i]) }))
+					end)
+				end
+			end
+		else
+			add("GetProfessions: missing")
+		end
+	end)
+
+	section("GetAllProfessionTradeSkillLines", function()
+		if not (C_TradeSkillUI and C_TradeSkillUI.GetAllProfessionTradeSkillLines) then
+			add("GetAllProfessionTradeSkillLines: missing")
+			return
+		end
 		local ok, ids = pcall(C_TradeSkillUI.GetAllProfessionTradeSkillLines)
-		add("GetAllProfessionTradeSkillLines -> %s", ok and describe(ids) or tostring(ids))
+		add("GetAllProfessionTradeSkillLines -> %s", ok and describe(ids) or ids)
 		if ok and type(ids) == "table" then
 			for _, id in ipairs(ids) do
 				local ok2, info = pcall(C_TradeSkillUI.GetProfessionInfoBySkillLineID, id)
-				if ok2 and type(info) == "table" and (info.skillLevel or 0) > 0 then
-					add("  skillLine %d: %s %d/%d parent=%s", id, tostring(info.professionName), info.skillLevel or 0, info.maxSkillLevel or 0, tostring(info.parentProfessionID))
+				if not ok2 then
+					add("  skillLine %s: ERROR %s", id, info)
+				elseif type(info) == "table" and (info.skillLevel or 0) > 0 then
+					add("  skillLine %s: %s %s/%s parent=%s", id, info.professionName, info.skillLevel or 0, info.maxSkillLevel or 0, info.parentProfessionID)
 				end
 			end
 		end
-	end
-	local snap = Scanner.Snapshot()
-	add("Snapshot ok=%s profs=%s sources=%s", tostring(snap.ok), describe((function()
+	end)
+
+	section("Snapshot", function()
+		local snap = Scanner.Snapshot()
 		local t = {}
-		for k, v in pairs(snap.profs) do t[k] = v.s .. "/" .. v.m end
-		return t
-	end)()), describe(snap.sources))
+		for k, v in pairs(snap.profs) do t[k] = tostring(v.s) .. "/" .. tostring(v.m) end
+		add("Snapshot ok=%s profs=%s sources=%s", snap.ok, describe(t), describe(snap.sources))
+	end)
 
-	add("IsInGuild=%s GuildKey=%s", tostring(IsInGuild()), tostring(Scanner.GuildKey()))
-	if IsInGuild() and GetNumGuildMembers then
-		local total, online = GetNumGuildMembers()
-		add("GetNumGuildMembers -> %s total, %s online", tostring(total), tostring(online))
-		local n = GetGuildRosterInfo and select(1, GetGuildRosterInfo(1))
-		local guid = GetGuildRosterInfo and select(17, GetGuildRosterInfo(1))
-		add("Roster row 1: name=%s guid=%s", tostring(n), tostring(guid))
-		add("Roster GUIDs complete: %s", tostring(ns.rosterHasGuids))
-	end
-	if ns.guildDB and ns.guildDB.names then
-		local n = 0
-		for guid, sender in pairs(ns.guildDB.names) do
-			n = n + 1
-			if n <= 3 then add("Addon sender name for %s: %s", guid, sender) end
+	section("Guild", function()
+		add("IsInGuild=%s GuildKey=%s", IsInGuild(), Scanner.GuildKey())
+		if IsInGuild() and GetNumGuildMembers then
+			local total, online = GetNumGuildMembers()
+			add("GetNumGuildMembers -> %s total, %s online", total, online)
+			if GetGuildRosterInfo then
+				local row = { GetGuildRosterInfo(1) }
+				add("Roster row 1: name=%s guid=%s", row[1], row[17])
+			end
+			if GetGuildRosterLastOnline then add("GetGuildRosterLastOnline(1) -> %s", describe({ GetGuildRosterLastOnline(1) })) end
+			add("Roster GUIDs complete: %s", ns.rosterHasGuids)
+			if ns.rosterPruneByName then add("Roster prune by name: %s", ns.rosterPruneByName) end
 		end
-	end
+		if ns.guildDB and ns.guildDB.names then
+			local n = 0
+			for guid, sender in pairs(ns.guildDB.names) do
+				n = n + 1
+				if n <= 3 then add("Addon sender name for %s: %s", guid, sender) end
+			end
+		end
+	end)
 
-	exists("C_TradeSkillUI.GetTradeSkillLineForRecipe", C_TradeSkillUI, "GetTradeSkillLineForRecipe")
-	exists("C_TradeSkillUI.GetRecipeSchematic", C_TradeSkillUI, "GetRecipeSchematic")
-	exists("C_TradeSkillUI.GetAllRecipeIDs", C_TradeSkillUI, "GetAllRecipeIDs")
-	exists("C_ChatInfo.InChatMessagingLockdown", C_ChatInfo, "InChatMessagingLockdown")
-	add("TooltipDataProcessor: %s", type(TooltipDataProcessor))
-	add("AddonCompartmentFrame: %s", type(AddonCompartmentFrame))
-	add("Trial=%s Veteran=%s", tostring(IsTrialAccount and IsTrialAccount()), tostring(IsVeteranTrialAccount and IsVeteranTrialAccount()))
-	local own = ownState()
-	if own and own.recipes then
-		for skillLine, list in pairs(own.recipes) do
-			local sample
-			for id, item in pairs(list) do sample = id .. "->" .. item break end
-			add("Own recipes %d: sample %s", skillLine, tostring(sample))
+	section("API", function()
+		exists("C_TradeSkillUI.GetTradeSkillLineForRecipe", C_TradeSkillUI, "GetTradeSkillLineForRecipe")
+		exists("C_TradeSkillUI.GetRecipeSchematic", C_TradeSkillUI, "GetRecipeSchematic")
+		exists("C_TradeSkillUI.GetAllRecipeIDs", C_TradeSkillUI, "GetAllRecipeIDs")
+		exists("C_ChatInfo.InChatMessagingLockdown", C_ChatInfo, "InChatMessagingLockdown")
+		exists("ChatFrameUtil.SendTell", ChatFrameUtil, "SendTell")
+		exists("ChatFrameUtil.OpenChat", ChatFrameUtil, "OpenChat")
+		exists("ChatFrameUtil.InsertLink", ChatFrameUtil, "InsertLink")
+		add("ChatFrame_SendTell: %s, ChatFrame_OpenChat: %s, ChatEdit_InsertLink: %s",
+			type(ChatFrame_SendTell), type(ChatFrame_OpenChat), type(ChatEdit_InsertLink))
+		add("TooltipDataProcessor: %s", type(TooltipDataProcessor))
+		add("AddonCompartmentFrame: %s", type(AddonCompartmentFrame))
+		add("Trial=%s Veteran=%s", IsTrialAccount and IsTrialAccount(), IsVeteranTrialAccount and IsVeteranTrialAccount())
+	end)
+
+	section("Own recipes", function()
+		local own = ownState()
+		if own and own.recipes then
+			for skillLine, list in pairs(own.recipes) do
+				local sample
+				for id, item in pairs(list) do sample = tostring(id) .. "->" .. tostring(item) break end
+				add("Own recipes %s: sample %s", skillLine, sample)
+			end
 		end
-	end
+	end)
 
 	for _, line in ipairs(lines) do DEFAULT_CHAT_FRAME:AddMessage("|cffaaaaaa" .. line .. "|r") end
-	ns.db.debug = { time = date and tostring(date) or "", at = GetServerTime(), lines = lines }
+	local okDate, now = pcall(date, "%Y-%m-%d %H:%M:%S")
+	ns.db.debug = { time = okDate and tostring(now) or "", at = GetServerTime(), lines = lines }
 	ns.Say("DEBUG_SAVED")
 end
 

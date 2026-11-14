@@ -135,9 +135,10 @@ function Sim:addClient(name, guild, profs, recipes)
 		random = sim.rng,
 		myGuid = function() return c.guid end,
 		ownVersion = function(guid) if guid == c.guid then return c.own.v end end,
-		onOwnConflict = function(_, seen)
+		onOwnConflict = function(_, seen, received)
 			c.conflicts = (c.conflicts or 0) + 1
-			if Store.BumpOwnVersion(c.own, seen, sim.t) then c.sync:PublishOwn(c.own.rec) end
+			local rec = Store.HealOwn(c.own, seen, received, sim.t)
+			if rec then c.sync:PublishOwn(rec) end
 		end,
 	}
 	c.sync = Sync.New(adapter, c.store, "test")
@@ -363,4 +364,78 @@ H.test("sim: a hello queued in a dungeon still goes out right after leaving", fu
 	sim:runUntil(70)
 	H.ok(b.sync.stats.recvH >= 1, "B received A's hello")
 	H.ok(b.store:Get(a.guid), "and A's record")
+end)
+
+H.test("sim: owner who lost SavedVariables keeps its recipes from the guild copy", function()
+	local sim = newSim(29)
+	local a = sim:addClient("A", "G", { [197] = { s = 250, m = 300 } }, { [197] = recipes(3000, 60) })
+	local b = sim:addClient("B", "G", {}, {})
+	sim:login(a); sim:login(b)
+	sim:runUntil(60)
+	H.eq(b.store:Get(a.guid).v, a.own.v, "B holds A")
+	sim:logout(a)
+	-- A loses SavedVariables and has not opened Tailoring again
+	a.own = {}; a.db = {}; a.store = Store.New(a.db); a.sync.store = a.store
+	a.recipes = {}
+	sim:at(100, function() sim:login(a) end)
+	sim:runUntil(200)
+	local rec = b.store:Get(a.guid)
+	H.eq(rec.v, a.own.v, "B has A's healed version")
+	H.ok(rec.p[197].k, "still marked scanned")
+	H.eq(rec.p[197].r[3001], 103001, "B still has A's recipes")
+	H.ok(a.own.scanned[197] and a.own.recipes[197][3060], "A took its recipes back")
+end)
+
+H.test("sim: owner blocked at login (dungeon) still heals and keeps its recipes", function()
+	local sim = newSim(31)
+	local a = sim:addClient("A", "G", { [197] = { s = 250, m = 300 } }, { [197] = recipes(4000, 30) })
+	local b = sim:addClient("B", "G", {}, {})
+	sim:login(a); sim:login(b)
+	sim:runUntil(60)
+	sim:logout(a)
+	a.own = {}; a.db = {}; a.store = Store.New(a.db); a.sync.store = a.store
+	a.recipes = {}
+	-- A comes back but cannot send (dungeon): its own D v1 stays queued, it only hears B's hello
+	a.canSend = false
+	sim:at(100, function() sim:login(a) end)
+	sim:at(110, function() b.sync.lastHello = -1e9; b.sync:Hello(true) end)
+	sim:at(115, function() a.canSend = true; a.sync:Flush() end)
+	sim:runUntil(200)
+	local rec = b.store:Get(a.guid)
+	H.eq(rec.v, a.own.v)
+	H.eq(rec.p[197].r[4001], 104001, "recipes survived")
+end)
+
+H.test("sim: a hello with an impossible version of our record cannot break the owner", function()
+	for _, bad in ipairs({ 5.5, 1e300, Store.LIMITS.maxVersion + 1 }) do
+		local sim = newSim(21)
+		local a = sim:addClient("A", "G", { [197] = { s = 1, m = 75 } }, {})
+		local b = sim:addClient("B", "G", {}, {})
+		sim:login(a); sim:login(b)
+		sim:runUntil(60)
+		a.sync:OnMessage({ t = "H", pv = Sync.PROTOCOL, s = "Player-1-Evil", d = { [a.guid] = bad } })
+		sim:runUntil(120)
+		H.eq(a.conflicts, nil, "no self-heal for version " .. tostring(bad))
+		H.eq(a.own.v, 1, "own version untouched")
+		a.profs[197].s = 2; sim:refresh(a)
+		sim:runUntil(180)
+		H.eq(b.store:Get(a.guid).p[197].s, 2, "owner still publishes")
+	end
+end)
+
+H.test("sim: a forged copy with the maximum version does not start an endless exchange", function()
+	local max = Store.LIMITS.maxVersion
+	local sim = newSim(22)
+	local a = sim:addClient("A", "G", { [197] = { s = 1, m = 75 } }, {})
+	local b = sim:addClient("B", "G", {}, {})
+	sim:login(a); sim:login(b)
+	sim:runUntil(60)
+	local forged = { t = "D", pv = Sync.PROTOCOL, s = "Player-1-Evil",
+		r = { g = a.guid, v = max, n = "A", p = { [171] = { s = 300, m = 300, k = true, r = { [1] = 2 } } } } }
+	a.sync:OnMessage(forged); b.sync:OnMessage(forged)
+	sim:runUntil(200)
+	local before = sim.messages.D
+	sim:runUntil(2000)
+	H.ok(sim.messages.D - before <= 2, "no D ping-pong: " .. (sim.messages.D - before))
+	H.eq(a.own.v, max); H.ok(Store.Validate(a.own.rec), "owner record stays valid")
 end)

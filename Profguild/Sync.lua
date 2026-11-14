@@ -15,7 +15,8 @@
 --   random() -> [0,1)
 --   myGuid() -> guid of the logged-in character
 --   ownVersion(guid) -> number|nil   version of OUR current character's record
---   onOwnConflict(guid, seenVersion) someone holds our record with a version >= ours
+--   onOwnConflict(guid, seenVersion, received) someone holds our record with a version >= ours;
+--                             received is that copy (validated) or nil when only a hello showed it
 --   onChanged()               (optional) store content changed
 --   log(fmt, ...)             (optional) debug output
 
@@ -34,6 +35,7 @@ Sync.REQUEST_DELAY = { 1.0, 3.0 }
 Sync.MAX_GUIDS_PER_REQUEST = 60
 Sync.MAX_DIGEST = 5000
 Sync.PEER_TTL = 3600
+Sync.HEAL_WAIT = 20               -- seconds to wait for a copy of our own record before republishing
 
 local SyncMT = {}
 SyncMT.__index = SyncMT
@@ -210,13 +212,20 @@ end
 -- Receiving
 ---------------------------------------------------------------------------
 
+-- Keeps only versions a valid record can carry (whole numbers up to the store's maximum):
+-- anything else could never be fetched, and as a version of our own record it would push
+-- our version out of the valid range.
 local function validDigest(d)
 	if type(d) ~= "table" then return nil end
+	local maxVersion = ns.Store.LIMITS.maxVersion
 	local out, n = {}, 0
 	for guid, v in pairs(d) do
 		n = n + 1
 		if n > Sync.MAX_DIGEST then break end
-		if type(guid) == "string" and #guid <= 64 and type(v) == "number" and v >= 1 then out[guid] = v end
+		if type(guid) == "string" and #guid <= 64 and type(v) == "number"
+			and v >= 1 and v <= maxVersion and v == math.floor(v) then
+			out[guid] = v
+		end
 	end
 	return out
 end
@@ -259,7 +268,7 @@ function SyncMT:_OnHello(msg, me)
 	if not d then return end
 	local ownV = self.a.ownVersion(me)
 	if ownV and d[me] and d[me] > ownV then
-		self.a.onOwnConflict(me, d[me])
+		self:_OwnNewerSeen(me, d[me])
 	end
 	local mine, theirs = self.store:Compare(d)
 	for _, guid in ipairs(mine) do
@@ -270,6 +279,23 @@ function SyncMT:_OnHello(msg, me)
 		if guid ~= me then need[#need + 1] = guid end
 	end
 	if #need > 0 then self:ScheduleRequest(need, d) end
+end
+
+-- A hello shows that someone holds our record with a higher version than ours. Ask for the
+-- record itself first, so the owner can take over recipes it lost; republish without the copy
+-- only when nobody answers within HEAL_WAIT seconds.
+function SyncMT:_OwnNewerSeen(me, version)
+	if self.healWait and self.healWait >= version then return end
+	self.healWait = version
+	self:ScheduleRequest({ me }, { [me] = version })
+	self.a.after(Sync.HEAL_WAIT, function()
+		if self.healWait ~= version then return end
+		self.healWait = nil
+		if self.wanted[me] ~= nil and self.wanted[me] <= version then self.wanted[me] = nil end
+		-- nobody answered: republish above it without the copy
+		local ownV = self.a.ownVersion(me) or 0
+		if version > ownV then self.a.onOwnConflict(me, version, nil) end
+	end)
 end
 
 function SyncMT:_OnRequest(msg, me)
@@ -301,12 +327,19 @@ function SyncMT:_OnData(msg, me)
 	if guid == me then
 		-- Only we write our record. A copy with a higher version, or a different copy with
 		-- the same version, means we lost our saved version: jump above it and republish.
+		-- The copy goes along, so the owner can keep recipes it has not scanned again.
+		local w = self.wanted[me]
+		if w ~= nil and rec.v >= w then self.wanted[me] = nil end
+		if self.healWait and rec.v >= self.healWait then self.healWait = nil end
+		local clean = ns.Store.Validate(rec)
+		if not clean then return end
 		local ownV = self.a.ownVersion(me) or 0
 		local cur = self.store:Get(me)
-		local clean = ns.Store.Validate(rec)
-		local differs = not (cur and clean and ns.Store.DeepEqual(cur.p, clean.p))
-		if rec.v > ownV or (rec.v == ownV and differs) then
-			self.a.onOwnConflict(me, rec.v)
+		local differs = not (cur and ns.Store.DeepEqual(cur.p, clean.p))
+		-- At the maximum version we cannot jump above a different copy any more: answering
+		-- it would only repeat the same exchange forever, so it is left alone.
+		if clean.v > ownV or (clean.v == ownV and differs and ownV < ns.Store.LIMITS.maxVersion) then
+			self.a.onOwnConflict(me, clean.v, clean)
 		end
 		return
 	end
@@ -320,6 +353,16 @@ function SyncMT:_OnData(msg, me)
 	elseif status == "same" then
 		local w = self.wanted[guid]
 		if w ~= nil and rec.v >= w then self.wanted[guid] = nil end
+		-- The owner announces a version we hold with other content: it lost its saved version
+		-- and counts again from an old number. Send our copy back so it can heal (suppressed
+		-- when someone else does it first). Only the owner's own announcement triggers this.
+		if msg.s == guid then
+			local cur, clean = self.store:Get(guid), ns.Store.Validate(rec)
+			if cur and clean and not ns.Store.DeepEqual(cur.p, clean.p) then
+				self.stats.collisions = (self.stats.collisions or 0) + 1
+				self:ScheduleData(guid, false)
+			end
+		end
 	elseif status == "older" then
 		-- We hold something newer: correct the guild (suppressed if others do it first).
 		self:ScheduleData(guid, false)
