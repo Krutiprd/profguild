@@ -310,3 +310,37 @@ H.test("SetRoster does not rebuild the recipe index", function()
 	store:Apply({ g = "A", v = 2, n = "Ana", p = {} })
 	H.ok(store:Index() ~= index, "a record change rebuilds it")
 end)
+
+H.test("MergeGuildData keeps the newer record of every character", function()
+	local target = { records = { A = { g = "A", v = 5, n = "Ana", p = {} }, B = { g = "B", v = 1, n = "Bob", p = {} } },
+		names = { A = "Ana Brightwood" } }
+	local source = { records = {
+		A = { g = "A", v = 3, n = "Old Ana", p = {} },
+		B = { g = "B", v = 4, n = "Bob", p = { [197] = { s = 1, m = 75, r = { [1] = 2 } } } },
+		C = { g = "C", v = 2, n = "Cid", p = {} },
+		D = { g = "Other", v = 2, n = "Wrong key", p = {} },
+		E = "junk",
+	}, names = { A = "ignored", C = "Cid Highwind" } }
+	H.eq(Store.MergeGuildData(target, source), 2, "B and C taken")
+	H.eq(target.records.A.v, 5, "newer A kept")
+	H.eq(target.records.B.v, 4); H.ok(target.records.B.p[197], "newer B taken")
+	H.ok(target.records.C, "C added")
+	H.eq(target.records.D, nil, "record under a wrong key skipped")
+	H.eq(target.names.A, "Ana Brightwood"); H.eq(target.names.C, "Cid Highwind")
+	H.eq(Store.MergeGuildData({}, nil), 0)
+end)
+
+H.test("VersionNewer compares three numbers and ignores what is no version", function()
+	H.ok(Store.VersionNewer("0.1.14", "0.1.13"))
+	H.ok(Store.VersionNewer("0.2.0", "0.1.99"))
+	H.ok(Store.VersionNewer("1.0.0", "0.9.9"))
+	H.ok(Store.VersionNewer("0.1.10", "0.1.9"), "numbers, not text")
+	H.ok(Store.VersionNewer("0.1.14-beta", "0.1.13"), "suffix ignored")
+	H.ok(not Store.VersionNewer("0.1.13", "0.1.13"))
+	H.ok(not Store.VersionNewer("0.1.12", "0.1.13"))
+	H.ok(not Store.VersionNewer("9.9.9", "dev"), "development copy is never told to update")
+	H.ok(not Store.VersionNewer("|cffff0000hack|r", "0.1.13"))
+	H.ok(not Store.VersionNewer("99999.0.0", "0.1.13"), "absurd numbers")
+	H.ok(not Store.VersionNewer(nil, "0.1.13"))
+	H.ok(not Store.VersionNewer(5, "0.1.13"))
+end)

@@ -10,6 +10,9 @@ ns.Config = {
 	helloInterval = 900,     -- periodic sync check, seconds
 	rosterInterval = 300,    -- roster refresh, seconds
 	skillDebounce = 60,      -- skill-ups are merged into one update
+	syncMinWait = 8,         -- a manual sync reports its result no sooner than this, seconds
+	syncQuiet = 5,           -- ... and only after this long without new data
+	syncMaxWait = 60,        -- ... and at the latest after this long
 	changeDebounce = 3,      -- recipe scans and learned recipes
 	loginHelloDelay = { 15, 25 },
 	schema = 1,
@@ -243,6 +246,22 @@ function ns.OnDataChanged()
 	end)
 end
 
+-- A guildmate runs a newer version: say so once per session, a few seconds after the first
+-- such hello, with the highest version seen by then. The window and /pg status show it too.
+local updateNoticePlanned = false
+local function onPeerVersion(av)
+	if not Store.VersionNewer(av, ns.version) then return end
+	if not ns.newerVersion or Store.VersionNewer(av, ns.newerVersion) then
+		ns.newerVersion = av
+		ns.OnDataChanged()
+	end
+	if updateNoticePlanned then return end
+	updateNoticePlanned = true
+	C_Timer.After(5, function()
+		ns.Say("UPDATE_AVAILABLE", ns.newerVersion, tostring(ns.version))
+	end)
+end
+
 local adapter = {
 	send = function(msg) Comm.Send(msg) end,
 	canSend = function() return ns.SendBlockReason() == nil end,
@@ -255,6 +274,8 @@ local adapter = {
 		if guid == UnitGUID("player") and own then return own.v end
 	end,
 	onOwnConflict = onOwnConflict,
+	onPeerVersion = onPeerVersion,
+	onNewerProtocol = function() ns.Say("NEWER_VERSION") end,
 	-- The game names the real sender of an addon message. When the roster row with this guid
 	-- carries that name, the message comes from the owner of the record. Rows matched only by
 	-- name (a roster without GUIDs) prove nothing and do not count.
@@ -263,7 +284,13 @@ local adapter = {
 		return entry ~= nil and type(entry.name) == "string" and type(senderName) == "string"
 			and ns.NormalizeName(entry.name) == ns.NormalizeName(senderName)
 	end,
-	onChanged = function() ns.OnDataChanged() end,
+	onChanged = function(guid)
+		if ns.syncReport and guid then
+			ns.syncReport.changed[guid] = true
+			ns.syncReport.last = GetTime()
+		end
+		ns.OnDataChanged()
+	end,
 	log = function(...) ns.Debug(...) end,
 }
 
@@ -279,7 +306,7 @@ local reagentAdapter = {
 
 -- (Re)creates the store and sync for the current guild. Called on login and guild changes.
 function ns.SetupGuild()
-	local key, guildName = Scanner.GuildKey()
+	local key, guildName, realm = Scanner.GuildKey()
 	if key == ns.guildKey then return end
 	ns.guildKey, ns.guildName = key, guildName
 	if not key then
@@ -288,6 +315,16 @@ function ns.SetupGuild()
 		return
 	end
 	ns.db.guilds[key] = ns.db.guilds[key] or {}
+	-- older versions saved the guild under "name@realm"; join those databases into this one
+	local prefix = key .. "@"
+	for oldKey, data in pairs(ns.db.guilds) do
+		if type(oldKey) == "string" and oldKey ~= key and oldKey:sub(1, #prefix) == prefix then
+			local taken = Store.MergeGuildData(ns.db.guilds[key], data)
+			ns.db.guilds[oldKey] = nil
+			ns.Log("guild data saved as \"%s\" joined: %d records", oldKey, taken)
+		end
+	end
+	ns.Log("guild %s, realm reported now: %s", key, tostring(realm))
 	ns.guildDB = ns.db.guilds[key]
 	ns.guildDB.names = ns.guildDB.names or {}
 	ns.store = Store.New(ns.guildDB)
@@ -458,6 +495,7 @@ function ns.Status()
 	end
 	ns.Say("STATUS_PRICES", ns.Prices and ns.Prices.Source() or ns.T("NO_PRICES"))
 	if ns.sync.newerProtocolSeen then ns.Say("NEWER_VERSION") end
+	if ns.newerVersion then ns.Say("UPDATE_AVAILABLE", ns.newerVersion, tostring(ns.version)) end
 	if ns.lastError then ns.Print("Last error: %s", ns.lastError) end
 end
 
@@ -544,7 +582,8 @@ function ns.DebugDump(silent)
 	end)
 
 	section("Guild", function()
-		add("IsInGuild=%s GuildKey=%s", IsInGuild(), Scanner.GuildKey())
+		local guildKey, _, guildRealm = Scanner.GuildKey()
+		add("IsInGuild=%s GuildKey=%s realm reported now=%s", IsInGuild(), tostring(guildKey), tostring(guildRealm))
 		if IsInGuild() and GetNumGuildMembers then
 			local total, online = GetNumGuildMembers()
 			add("GetNumGuildMembers -> %s total, %s online", total, online)
@@ -650,6 +689,77 @@ function ns.DebugDump(silent)
 end
 
 ---------------------------------------------------------------------------
+-- Manual sync with a result message
+---------------------------------------------------------------------------
+
+local function recipeCount(rec)
+	local n = 0
+	for _, prof in pairs(rec and rec.p or {}) do
+		for _ in pairs(prof.r or {}) do n = n + 1 end
+	end
+	return n
+end
+
+-- Says what the sync brought: every character whose record is new or changed, with the
+-- number of recipes that were added.
+local function reportSync(report)
+	local items, me = {}, UnitGUID("player")
+	for guid in pairs(report.changed) do
+		local rec = ns.store and ns.store:Get(guid)
+		if rec and guid ~= me then
+			local name, now, before = ns.DisplayName(guid, rec), recipeCount(rec), report.before[guid]
+			if before == nil then
+				items[#items + 1] = ns.T("SYNC_ITEM_NEW", name, now)
+			elseif now > before then
+				items[#items + 1] = ns.T("SYNC_ITEM_MORE", name, now - before)
+			else
+				items[#items + 1] = ns.T("SYNC_ITEM_CHANGED", name)
+			end
+		end
+	end
+	if #items == 0 then return ns.Say("SYNC_DONE_NONE") end
+	table.sort(items)
+	local shown = {}
+	for i = 1, math.min(6, #items) do shown[i] = items[i] end
+	local text = table.concat(shown, ", ")
+	if #items > 6 then text = text .. " " .. ns.T("SYNC_MORE", #items - 6) end
+	ns.Say("SYNC_DONE", #items, text)
+end
+
+-- /pg sync and the Sync button: asks the guild for updates, then reports what arrived.
+-- The protocol has no "finished" message, so the sync counts as finished when nothing new
+-- arrived for a while and no requested record is outstanding.
+function ns.SyncNow()
+	if not ns.sync then return ns.Say("NO_GUILD") end
+	if ns.syncReport then return ns.Say("SYNC_RUNNING") end
+	Scanner.RequestRoster()
+	ns.RefreshOwn()
+	local reason = ns.SendBlockReason()
+	if not ns.sync:Hello(true) then return ns.Say("SYNC_TOO_SOON") end
+	if reason then return ns.Say("SYNC_BLOCKED", ns.T(reason)) end
+	ns.Say("SYNC_STARTED")
+	local before = {}
+	for guid, rec in pairs(ns.store:All()) do before[guid] = recipeCount(rec) end
+	local started = GetTime()
+	local report = { started = started, last = started, before = before, changed = {}, sync = ns.sync }
+	ns.syncReport = report
+	local cfg = ns.Config
+	local function check()
+		if ns.syncReport ~= report then return end
+		local now = GetTime()
+		local waiting = ns.sync == report.sync and next(ns.sync.wanted) ~= nil
+		local quiet = now - report.last >= cfg.syncQuiet and not waiting
+		if ns.sync ~= report.sync or now - started >= cfg.syncMaxWait or (now - started >= cfg.syncMinWait and quiet) then
+			ns.syncReport = nil
+			reportSync(report)
+		else
+			C_Timer.After(1, check)
+		end
+	end
+	C_Timer.After(1, check)
+end
+
+---------------------------------------------------------------------------
 -- Slash commands
 ---------------------------------------------------------------------------
 
@@ -659,15 +769,7 @@ local function slash(input)
 	if cmd == "" then
 		if ns.UI then ns.UI:Toggle() end
 	elseif cmd == "sync" then
-		if not ns.sync then return ns.Say("NO_GUILD") end
-		Scanner.RequestRoster()
-		ns.RefreshOwn()
-		local reason = ns.SendBlockReason()
-		if ns.sync:Hello(true) then
-			if reason then ns.Say("SYNC_BLOCKED", ns.T(reason)) else ns.Say("SYNC_STARTED") end
-		else
-			ns.Say("SYNC_TOO_SOON")
-		end
+		ns.SyncNow()
 	elseif cmd == "status" then
 		ns.Status()
 	elseif cmd == "debug" then

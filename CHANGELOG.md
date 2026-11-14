@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.15 – 2026-11-14
+
+- Player filter in the Recipes view: the "PLAYER: ALL" button opens a menu of everyone who has
+  recipes (online first, with the recipe count); choosing a player lists only that player's
+  recipes, "All players" clears the filter. It replaces the filter chip.
+
+## 0.1.14 – 2026-11-14
+
+- Notice when a guildmate runs a newer version: once per session in chat, in the window footer
+  and in `/pg status`. A newer protocol version is announced in chat once as well.
+
+## 0.1.13 – 2026-11-14
+
+- The Sync button is labelled "SYNC". A manual sync (button or `/pg sync`) says that it started
+  and, when no more data arrives, what it brought: every character with a new or changed record
+  and the number of added recipes, or that nothing is new.
+
+## 0.1.12 – 2026-11-14
+
+- Fix: the guild's data was saved under "guild name@realm", and on Forever the realm name a
+  character reports changes between logins. Every new name started an empty database, so only
+  the professions opened in that session were listed. The data is now saved under the guild
+  name, and databases saved under the old keys are joined (newest record of each character).
+
 ## 0.1.11 – 2026-11-14
 
 Fixes from a code review.

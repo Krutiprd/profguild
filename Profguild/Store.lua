@@ -135,6 +135,49 @@ local function deepCopy(t)
 end
 Store.DeepCopy = deepCopy
 
+-- "1.2.3" (anything after the three numbers is ignored) -> 1, 2, 3; nil when it is no version.
+local function parseVersion(v)
+	if type(v) ~= "string" or #v > 24 then return nil end
+	local a, b, c = v:match("^(%d+)%.(%d+)%.(%d+)")
+	if not a or #a > 4 or #b > 4 or #c > 4 then return nil end
+	return tonumber(a), tonumber(b), tonumber(c)
+end
+
+-- True when addon version a is newer than b. False when either is not a version, so a
+-- development copy and junk sent by a guildmate never count as "newer".
+function Store.VersionNewer(a, b)
+	local a1, a2, a3 = parseVersion(a)
+	local b1, b2, b3 = parseVersion(b)
+	if not a1 or not b1 then return false end
+	if a1 ~= b1 then return a1 > b1 end
+	if a2 ~= b2 then return a2 > b2 end
+	return a3 > b3
+end
+
+-- Merges the saved data of one guild (source) into another table of the same guild (target):
+-- for every character the record with the higher version is kept. Used to join databases
+-- that older versions saved under "name@realm" keys. Returns the number of records taken.
+function Store.MergeGuildData(target, source)
+	if type(target) ~= "table" or type(source) ~= "table" then return 0 end
+	target.records = target.records or {}
+	local taken = 0
+	for guid, rec in pairs(type(source.records) == "table" and source.records or {}) do
+		local clean = Store.Validate(rec)
+		local cur = target.records[guid]
+		if clean and clean.g == guid and (not cur or clean.v > (cur.v or 0)) then
+			target.records[guid] = clean
+			taken = taken + 1
+		end
+	end
+	if type(source.names) == "table" then
+		target.names = target.names or {}
+		for guid, name in pairs(source.names) do
+			if target.names[guid] == nil then target.names[guid] = name end
+		end
+	end
+	return taken
+end
+
 ---------------------------------------------------------------------------
 -- Guild store object
 ---------------------------------------------------------------------------

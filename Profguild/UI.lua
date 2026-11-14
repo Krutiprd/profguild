@@ -25,6 +25,7 @@ local LIST_ROWS, ROW_H, ROW_STEP = 8, 36, 38
 local DETAIL_ROWS, DETAIL_STEP = 10, 24  -- member professions
 local CRAFTER_ROWS, CRAFTER_STEP, CRAFTER_TOP = 4, 22, -334
 local REAGENT_ROWS, REAGENT_STEP, REAGENT_TOP = 6, 22, -128
+local MENU_ROWS, MENU_STEP, MENU_W = 12, 20, 190
 
 local WHITE8 = "Interface\\Buttons\\WHITE8X8"
 local QUESTION = "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -69,6 +70,7 @@ UI.memberFilter = nil   -- guid whose recipes are shown
 UI.category = nil       -- skill line shown, nil = all professions
 UI.selected = nil       -- data of the selected list row
 UI.offset = 0           -- first visible list row - 1
+UI.menuOffset = 0       -- first visible row of the player menu - 1
 UI.detailOffset = 0
 
 ---------------------------------------------------------------------------
@@ -653,13 +655,56 @@ function UI:Create()
 		UI.offset = 0
 		UI:Refresh()
 	end)
-	self.filterChip = pill(mid, 170, 20)
-	self.filterChip:SetPoint("TOPRIGHT", -12, -66)
-	self.filterChip:SetScript("OnClick", function()
-		UI.memberFilter = nil
-		UI.offset = 0
-		UI:Refresh()
+	-- player filter: a button that opens a menu of everyone who has recipes
+	self.playerButton = pill(mid, 170, 20)
+	self.playerButton:SetPoint("TOPRIGHT", -12, -66)
+	self.playerButton:SetScript("OnClick", function()
+		if UI.playerMenu:IsShown() then
+			UI.playerMenu:Hide()
+		else
+			UI.menuOffset = 0
+			UI.playerMenu:Show()
+			UI:DrawPlayerMenu()
+		end
 	end)
+	local menu = panel(mid, C.bg, C.border)
+	menu:SetFrameLevel((mid:GetFrameLevel() or 1) + 30)
+	menu:SetSize(MENU_W, MENU_ROWS * MENU_STEP + 8)
+	menu:SetPoint("TOPRIGHT", self.playerButton, "BOTTOMRIGHT", 0, -2)
+	menu:EnableMouse(true)
+	menu:EnableMouseWheel(true)
+	menu:SetScript("OnMouseWheel", function(_, delta) UI:ScrollPlayerMenu(delta) end)
+	menu:Hide()
+	menu.rows = {}
+	for i = 1, MENU_ROWS do
+		local row = CreateFrame("Button", nil, menu)
+		row:SetSize(MENU_W - 10, MENU_STEP - 1)
+		row:SetPoint("TOPLEFT", 5, -4 - (i - 1) * MENU_STEP)
+		row.bg = row:CreateTexture(nil, "BACKGROUND")
+		row.bg:SetAllPoints()
+		row.bg:SetColorTexture(unpack(C.clear))
+		row.left = label(row, "GameFontHighlightSmall", C.text)
+		row.left:SetPoint("LEFT", 6, 0)
+		row.left:SetWidth(MENU_W - 60)
+		row.right = label(row, "GameFontHighlightSmall", C.muted)
+		row.right:SetPoint("RIGHT", -6, 0)
+		row.right:SetJustifyH("RIGHT")
+		row:EnableMouseWheel(true)
+		row:SetScript("OnMouseWheel", function(_, delta) UI:ScrollPlayerMenu(delta) end)
+		row:SetScript("OnEnter", function(self) self.bg:SetColorTexture(unpack(C.hover)) end)
+		row:SetScript("OnLeave", function(self) self.bg:SetColorTexture(unpack(self.active and C.selected or C.clear)) end)
+		row:SetScript("OnClick", function(self)
+			local d = self.data
+			if not d then return end
+			UI.memberFilter, UI.memberFilterName = d.guid, d.guid and d.name or nil
+			UI.selected = nil
+			UI.offset = 0
+			menu:Hide()
+			UI:Refresh()
+		end)
+		menu.rows[i] = row
+	end
+	self.playerMenu = menu
 	hline(mid, 10, -92, LIST_W - 20)
 
 	local list = CreateFrame("Frame", nil, mid)
@@ -834,14 +879,17 @@ function UI:Create()
 	self.syncButton = pill(foot, 120, 22)
 	self.syncButton:SetPoint("RIGHT", -4, 0)
 	self.syncButton:SetScript("OnClick", function()
-		if SlashCmdList and SlashCmdList.PROFGUILD then SlashCmdList.PROFGUILD("sync") end
+		ns.SyncNow()
 	end)
 
 	local saved = ns.db.settings.category
 	self.category = type(saved) == "number" and saved or nil
 
 	f:SetScript("OnShow", function() UI:Refresh() end)
-	f:SetScript("OnHide", function() search:ClearFocus() end)
+	f:SetScript("OnHide", function()
+		search:ClearFocus()
+		menu:Hide()
+	end)
 	local events = CreateFrame("Frame", nil, f)
 	events:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 	events:SetScript("OnEvent", function()
@@ -861,6 +909,7 @@ end
 
 function UI:SetView(view)
 	if view == "members" then self.memberFilter = nil end
+	if self.playerMenu then self.playerMenu:Hide() end
 	self.view = view
 	self.selected = nil
 	self.offset = 0
@@ -878,6 +927,60 @@ end
 function UI:Scroll(delta)
 	self.offset = (self.offset or 0) - (delta or 0) * 2
 	self:Refresh()
+end
+
+function UI:ScrollPlayerMenu(delta)
+	self.menuOffset = (self.menuOffset or 0) - (delta or 0) * 3
+	self:DrawPlayerMenu()
+end
+
+-- Everyone who has at least one recipe (not stale, online filter), online first.
+function UI:PlayerEntries()
+	local list = {}
+	local store = ns.store
+	if not store then return list end
+	local onlineOnly = ns.db.settings.onlineOnly
+	local now, staleDays = GetServerTime(), ns.StaleDays()
+	for guid, rec in pairs(store:All()) do
+		local online = store:IsOnline(guid)
+		if not store:IsStale(guid, staleDays, now) and (online or not onlineOnly) then
+			local n = 0
+			for _, prof in pairs(rec.p) do
+				for _ in pairs(prof.r) do n = n + 1 end
+			end
+			if n > 0 then
+				list[#list + 1] = { guid = guid, name = ns.DisplayName(guid, rec), online = online, class = rec.c, recipes = n }
+			end
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.online ~= b.online then return a.online end
+		return a.name < b.name
+	end)
+	return list
+end
+
+function UI:DrawPlayerMenu()
+	local menu = self.playerMenu
+	if not menu or not menu:IsShown() then return end
+	local entries = self:PlayerEntries()
+	table.insert(entries, 1, { name = ns.T("PLAYER_MENU_ALL") }) -- no guid: clears the filter
+	local maxOffset = math.max(0, #entries - MENU_ROWS)
+	self.menuOffset = math.max(0, math.min(maxOffset, math.floor(self.menuOffset or 0)))
+	for i = 1, MENU_ROWS do
+		local row, e = menu.rows[i], entries[self.menuOffset + i]
+		row.data = e
+		if e then
+			row.active = e.guid == self.memberFilter
+			row.left:SetText(e.guid and ((e.online and HEX_ONLINE or HEX_OFFLINE) .. "•|r " .. classColored(e.name, e.class)) or (HEX_GOLD .. e.name .. "|r"))
+			row.right:SetText(e.recipes and tostring(e.recipes) or "")
+			row.bg:SetColorTexture(unpack(row.active and C.selected or C.clear))
+			row:Show()
+		else
+			row:Hide()
+		end
+	end
+	menu:SetHeight(math.min(#entries, MENU_ROWS) * MENU_STEP + 8)
 end
 
 function UI:ScrollReagents(delta)
@@ -1195,11 +1298,20 @@ function UI:Draw()
 
 	self.listTitle:SetText(ns.T(members and "HEAD_MEMBERS" or "HEAD_RECIPES"))
 	self.listCount:SetText(ns.T(members and "COUNT_MEMBERS" or "MEMBER_RECIPES", #data))
-	if self.memberFilter and not members then
-		setPill(self.filterChip, ns.T("CHIP_MEMBER", self.memberFilterName or "?"), true)
-		self.filterChip:Show()
+	if members then
+		self.playerButton:Hide()
+		self.playerMenu:Hide()
 	else
-		self.filterChip:Hide()
+		-- a filtered player who left the guild (or was pruned) is not a filter any more
+		if self.memberFilter and not (ns.store and ns.store:Get(self.memberFilter)) then
+			self.memberFilter, self.memberFilterName = nil, nil
+			self.listCache = nil
+			return self:Draw()
+		end
+		setPill(self.playerButton, self.memberFilter and ns.T("PLAYER_ONE", self.memberFilterName or "?") or ns.T("PLAYER_ALL"),
+			self.memberFilter ~= nil)
+		self.playerButton:Show()
+		self:DrawPlayerMenu()
 	end
 	self:DrawList(data)
 
@@ -1224,5 +1336,7 @@ function UI:Draw()
 		for _ in pairs(ns.store:Index().recipes) do recipes = recipes + 1 end
 		peers = ns.sync and ns.sync:ActivePeers(1200) or 0
 	end
-	self.status:SetText(ns.T("STATUSBAR", characters, recipes, peers))
+	local statusText = ns.T("STATUSBAR", characters, recipes, peers)
+	if ns.newerVersion then statusText = statusText .. "   " .. HEX_GOLD .. ns.T("UPDATE_SHORT", ns.newerVersion) .. "|r" end
+	self.status:SetText(statusText)
 end

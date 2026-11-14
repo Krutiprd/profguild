@@ -20,6 +20,8 @@
 --                             received is that copy (validated) or nil when only a hello showed it
 --   isOwner(guid, senderName) -> bool (optional) the roster confirms that the character the
 --                             game names as the sender of a message is the character guid
+--   onPeerVersion(av)         (optional) a guildmate's hello carried this addon version
+--   onNewerProtocol()         (optional) first message of a newer protocol version was seen
 --   onChanged()               (optional) store content changed
 --   log(fmt, ...)             (optional) debug output
 
@@ -293,7 +295,10 @@ function SyncMT:OnMessage(msg, senderName)
 		return
 	end
 	if msg.pv ~= Sync.PROTOCOL then
-		if type(msg.pv) == "number" and msg.pv > Sync.PROTOCOL then self.newerProtocolSeen = true end
+		if type(msg.pv) == "number" and msg.pv > Sync.PROTOCOL then
+			if not self.newerProtocolSeen and self.a.onNewerProtocol then self.a.onNewerProtocol() end
+			self.newerProtocolSeen = true
+		end
 		self.stats.dropped = self.stats.dropped + 1
 		return
 	end
@@ -302,7 +307,10 @@ function SyncMT:OnMessage(msg, senderName)
 	if type(msg.s) == "string" then
 		local peer = self.peers[msg.s] or {}
 		peer.seen = self.a.now()
-		if msg.av then peer.av = tostring(msg.av) end
+		if msg.av then
+			peer.av = tostring(msg.av)
+			if self.a.onPeerVersion then self.a.onPeerVersion(peer.av) end
+		end
 		self.peers[msg.s] = peer
 	end
 

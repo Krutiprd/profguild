@@ -322,11 +322,111 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(UI.memberFilter, "Player-1-00000002", "filtered to that member")
 	H.eq(UI.category, 171, "and that profession")
 	H.eq(#visible(UI.rows), 2, "Ana's two alchemy recipes")
-	H.ok(UI.filterChip:IsShown(), "member filter chip shown")
-	UI.filterChip._scripts.OnClick(UI.filterChip)
-	H.eq(UI.memberFilter, nil, "chip clears the member filter")
+	H.ok(UI.playerButton.text:GetText():find("Ana Brightwood", 1, true), "player button names the filtered player")
+
+	-- player filter menu: everyone with recipes, online first; "All players" clears the filter
+	H.ok(not UI.playerMenu:IsShown(), "menu closed")
+	UI.playerButton._scripts.OnClick(UI.playerButton)
+	H.ok(UI.playerMenu:IsShown(), "menu opens")
+	local players = visible(UI.playerMenu.rows)
+	H.eq(#players, 3, "All players + Frost + Ana")
+	H.eq(players[1].guid, nil, "first row clears the filter")
+	H.eq(players[2].guid, "Player-1-00000001", "online player first")
+	H.eq(players[3].guid, "Player-1-00000002")
+	H.eq(players[3].recipes, 2, "recipe count")
+	UI.playerMenu.rows[1]._scripts.OnClick(UI.playerMenu.rows[1])
+	H.eq(UI.memberFilter, nil, "filter cleared")
+	H.ok(not UI.playerMenu:IsShown(), "menu closes after a choice")
+	H.eq(UI.playerButton.text:GetText(), ns.T("PLAYER_ALL"))
+	-- choosing a player lists only that player's recipes
+	UI:SetCategory(nil)
+	UI.playerButton._scripts.OnClick(UI.playerButton)
+	UI.playerMenu.rows[2]._scripts.OnEnter(UI.playerMenu.rows[2])
+	UI.playerMenu.rows[2]._scripts.OnLeave(UI.playerMenu.rows[2])
+	UI.playerMenu.rows[2]._scripts.OnClick(UI.playerMenu.rows[2])
+	H.eq(UI.memberFilter, "Player-1-00000001", "filtered to Frost")
+	local frostRows = visible(UI.rows)
+	H.eq(#frostRows, 3, "Frost's three recipes")
+	for _, d in ipairs(frostRows) do H.eq(d.crafters[1].guid, "Player-1-00000001") end
+	-- the menu scrolls and closes with the window; the button is hidden in the Members view
+	UI.playerButton._scripts.OnClick(UI.playerButton)
+	UI.playerMenu._scripts.OnMouseWheel(UI.playerMenu, -1)
+	UI.membersTab._scripts.OnClick(UI.membersTab)
+	H.ok(not UI.playerMenu:IsShown() and not UI.playerButton:IsShown(), "no player filter in the Members view")
+	H.eq(UI.memberFilter, nil, "Members view drops the filter")
+	UI.recipesTab._scripts.OnClick(UI.recipesTab)
+	H.ok(UI.playerButton:IsShown())
+	UI:SetCategory(171)
 	UI.recipesTab._scripts.OnClick(UI.recipesTab)
 	UI:SetCategory(nil)
+
+	-- a guildmate with a newer version: one notice per session, shown in the window too
+	local noticeAt = #M.chat
+	local function helloFrom(av, pv)
+		ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "H", pv = pv or 1, s = "Player-1-00000002", av = av, d = {} }), "GUILD", "Ana Brightwood")
+	end
+	helloFrom("0.1.0-test") -- same version as ours in the test
+	helloFrom("0.0.9")
+	helloFrom("|cffff0000junk|r")
+	M.advance(8)
+	H.eq(ns.newerVersion, nil, "same, older and junk versions say nothing")
+	helloFrom("0.2.0")
+	helloFrom("0.3.1")
+	helloFrom("0.2.5")
+	M.advance(8)
+	helloFrom("0.3.1")
+	M.advance(8)
+	local notices = 0
+	for i = noticeAt + 1, #M.chat do
+		if M.chat[i]:find(ns.T("UPDATE_AVAILABLE", "0.3.1", "0.1.0-test"), 1, true) then notices = notices + 1 end
+	end
+	H.eq(notices, 1, "one notice with the highest version seen")
+	UI:Refresh()
+	H.ok(UI.status:GetText():find(ns.T("UPDATE_SHORT", "0.3.1"), 1, true), "window footer shows it")
+	-- a newer protocol is announced once as well
+	noticeAt = #M.chat
+	helloFrom("9.0.0", 2); helloFrom("9.0.0", 2)
+	local protocolNotices = 0
+	for i = noticeAt + 1, #M.chat do
+		if M.chat[i]:find(ns.T("NEWER_VERSION"), 1, true) then protocolNotices = protocolNotices + 1 end
+	end
+	H.eq(protocolNotices, 1, "newer protocol announced once")
+	H.eq(ns.newerVersion, "0.3.1", "a message of another protocol is not read further")
+
+	-- manual sync: says it started, then what arrived
+	local function chatSince(index)
+		local lines = {}
+		for i = index + 1, #M.chat do lines[#lines + 1] = M.chat[i] end
+		return table.concat(lines, "\n")
+	end
+	local chatAt = #M.chat
+	ns.sync.lastHello = -1e9
+	SlashCmdList.PROFGUILD("sync")
+	H.ok(chatSince(chatAt):find(ns.T("SYNC_STARTED"), 1, true), "sync start announced")
+	SlashCmdList.PROFGUILD("sync")
+	H.ok(chatSince(chatAt):find(ns.T("SYNC_RUNNING"), 1, true), "a second sync is not started")
+	M.advance(2)
+	-- Ana learned one recipe, and a new member appears
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "D", pv = 1, s = "Player-1-00000002", r = {
+		g = "Player-1-00000002", v = 9, n = "Ana Brightwood", c = "PRIEST", a = "acc2", t = 1794615000,
+		p = { [171] = { s = 282, m = 300, k = true, r = { [17187] = 12360, [11479] = 3577, [2330] = 118 } } } } }), "GUILD", "Ana Brightwood")
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "D", pv = 1, s = "Player-1-00000007", r = {
+		g = "Player-1-00000007", v = 1, n = "New Guy", c = "ROGUE", t = 1794615000,
+		p = { [165] = { s = 10, m = 75, k = true, r = { [2149] = 2302, [2152] = 2304 } } } } }), "GUILD", "New Guy")
+	H.ok(not chatSince(chatAt):find("Ana Brightwood", 1, true), "no result while data is still arriving")
+	M.advance(20)
+	local result = chatSince(chatAt)
+	H.ok(result:find(ns.T("SYNC_ITEM_MORE", "Ana Brightwood", 1), 1, true), "Ana's new recipe reported: " .. result)
+	H.ok(result:find(ns.T("SYNC_ITEM_NEW", "New Guy", 2), 1, true), "new member reported")
+	H.eq(ns.syncReport, nil, "report finished")
+	ns.store:Remove("Player-1-00000007")
+	-- a sync that brings nothing says so
+	chatAt = #M.chat
+	ns.sync.lastHello = -1e9
+	UI.syncButton._scripts.OnClick(UI.syncButton)
+	M.advance(20)
+	H.ok(chatSince(chatAt):find(ns.T("SYNC_DONE_NONE"), 1, true), "nothing new reported")
+	H.eq(UI.syncButton.text:GetText(), "SYNC", "button label")
 
 	-- a steady stream of changes still refreshes the open window
 	local refreshes, realRefresh = 0, UI.Refresh
@@ -459,6 +559,34 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.ok(dump:find("Known recipes from the game: 3275 Linen Bandage=", 1, true), "fixed recipe probes reported")
 	GetProfessions, GetGuildRosterInfo = oldGetProfessions, oldRoster
 
+	H.eq(ns.lastError, nil, "no handler errors: " .. tostring(ns.lastError))
+end)
+
+H.test("addon: a guild saved under different realm names is one database", function()
+	M.install()
+	M.events, M.timers, M.sent, M.chat = {}, {}, {}, {}
+	-- two logins reported two realm names, so 0.1.11 and older kept two databases
+	ProfguildDB = { guilds = {
+		["Black Lotus@RealmOne"] = { records = { ["Player-1-00000002"] = { g = "Player-1-00000002", v = 3, n = "Ana Brightwood",
+			p = { [171] = { s = 280, m = 300, k = true, r = { [17187] = 12360 } } } } }, names = { ["Player-1-00000002"] = "Ana Brightwood" } },
+		["Black Lotus@RealmTwo"] = { records = { ["Player-1-00000002"] = { g = "Player-1-00000002", v = 2, n = "Ana Brightwood", p = {} } } },
+		["Other Guild@RealmOne"] = { records = { X = { g = "X", v = 1, n = "X", p = {} } } },
+	} }
+	local ns = {}
+	loadToc(ns)
+	M.fire("ADDON_LOADED", "Profguild")
+	GetNormalizedRealmName = function() return "RealmThree" end
+	M.fire("PLAYER_LOGIN")
+	M.advance(8)
+	H.eq(ns.guildKey, "Black Lotus", "the key is the guild name")
+	H.eq(ns.store:Get("Player-1-00000002").v, 3, "newest record of the old databases kept")
+	H.eq(ProfguildDB.guilds["Black Lotus@RealmOne"], nil); H.eq(ProfguildDB.guilds["Black Lotus@RealmTwo"], nil)
+	H.ok(ProfguildDB.guilds["Other Guild@RealmOne"], "another guild is left alone")
+	-- the next login reports yet another realm: same database
+	GetNormalizedRealmName = function() return "RealmFour" end
+	ns.guildKey = nil
+	ns.SetupGuild()
+	H.eq(ns.guildKey, "Black Lotus"); H.ok(ns.store:Get("Player-1-00000002"), "still there")
 	H.eq(ns.lastError, nil, "no handler errors: " .. tostring(ns.lastError))
 end)
 

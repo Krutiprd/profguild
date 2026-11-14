@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.1.11.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.1.15.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -40,7 +40,8 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 | Klik na craftera v detaile | Otvorí whisper (over, že meno so priezviskom funguje) |
 | Shift+klik na recept alebo tlačidlo „Link itemu do chatu“ | Link itemu do chatu |
 | Záložka Členovia, klik na člena | Vpravo jeho profesie so skillom a počtom receptov |
-| Klik na profesiu v detaile člena | Recepty tohto člena z tej profesie, hore čip s menom (klik ho zruší) |
+| Klik na profesiu v detaile člena | Recepty tohto člena z tej profesie, tlačidlo „Hráč“ ukazuje jeho meno |
+| Tlačidlo „Hráč: všetci“ v Receptoch | Zoznam hráčov s receptami; výber ukáže len jeho recepty, „Všetci hráči“ filter zruší |
 | Tretí hráč sa prihlási, keď je prvý offline | Do 2 minút má aj recepty offline hráča |
 | Vstúp do dungeonu, nauč sa recept / zmeň skill | `/pg status` ukazuje čakajúce správy; po odchode sa odošlú |
 | `/pg` | Okno v troch paneloch: profesie, recepty, detail; krížik a Esc ho zavrú |

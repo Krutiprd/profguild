@@ -251,6 +251,10 @@ end
 -- Guild roster
 ---------------------------------------------------------------------------
 
+-- Key of the guild's saved data: the guild name. The realm is not part of it, because on
+-- Forever the realm name a character reports changes between logins (the same guild showed
+-- up as "...EU4Realm2PvP" and "...EU5 Realm 8 PvP" on one day), and every new name started an
+-- empty database. Second value: the realm reported right now, for diagnostics only.
 function Scanner.GuildKey()
 	if not IsInGuild() then return nil end
 	local name, _, _, realm = GetGuildInfo("player")
@@ -258,7 +262,7 @@ function Scanner.GuildKey()
 	if not realm or realm == "" then
 		realm = (GetNormalizedRealmName and GetNormalizedRealmName()) or ""
 	end
-	return name .. "@" .. realm, name
+	return name, name, realm
 end
 
 function Scanner.RequestRoster()
