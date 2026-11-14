@@ -44,7 +44,16 @@ function Widget:SetText(t) self._text = t or ""; if self._scripts.OnTextChanged 
 function Widget:GetText() return self._text end
 function Widget:SetChecked(c) self._checked = c and true or false end
 function Widget:GetChecked() return self._checked end
-function Widget:GetWidth() return 640 end
+function Widget:SetPoint(...) self._points = (rawget(self, "_points") or 0) + 1 end
+function Widget:ClearAllPoints() self._points = 0 end
+function Widget:SetWidth(w) self._width = w end
+function Widget:SetSize(w, h) self._width, self._height = w, h end
+-- like the game: a frame sized only by anchors has no width until it is anchored
+function Widget:GetWidth()
+	if rawget(self, "_width") then return self._width end
+	if self._kind == "ScrollFrame" and (rawget(self, "_points") or 0) == 0 then return 0 end
+	return 640
+end
 function Widget:GetHeight() return 400 end
 function Widget:CreateFontString() return Widget.new("FontString") end
 function Widget:CreateTexture() return Widget.new("Texture") end
@@ -63,12 +72,22 @@ function M.install()
 	end
 	_G.CreateFrame = function(kind, name, parent, template)
 		local w = Widget.new(kind, name)
-		if template == "BasicFrameTemplateWithInset" then w.TitleText = Widget.new("FontString") end
+		if template == "BasicFrameTemplateWithInset" then
+			w.TitleText = Widget.new("FontString")
+			w.CloseButton = Widget.new("Button")
+			-- the game's close button hides its parent
+			w.CloseButton._scripts.OnClick = function() w:Hide() end
+		end
 		if template == "SearchBoxTemplate" then w.Instructions = Widget.new("FontString") end
 		if kind == "Frame" or kind == "Button" or kind == "CheckButton" then w._shown = true end
 		return w
 	end
 	_G.UIParent = Widget.new("Frame")
+	_G.Minimap = Widget.new("Frame")
+	_G.Minimap.GetWidth = function() return 140 end
+	_G.Minimap.GetCenter = function() return 500, 400 end
+	_G.Minimap.GetEffectiveScale = function() return 1 end
+	_G.GetCursorPosition = function() return M.cursorX or 0, M.cursorY or 0 end
 	_G.GameTooltip = Widget.new("GameTooltip")
 	_G.ItemRefTooltip = Widget.new("GameTooltip")
 	_G.DEFAULT_CHAT_FRAME = { AddMessage = function(_, msg) table.insert(M.chat, msg) end }
@@ -137,7 +156,17 @@ function M.install()
 		GetBaseProfessionInfo = function() return { professionID = 197, professionName = "Tailoring" } end,
 		GetAllRecipeIDs = function() return { 3865, 3866, 18560 } end,
 		GetRecipeInfo = function(id) return { recipeID = id, learned = id ~= 3866 } end,
-		GetRecipeSchematic = function(id) return { outputItemID = id == 3865 and 4305 or 14342 } end,
+		GetRecipeSchematic = function(id)
+			local s = { outputItemID = id == 3865 and 4305 or 14342 }
+			if id == 3865 then
+				-- 2 Linen Cloth + an optional slot that must be left out
+				s.reagentSlotSchematics = {
+					{ reagents = { { itemID = 2589 } }, quantityRequired = 2, required = true },
+					{ reagents = { { itemID = 9999 } }, quantityRequired = 1, required = false },
+				}
+			end
+			return s
+		end,
 		GetTradeSkillLineForRecipe = function(id) return 185, "Cooking", nil end,
 	}
 	_G.C_Spell = { GetSpellName = function(id) return "Recipe " .. id end, GetSpellLink = function(id) return "|Hspell:" .. id .. "|h[x]|h" end }

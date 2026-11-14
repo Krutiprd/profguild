@@ -5,6 +5,8 @@ shares their professions, skill and known recipes with the guild over the hidden
 No server, no website, no setup. Everyone keeps a full copy, including members who are offline.
 
 - Search recipes, items, professions or members: `/pg`
+- Three-panel window: professions, recipes or members, and details with everyone who can craft the recipe
+- Reagents of every recipe with Auctionator or TSM prices, craft cost, profit and an Auctionator shopping list
 - "Crafted by" line in item tooltips (online crafters in green)
 - Recipes are read once per profession; new recipes are added automatically when learned
 - Dropped professions and former guild members disappear for everyone
@@ -26,6 +28,7 @@ be directly inside `AddOns\Profguild\`). Then open each of your professions once
 | `/pg debug` | Print what the game API returns (saved to `ProfguildDB.debug`) |
 | `/pg debug on` / `off` | Verbose logging in chat |
 | `/pg lang en` / `sk` | Language |
+| `/pg minimap` | Hide or show the minimap button |
 | `/pg reset confirm` | Clear data received from guildmates and download it again |
 
 ## How sync works

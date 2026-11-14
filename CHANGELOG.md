@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.1.10 – 2026-11-14
+
+- Addon icon (minimap button, window header, addon list) is the Leatherworking icon.
+
+## 0.1.9 – 2026-11-14
+
+- Diagnostics are saved automatically 45 s after login (`ProfguildDB.debug`, nothing printed),
+  and a log of the last 400 events and errors is kept in `ProfguildDB.log`. Both are in the
+  SavedVariables file after `/reload` or logout.
+
+## 0.1.8 – 2026-11-14
+
+- `/pg debug` also tests reagents of own recipes with the profession window closed and of
+  well-known recipes of every profession.
+
+## 0.1.7 – 2026-11-14
+
+- Reagents of a recipe are read from the game first; the guild is asked only when the game does
+  not describe the recipe. `/pg debug` reports how many guildmates' recipes the game describes.
+
+## 0.1.6 – 2026-11-14
+
+- Recipe details list the reagents (icon, amount, price). Reagents are read when a profession
+  window is opened and kept per account. Reagents of a guildmate's recipe are asked for when the
+  recipe is opened (new Q / C messages, at most 40 recipes each, one answer per question);
+  older versions ignore these messages.
+- Prices from Auctionator (last auction house scan, then the vendor price it has seen) or from
+  TSM DBMarket: cost of one craft, value of the crafted item and the profit.
+- "Shopping list" button: creates the Auctionator shopping list "Profguild: <recipe>" with every
+  reagent as an exact search and the needed amount; at the auction house Auctionator searches
+  right away.
+- `/pg status` shows the reagent catalog and the price source; `/pg debug` the price API.
+- The window is 60 px taller.
+
+## 0.1.5 – 2026-11-14
+
+- New window in three panels on flat dark backgrounds with brass borders: professions with icons
+  and counts on the left, recipes (or members) in the middle, details on the right.
+- Recipe details list everyone who can craft it, online first; a click on a crafter whispers.
+  A button links the item in chat.
+- Member details list their professions with skill and recipe count; a click on a profession
+  shows that member's recipes of it. A button whispers the member.
+- Recipe rows show the item icon, the name in its quality colour and the first crafters.
+- Online-only toggle, member filter chip and a Sync button in the window. The list scrolls with
+  the mouse wheel and has no row limit.
+
+## 0.1.4 – 2026-11-14
+
+- Fix: the window showed no recipes. The list was anchored only after its width was read, so
+  the rows got a width of 0. The list is anchored when the window is created and its content
+  follows the list width.
+- The close button hides the window directly.
+- An error while drawing the window is printed once and shown in `/pg status`.
+
+## 0.1.3 – 2026-11-14
+
+- Recipes view split by profession: a button per profession (with its recipe count) plus "All".
+  "All" lists the recipes under a header per profession. Every recipe row shows who can craft
+  it (up to 6 names, online first, the rest as +N; the tooltip lists everyone). The chosen
+  profession is saved.
+
+## 0.1.2 – 2026-11-14
+
+- Minimap button: click opens or closes the window, dragging moves the button around the
+  minimap, `/pg minimap` hides or shows it. Position and visibility are saved.
+
 ## 0.1.1 – 2026-11-14
 
 - Self-heal keeps data: an owner who lost SavedVariables (or plays from a second PC) takes over

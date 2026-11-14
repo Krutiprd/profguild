@@ -165,6 +165,29 @@ function Scanner.RecipeOutputItem(recipeID)
 	return 0
 end
 
+-- Basic reagents of a recipe as { [itemID] = count }, or nil when the game does not say.
+-- Optional and finishing reagent slots are left out.
+function Scanner.RecipeReagents(recipeID)
+	if not C_TradeSkillUI then return nil end
+	local ok, schematic = call(C_TradeSkillUI.GetRecipeSchematic, recipeID, false)
+	if not ok or type(schematic) ~= "table" or type(schematic.reagentSlotSchematics) ~= "table" then return nil end
+	local basic = Enum and Enum.CraftingReagentType and Enum.CraftingReagentType.Basic
+	local list, n = {}, 0
+	for _, slot in ipairs(schematic.reagentSlotSchematics) do
+		if type(slot) == "table" and slot.required ~= false
+			and (basic == nil or slot.reagentType == nil or slot.reagentType == basic) then
+			local reagent = type(slot.reagents) == "table" and slot.reagents[1]
+			local itemID, count = type(reagent) == "table" and reagent.itemID, slot.quantityRequired
+			if type(itemID) == "number" and itemID > 0 and type(count) == "number" and count > 0 then
+				list[itemID] = (list[itemID] or 0) + count
+				n = n + 1
+			end
+		end
+	end
+	if n == 0 then return nil end
+	return list
+end
+
 -- The profession a recipe belongs to (for NEW_RECIPE_LEARNED). nil when unknown.
 function Scanner.ProfessionForRecipe(recipeID)
 	if not C_TradeSkillUI then return nil end
@@ -182,7 +205,8 @@ function Scanner.ProfessionForRecipe(recipeID)
 end
 
 -- Scans the currently open profession window.
--- Returns skillLine, recipes ({ [recipeID] = itemID }), count — or nil, reason.
+-- Returns skillLine, recipes ({ [recipeID] = itemID }), count, reagents
+-- ({ [recipeID] = { [itemID] = count } }) — or nil, reason.
 function Scanner.ScanOpenProfession()
 	if not C_TradeSkillUI then return nil, "no C_TradeSkillUI" end
 	local ok, ready = call(C_TradeSkillUI.IsTradeSkillReady)
@@ -211,15 +235,16 @@ function Scanner.ScanOpenProfession()
 	local okR, ids = call(C_TradeSkillUI.GetAllRecipeIDs)
 	if not okR or type(ids) ~= "table" then return nil, "no recipe list" end
 
-	local recipes, count = {}, 0
+	local recipes, count, reagents = {}, 0, {}
 	for _, recipeID in ipairs(ids) do
 		local okI, info = call(C_TradeSkillUI.GetRecipeInfo, recipeID)
 		if okI and type(info) == "table" and info.learned and not info.isRecraft and not info.isDummyRecipe then
 			recipes[recipeID] = Scanner.RecipeOutputItem(recipeID)
+			reagents[recipeID] = Scanner.RecipeReagents(recipeID)
 			count = count + 1
 		end
 	end
-	return skillLine, recipes, count
+	return skillLine, recipes, count, reagents
 end
 
 ---------------------------------------------------------------------------

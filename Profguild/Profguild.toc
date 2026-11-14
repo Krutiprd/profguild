@@ -3,9 +3,9 @@
 ## Notes: Share professions and recipes inside your guild. Who can craft what, no server needed.
 ## Notes-skSK: Zdieľanie profesií a receptov v guilde. Kto čo vyrobí, bez servera.
 ## Author: Profguild team
-## Version: 0.1.1
+## Version: 0.1.10
 ## SavedVariables: ProfguildDB
-## IconTexture: Interface\Icons\Trade_BlackSmithing
+## IconTexture: Interface\Icons\Trade_LeatherWorking
 ## AddonCompartmentFunc: Profguild_OnAddonCompartmentClick
 ## X-License: MIT
 
@@ -19,8 +19,11 @@ Libs\LibDeflate\LibDeflate.lua
 Locale.lua
 Store.lua
 Sync.lua
+Reagents.lua
+Prices.lua
 Scanner.lua
 Comm.lua
 Tooltip.lua
 UI.lua
+Minimap.lua
 Core.lua

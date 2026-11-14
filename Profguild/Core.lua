@@ -3,7 +3,7 @@
 
 local ADDON, ns = ...
 
-local Store, Sync, Scanner, Comm = ns.Store, ns.Sync, ns.Scanner, ns.Comm
+local Store, Sync, Scanner, Comm, Reagents = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -33,7 +33,21 @@ function ns.Say(key, ...)
 	ns.Print(ns.T(key, ...))
 end
 
+-- Diagnostic log kept in SavedVariables (ProfguildDB.log), so it can be read from the file
+-- after /reload or logout. Holds the last LOG_LINES lines.
+local LOG_LINES = 400
+function ns.Log(fmt, ...)
+	if not ns.db then return end
+	local ok, text = pcall(string.format, fmt, ...)
+	local log = ns.db.log
+	if type(log) ~= "table" then log = {}; ns.db.log = log end
+	local okDate, stamp = pcall(date, "%H:%M:%S")
+	log[#log + 1] = (okDate and stamp or "?") .. " " .. (ok and text or tostring(fmt))
+	while #log > LOG_LINES do table.remove(log, 1) end
+end
+
 function ns.Debug(fmt, ...)
+	ns.Log(fmt, ...)
 	if ns.db and ns.db.settings.debug then
 		local ok, text = pcall(string.format, fmt, ...)
 		DEFAULT_CHAT_FRAME:AddMessage("|cff888888Profguild debug: " .. (ok and text or fmt) .. "|r")
@@ -61,6 +75,8 @@ local function initDB()
 	db.settings.staleDays = db.settings.staleDays or ns.Config.staleDays
 	db.guilds = db.guilds or {}
 	db.own = db.own or {}
+	-- reagents per recipe: game data, kept for the whole account (see Reagents.lua)
+	if type(db.reagents) ~= "table" then db.reagents = {} end
 	ns.db = db
 	ns.SetLanguage(db.settings.lang)
 end
@@ -241,6 +257,16 @@ local adapter = {
 	log = function(...) ns.Debug(...) end,
 }
 
+local reagentAdapter = {
+	send = function(msg) Comm.Send(msg) end,
+	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
+	now = function() return GetTime() end,
+	after = function(delay, fn) C_Timer.After(delay, fn) end,
+	random = function() return math.random() end,
+	myGuid = function() return UnitGUID("player") end,
+	onChanged = function() ns.OnDataChanged() end,
+}
+
 -- (Re)creates the store and sync for the current guild. Called on login and guild changes.
 function ns.SetupGuild()
 	local key, guildName = Scanner.GuildKey()
@@ -321,7 +347,7 @@ local function scheduleScan()
 	local token = scanToken
 	C_Timer.After(1, function()
 		if token ~= scanToken then return end
-		local skillLine, recipes, count = Scanner.ScanOpenProfession()
+		local skillLine, recipes, count, reagents = Scanner.ScanOpenProfession()
 		if not skillLine then
 			ns.Debug("scan skipped: %s", tostring(recipes))
 			return
@@ -336,6 +362,12 @@ local function scheduleScan()
 		local oldCount = 0
 		for _ in pairs(old or {}) do oldCount = oldCount + 1 end
 		Store.SetScannedRecipes(own, skillLine, recipes)
+		local withReagents = 0
+		for _ in pairs(reagents or {}) do withReagents = withReagents + 1 end
+		ns.Log("scan %s (%s): %d recipes, %d with reagents", Scanner.ProfessionName(skillLine), tostring(skillLine), count, withReagents)
+		if ns.reagents then
+			for recipeID, list in pairs(reagents or {}) do ns.reagents:Set(recipeID, list) end
+		end
 		if not wasScanned or oldCount ~= count then
 			ns.Say("SCANNED", Scanner.ProfessionName(skillLine), count)
 		end
@@ -354,6 +386,7 @@ local function onRecipeLearned(recipeID)
 		ns.Debug("learned recipe %d: profession unknown, waiting for the next window scan", recipeID)
 		return
 	end
+	if ns.reagents then ns.reagents:Set(recipeID, Scanner.RecipeReagents(recipeID)) end
 	learnedNames[#learnedNames + 1] = Scanner.RecipeName(recipeID) or tostring(recipeID)
 	learnedToken = learnedToken + 1
 	local token = learnedToken
@@ -408,6 +441,11 @@ function ns.Status()
 	local s = ns.sync.stats
 	ns.Say("STATUS_TRAFFIC", s.sentH, s.sentR, s.sentD, s.recvH, s.recvR, s.recvD, s.applied)
 	ns.Say("STATUS_LAST_HELLO", ago(ns.sync.lastHello))
+	if ns.reagents then
+		local r = ns.reagents.stats
+		ns.Say("STATUS_REAGENTS", ns.reagents:Count(), r.sentQ, r.sentC, r.recvQ, r.recvC, r.learned)
+	end
+	ns.Say("STATUS_PRICES", ns.Prices and ns.Prices.Source() or ns.T("NO_PRICES"))
 	if ns.sync.newerProtocolSeen then ns.Say("NEWER_VERSION") end
 	if ns.lastError then ns.Print("Last error: %s", ns.lastError) end
 end
@@ -426,7 +464,8 @@ local function describe(v)
 end
 
 -- Prints what the game API really returns on this client and saves it to SavedVariables.
-function ns.DebugDump()
+-- silent: only saves (automatic run after login), nothing is printed.
+function ns.DebugDump(silent)
 	local lines = {}
 	local function add(fmt, ...)
 		local args, n = { ... }, select("#", ...)
@@ -527,7 +566,56 @@ function ns.DebugDump()
 			type(ChatFrame_SendTell), type(ChatFrame_OpenChat), type(ChatEdit_InsertLink))
 		add("TooltipDataProcessor: %s", type(TooltipDataProcessor))
 		add("AddonCompartmentFrame: %s", type(AddonCompartmentFrame))
+		add("Price source: %s, Auctionator shopping lists: %s", tostring(ns.Prices.Source()), tostring(ns.Prices.CanShop()))
+		add("Enum.CraftingReagentType: %s", describe(Enum and Enum.CraftingReagentType))
+		add("Minimap: %s, minimap button: %s", type(Minimap), tostring(ns.Minimap.button ~= nil))
 		add("Trial=%s Veteran=%s", IsTrialAccount and IsTrialAccount(), IsVeteranTrialAccount and IsVeteranTrialAccount())
+	end)
+
+	section("Reagents", function()
+		add("Reagent catalog: %d recipes", ns.reagents and ns.reagents:Count() or 0)
+		-- can the game read reagents of recipes this character does not know?
+		local own = ownState()
+		local mine = {}
+		for _, list in pairs(own and own.recipes or {}) do
+			for id in pairs(list) do mine[id] = true end
+		end
+		local tried, found, sample = 0, 0, nil
+		for id in pairs(ns.store and ns.store:Index().recipes or {}) do
+			if not mine[id] then
+				tried = tried + 1
+				local list = Scanner.RecipeReagents(id)
+				if list then
+					found = found + 1
+					sample = sample or (tostring(id) .. " " .. describe(list))
+				end
+				if tried >= 20 then break end
+			end
+		end
+		add("Reagents of guildmates' recipes from the game: %d of %d (sample %s)", found, tried, tostring(sample))
+		-- own recipes while no profession window is open
+		local ownTried, ownFound = 0, 0
+		for id in pairs(mine) do
+			ownTried = ownTried + 1
+			if Scanner.RecipeReagents(id) then ownFound = ownFound + 1 end
+			if ownTried >= 20 then break end
+		end
+		add("Reagents of own recipes from the game (window %s): %d of %d",
+			ProfessionsFrame and ProfessionsFrame:IsShown() and "open" or "closed?", ownFound, ownTried)
+		-- well-known classic recipes of every profession (spell IDs); Forever may use other IDs
+		local probes = {
+			{ 3275, "Linen Bandage" }, { 2538, "Charred Wolf Meat" }, { 2329, "Elixir of Lion's Strength" },
+			{ 2660, "Rough Sharpening Stone" }, { 2963, "Bolt of Linen Cloth" }, { 2881, "Light Leather" },
+			{ 3918, "Rough Blasting Powder" }, { 7418, "Enchant Bracer - Minor Health" }, { 2657, "Smelt Copper" },
+		}
+		local parts = {}
+		for _, probe in ipairs(probes) do
+			local id = probe[1]
+			local list = Scanner.RecipeReagents(id)
+			parts[#parts + 1] = string.format("%d %s=%s%s", id, probe[2], list and describe(list) or "-",
+				mine[id] and " (own)" or "")
+		end
+		add("Known recipes from the game: %s", table.concat(parts, "; "))
 	end)
 
 	section("Own recipes", function()
@@ -541,10 +629,13 @@ function ns.DebugDump()
 		end
 	end)
 
-	for _, line in ipairs(lines) do DEFAULT_CHAT_FRAME:AddMessage("|cffaaaaaa" .. line .. "|r") end
+	if not silent then
+		for _, line in ipairs(lines) do DEFAULT_CHAT_FRAME:AddMessage("|cffaaaaaa" .. line .. "|r") end
+	end
 	local okDate, now = pcall(date, "%Y-%m-%d %H:%M:%S")
 	ns.db.debug = { time = okDate and tostring(now) or "", at = GetServerTime(), lines = lines }
-	ns.Say("DEBUG_SAVED")
+	ns.Log("debug dump saved (%d lines)%s", #lines, silent and ", automatic" or "")
+	if not silent then ns.Say("DEBUG_SAVED") end
 end
 
 ---------------------------------------------------------------------------
@@ -582,6 +673,8 @@ local function slash(input)
 		else
 			ns.Say("LANG_USAGE")
 		end
+	elseif cmd == "minimap" then
+		if ns.Minimap:Toggle() then ns.Say("MINIMAP_SHOWN") else ns.Say("MINIMAP_HIDDEN") end
 	elseif cmd == "reset" then
 		if rest ~= "confirm" then return ns.Say("RESET_CONFIRM") end
 		if not ns.store then return ns.Say("NO_GUILD") end
@@ -626,6 +719,7 @@ end
 function events.ADDON_LOADED(name)
 	if name ~= ADDON then return end
 	initDB()
+	ns.reagents = Reagents.New(reagentAdapter, ns.db.reagents)
 	Comm:Init()
 	if ns.Tooltip then ns.Tooltip:Init() end
 	frame:UnregisterEvent("ADDON_LOADED")
@@ -633,12 +727,16 @@ end
 
 function events.PLAYER_LOGIN()
 	ns.Say("ADDON_LOADED", ns.version)
+	ns.Minimap:Init()
 	C_Timer.After(5, function()
 		ns.SetupGuild()
 		if not ns.guildKey then ns.Debug("not in a guild") end
 	end)
 	-- second snapshot: professions removed only when two snapshots agree
 	C_Timer.After(60, function() ns.RefreshOwn() end)
+	-- diagnostics land in SavedVariables without typing /pg debug
+	ns.Log("login, version %s", tostring(ns.version))
+	C_Timer.After(45, function() ns.DebugDump(true) end)
 	C_Timer.NewTicker(ns.Config.helloInterval, function()
 		if ns.sync then ns.sync:Hello(false) end
 	end)
@@ -679,6 +777,7 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		local ok, err = pcall(handler, ...)
 		if not ok then
 			ns.lastError = event .. ": " .. tostring(err)
+			ns.Log("ERROR %s", ns.lastError)
 			ns.Debug("%s", ns.lastError)
 		end
 	end

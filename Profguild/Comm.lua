@@ -70,5 +70,9 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 		ns.guildDB.names = ns.guildDB.names or {}
 		ns.guildDB.names[msg.s] = sender
 	end
-	if ns.sync then ns.sync:OnMessage(msg) end
+	if msg.t == "Q" or msg.t == "C" then
+		if ns.reagents then ns.reagents:OnMessage(msg) end
+	elseif ns.sync then
+		ns.sync:OnMessage(msg)
+	end
 end
