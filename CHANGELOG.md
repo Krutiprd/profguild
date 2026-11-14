@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 – 2026-11-14
 
 - Self-heal keeps data: an owner who lost SavedVariables (or plays from a second PC) takes over
   the recipes of not yet rescanned professions from the guild's copy instead of overwriting it.
