@@ -11,6 +11,10 @@
 -- members' recipes are asked for when such a recipe is opened in the window. Whoever has them
 -- answers after a random delay; an answer seen first cancels the own one.
 --
+-- An answer is stored only for a recipe this client asked for itself, shortly before: guild
+-- members cannot push entries into the catalog. What the game says about a recipe (Set)
+-- always replaces what a guildmate said.
+--
 -- Adapter: send(msg), canSend() -> bool, now(), after(seconds, fn), random() -> [0,1),
 --          myGuid(), onChanged(recipeID) (optional)
 
@@ -25,6 +29,7 @@ Reagents.MAX_PER_RECIPE = 10
 Reagents.MAX_COUNT = 999
 Reagents.MAX_ID = 2147483647
 Reagents.MAX_PER_MESSAGE = 40
+Reagents.MAX_CATALOG = 20000    -- recipes learned from guildmates stop being added above this
 Reagents.ASK_DELAY = 0.5        -- collects recipes opened in a row into one query
 Reagents.ASK_AGAIN = 60         -- seconds before the same recipe is asked for again
 Reagents.REPLY_DELAY = { 1.0, 3.0 }
@@ -65,6 +70,7 @@ function Reagents.New(adapter, catalog)
 		a = adapter,
 		catalog = catalog,
 		asked = {},       -- recipeID -> time a query for it was sent or seen
+		mine = {},        -- recipeID -> time we asked for it ourselves
 		askList = {},     -- recipeIDs waiting for the next query
 		askTimer = false,
 		replies = {},     -- recipeID -> true, answers we are going to send
@@ -119,6 +125,7 @@ function ReagentsMT:Want(recipeID)
 	if self.asked[recipeID] and now - self.asked[recipeID] < Reagents.ASK_AGAIN then return false end
 	if not self.a.canSend() then return false end
 	self.asked[recipeID] = now
+	self.mine[recipeID] = now
 	self.askList[#self.askList + 1] = recipeID
 	if not self.askTimer then
 		self.askTimer = true
@@ -189,14 +196,20 @@ function ReagentsMT:OnMessage(msg)
 	elseif msg.t == "C" then
 		if type(msg.c) ~= "table" then return end
 		self.stats.recvC = self.stats.recvC + 1
-		local n = 0
+		local now, n, size = self.a.now(), 0, nil
 		for id, list in pairs(msg.c) do
 			n = n + 1
 			if n > Reagents.MAX_PER_MESSAGE then break end
 			if validID(id) then
 				self.replies[id] = nil -- someone answered first
 				local clean = Reagents.Validate(list)
-				if clean and not self.catalog[id] then
+				-- only what we asked for ourselves, and only while the answer is expected
+				local expected = self.mine[id] and now - self.mine[id] < Reagents.ASK_AGAIN
+				if clean and expected and not self.catalog[id] then
+					size = size or self:Count()
+					if size >= Reagents.MAX_CATALOG then break end
+					size = size + 1
+					self.mine[id] = nil
 					self.catalog[id] = clean
 					self.stats.learned = self.stats.learned + 1
 					if self.a.onChanged then self.a.onChanged(id) end

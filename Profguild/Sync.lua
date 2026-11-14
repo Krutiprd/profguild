@@ -3,7 +3,8 @@
 -- so the whole protocol runs in unit tests and in a simulated guild.
 --
 -- Messages (tables, serialized by Comm):
---   H hello   { t="H", pv, s=senderGuid, av=addonVersion, d={ [guid]=version } }
+--   H hello   { t="H", pv, s=senderGuid, av=addonVersion, d={ [guid]=version },
+--               o=checksum of the sender's own record, only at the maximum version }
 --   R request { t="R", pv, s=senderGuid, g={ guid, ... } }
 --   D data    { t="D", pv, s=senderGuid, r=record }
 --
@@ -17,6 +18,8 @@
 --   ownVersion(guid) -> number|nil   version of OUR current character's record
 --   onOwnConflict(guid, seenVersion, received) someone holds our record with a version >= ours;
 --                             received is that copy (validated) or nil when only a hello showed it
+--   isOwner(guid, senderName) -> bool (optional) the roster confirms that the character the
+--                             game names as the sender of a message is the character guid
 --   onChanged()               (optional) store content changed
 --   log(fmt, ...)             (optional) debug output
 
@@ -36,6 +39,8 @@ Sync.MAX_GUIDS_PER_REQUEST = 60
 Sync.MAX_DIGEST = 5000
 Sync.PEER_TTL = 3600
 Sync.HEAL_WAIT = 20               -- seconds to wait for a copy of our own record before republishing
+Sync.REQUEST_RETRY = 60           -- a record still missing after this long is requested again
+Sync.SEND_PACE = { 0.8, 1.6 }     -- pause between two D answers of one client
 
 local SyncMT = {}
 SyncMT.__index = SyncMT
@@ -47,7 +52,11 @@ function Sync.New(adapter, store, addonVersion)
 		av = addonVersion or "0",
 		pendingD = {},     -- guid -> { v = version, cancelled = bool }
 		wanted = {},       -- guid -> minimal version we are waiting for
+		requested = {},    -- guid -> time of the last R we sent for it
 		requestTimer = false,
+		sendQueue = {},    -- D answers waiting for their turn: { guid =, entry = }
+		nextSendAt = 0,    -- earliest time of the next D answer
+		pumpWake = 0,      -- time the timer that continues the queue fires
 		outbox = {},       -- ordered list of queued messages while sending is blocked
 		outboxD = {},      -- guid -> true (dedupe of queued D)
 		lastHello = -1e9,
@@ -110,6 +119,19 @@ local function sendOrQueue(self, msg)
 	end
 end
 
+-- At the maximum version the owner cannot raise its version any more, so its hello carries a
+-- checksum: a peer that holds a different copy with that version asks the owner for the record.
+local function helloMessage(self)
+	local msg = { t = "H", av = self.av, d = self.store:Digest() }
+	local own = self.store:Get(self.a.myGuid())
+	if own and own.v >= ns.Store.LIMITS.maxVersion then msg.o = ns.Store.Checksum(own) end
+	return msg
+end
+
+local function fromOwner(self, guid, senderName)
+	return senderName ~= nil and self.a.isOwner ~= nil and self.a.isOwner(guid, senderName) == true
+end
+
 -- Called by Comm when a message could not be delivered (e.g. lockdown started mid-transfer).
 function SyncMT:OnSendFailed(msg)
 	if type(msg) ~= "table" then return end
@@ -126,7 +148,7 @@ function SyncMT:Flush()
 		if q.t == "H" then
 			-- queued hellos bypass the rate limit: the original call already passed it
 			self.lastHello = self.a.now()
-			sendOrQueue(self, { t = "H", av = self.av, d = self.store:Digest() })
+			sendOrQueue(self, helloMessage(self))
 		elseif q.t == "R" then
 			self:_SendRequest()
 		elseif q.t == "D" and q.g then
@@ -152,7 +174,7 @@ function SyncMT:Hello(force)
 	local minGap = force and Sync.HELLO_FORCE_INTERVAL or Sync.HELLO_MIN_INTERVAL
 	if now - self.lastHello < minGap then return false end
 	self.lastHello = now
-	sendOrQueue(self, { t = "H", av = self.av, d = self.store:Digest() })
+	sendOrQueue(self, helloMessage(self))
 	return true
 end
 
@@ -171,15 +193,44 @@ function SyncMT:ScheduleData(guid, fast)
 	local delay = between(self, fast and Sync.OWNER_DELAY or Sync.REPLY_DELAY)
 	self.a.after(delay, function()
 		if entry.cancelled then return end
-		if self.pendingD[guid] == entry then self.pendingD[guid] = nil end
-		local cur = self.store:Get(guid)
-		if cur then sendOrQueue(self, { t = "D", r = cur }) end
+		-- the owner's own record goes first
+		table.insert(self.sendQueue, fast and 1 or #self.sendQueue + 1, { guid = guid, entry = entry })
+		self:_Pump()
 	end)
 end
 
+-- Sends the waiting D answers one at a time with a pause in between. An answer stays
+-- cancellable until its turn, so a record somebody else sent in the meantime is not repeated.
+-- Without the pause, a hello with an empty digest made every client hand its whole database
+-- to the throttle at once, where nothing can be taken back.
+function SyncMT:_Pump()
+	local now = self.a.now()
+	if now < self.nextSendAt then
+		if self.pumpWake <= now then -- no timer is running (or it was lost)
+			self.pumpWake = self.nextSendAt
+			self.a.after(self.nextSendAt - now, function() self:_Pump() end)
+		end
+		return
+	end
+	local item = table.remove(self.sendQueue, 1)
+	while item and item.entry.cancelled do item = table.remove(self.sendQueue, 1) end
+	if not item then return end
+	if self.pendingD[item.guid] == item.entry then self.pendingD[item.guid] = nil end
+	local cur = self.store:Get(item.guid)
+	if cur then sendOrQueue(self, { t = "D", r = cur }) end
+	self.nextSendAt = now + between(self, Sync.SEND_PACE)
+	if #self.sendQueue > 0 then
+		self.pumpWake = self.nextSendAt
+		self.a.after(self.nextSendAt - now, function() self:_Pump() end)
+	end
+end
+
 function SyncMT:_SendRequest()
-	local list = {}
-	for guid in pairs(self.wanted) do list[#list + 1] = guid end
+	local list, now = {}, self.a.now()
+	for guid in pairs(self.wanted) do
+		list[#list + 1] = guid
+		self.requested[guid] = now
+	end
 	if #list == 0 then return end
 	table.sort(list)
 	local i = 1
@@ -191,12 +242,17 @@ function SyncMT:_SendRequest()
 	end
 end
 
-function SyncMT:ScheduleRequest(guids, versions)
-	local added = false
+-- force: ask even when the same version is already wanted (a different copy of it exists).
+function SyncMT:ScheduleRequest(guids, versions, force)
+	local added, now = false, self.a.now()
 	for _, guid in ipairs(guids) do
 		local need = versions and versions[guid] or 0
-		if self.wanted[guid] == nil or need > self.wanted[guid] then
-			self.wanted[guid] = need
+		local last = self.requested[guid]
+		if self.wanted[guid] == nil or need > self.wanted[guid] or force then
+			self.wanted[guid] = math.max(need, self.wanted[guid] or 0)
+			added = true
+		elseif not last or now - last >= Sync.REQUEST_RETRY then
+			-- the answer never came (the peer logged off, the message was lost): ask again
 			added = true
 		end
 	end
@@ -230,7 +286,8 @@ local function validDigest(d)
 	return out
 end
 
-function SyncMT:OnMessage(msg)
+-- senderName: the character the game names as the sender (nil in tests without a channel).
+function SyncMT:OnMessage(msg, senderName)
 	if type(msg) ~= "table" or type(msg.t) ~= "string" then
 		self.stats.dropped = self.stats.dropped + 1
 		return
@@ -251,21 +308,30 @@ function SyncMT:OnMessage(msg)
 
 	if msg.t == "H" then
 		self.stats.recvH = self.stats.recvH + 1
-		self:_OnHello(msg, me)
+		self:_OnHello(msg, me, senderName)
 	elseif msg.t == "R" then
 		self.stats.recvR = self.stats.recvR + 1
 		self:_OnRequest(msg, me)
 	elseif msg.t == "D" then
 		self.stats.recvD = self.stats.recvD + 1
-		self:_OnData(msg, me)
+		self:_OnData(msg, me, senderName)
 	else
 		self.stats.dropped = self.stats.dropped + 1
 	end
 end
 
-function SyncMT:_OnHello(msg, me)
+function SyncMT:_OnHello(msg, me, senderName)
 	local d = validDigest(msg.d)
 	if not d then return end
+	-- the owner says what its record at the maximum version looks like: fetch it when ours differs
+	local max = ns.Store.LIMITS.maxVersion
+	if type(msg.o) == "number" and type(msg.s) == "string" and msg.s ~= me and d[msg.s] == max
+		and fromOwner(self, msg.s, senderName) then
+		local cur = self.store:Get(msg.s)
+		if cur and cur.v == max and ns.Store.Checksum(cur) ~= msg.o then
+			self:ScheduleRequest({ msg.s }, { [msg.s] = max }, true)
+		end
+	end
 	local ownV = self.a.ownVersion(me)
 	if ownV and d[me] and d[me] > ownV then
 		self:_OwnNewerSeen(me, d[me])
@@ -312,7 +378,7 @@ function SyncMT:_OnRequest(msg, me)
 	end
 end
 
-function SyncMT:_OnData(msg, me)
+function SyncMT:_OnData(msg, me, senderName)
 	local rec = msg.r
 	if type(rec) ~= "table" or type(rec.g) ~= "string" or type(rec.v) ~= "number" then return end
 	local guid = rec.g
@@ -344,7 +410,7 @@ function SyncMT:_OnData(msg, me)
 		return
 	end
 
-	local status = self.store:Apply(rec)
+	local status = self.store:Apply(rec, msg.s == guid and fromOwner(self, guid, senderName))
 	if status == "new" or status == "updated" then
 		self.stats.applied = self.stats.applied + 1
 		local w = self.wanted[guid]
@@ -375,7 +441,7 @@ end
 
 -- Store and announce the record of the logged-in character.
 function SyncMT:PublishOwn(rec)
-	local status = self.store:Apply(rec)
+	local status = self.store:Apply(rec, true)
 	if status == "new" or status == "updated" then
 		if self.a.onChanged then self.a.onChanged(rec.g) end
 	end

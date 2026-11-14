@@ -316,12 +316,12 @@ local function craftersOf(entry, onlineOnly, now, staleDays)
 	return list
 end
 
--- Recipes with at least one visible crafter. Returns the rows (sorted by name) and the
--- number of recipes per profession, counted before the search and profession filters.
+-- Recipes with at least one visible crafter. Returns the rows (sorted by name), the number
+-- of recipes per profession counted before the search and profession filters, and their sum.
 function UI:BuildRecipeRows(query, category)
 	local store = ns.store
-	local rows, counts = {}, {}
-	if not store then return rows, counts end
+	local rows, counts, total = {}, {}, 0
+	if not store then return rows, counts, total end
 	local onlineOnly = ns.db.settings.onlineOnly
 	local now, staleDays = GetServerTime(), ns.StaleDays()
 	for recipeID, entry in pairs(store:Index().recipes) do
@@ -329,15 +329,19 @@ function UI:BuildRecipeRows(query, category)
 		if #crafters > 0 then
 			local skillLine = entry.skillLine
 			counts[skillLine] = (counts[skillLine] or 0) + 1
+			total = total + 1
 			if not category or category == skillLine then
 				local name = recipeName(recipeID, entry.itemID)
 				local prof = ns.Scanner.ProfessionName(skillLine)
-				local hit = matches(query, name, prof, ns.Scanner.ItemName(entry.itemID))
+				-- the item name is looked up only for a search: asking for it makes the game
+				-- load the item, which must not happen for every recipe each time the list is drawn
+				local hit = query == "" or matches(query, name, prof)
 				if not hit then
 					for _, c in ipairs(crafters) do
 						if c.name:lower():find(query, 1, true) then hit = true break end
 					end
 				end
+				if not hit then hit = matches(query, ns.Scanner.ItemName(entry.itemID)) end
 				if hit then
 					rows[#rows + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = entry.itemID,
 						skillLine = skillLine, name = name, prof = prof, crafters = crafters }
@@ -346,20 +350,21 @@ function UI:BuildRecipeRows(query, category)
 		end
 	end
 	table.sort(rows, function(a, b) return a.name < b.name end)
-	return rows, counts
+	return rows, counts, total
 end
 
--- Members (not stale, online filter). Returns the rows (online first) and the number of
--- members per profession, counted before the search and profession filters.
+-- Members (not stale, online filter). Returns the rows (online first), the number of members
+-- per profession counted before the search and profession filters, and the number of members.
 function UI:BuildMemberRows(query, category)
 	local store = ns.store
-	local rows, counts = {}, {}
-	if not store then return rows, counts end
+	local rows, counts, total = {}, {}, 0
+	if not store then return rows, counts, total end
 	local onlineOnly = ns.db.settings.onlineOnly
 	local now, staleDays = GetServerTime(), ns.StaleDays()
 	for guid, rec in pairs(store:All()) do
 		local online = store:IsOnline(guid)
 		if not store:IsStale(guid, staleDays, now) and (online or not onlineOnly) then
+			total = total + 1
 			local profNames, parts = {}, {}
 			for skillLine, prof in pairs(rec.p) do
 				counts[skillLine] = (counts[skillLine] or 0) + 1
@@ -379,7 +384,7 @@ function UI:BuildMemberRows(query, category)
 		if a.online ~= b.online then return a.online end
 		return a.name < b.name
 	end)
-	return rows, counts
+	return rows, counts, total
 end
 
 ---------------------------------------------------------------------------
@@ -441,6 +446,7 @@ local function createListRow(parent, index)
 		end
 		UI.selected = d
 		UI.detailOffset = 0
+		UI.reagentOffset = 0
 		UI:Refresh()
 	end)
 	return row
@@ -501,6 +507,8 @@ local function createReagentRow(parent, index)
 	row.right:SetPoint("RIGHT", -4, 0)
 	row.right:SetJustifyH("RIGHT")
 	row:RegisterForClicks("LeftButtonUp")
+	row:EnableMouseWheel(true)
+	row:SetScript("OnMouseWheel", function(_, delta) UI:ScrollReagents(delta) end)
 	row:SetScript("OnEnter", function(self)
 		self.bg:SetColorTexture(unpack(C.hover))
 		local d = self.data
@@ -836,7 +844,10 @@ function UI:Create()
 	f:SetScript("OnHide", function() search:ClearFocus() end)
 	local events = CreateFrame("Frame", nil, f)
 	events:RegisterEvent("GET_ITEM_INFO_RECEIVED")
-	events:SetScript("OnEvent", function() if f:IsShown() then UI:ScheduleRefresh(0.5) end end)
+	events:SetScript("OnEvent", function()
+		UI.nameEpoch = (UI.nameEpoch or 0) + 1 -- item names may have arrived: rebuild the list
+		if f:IsShown() then UI:ScheduleRefresh(0.5) end
+	end)
 end
 
 ---------------------------------------------------------------------------
@@ -869,6 +880,11 @@ function UI:Scroll(delta)
 	self:Refresh()
 end
 
+function UI:ScrollReagents(delta)
+	self.reagentOffset = (self.reagentOffset or 0) - (delta or 0)
+	self:Refresh()
+end
+
 function UI:ScrollDetail(delta)
 	self.detailOffset = (self.detailOffset or 0) - (delta or 0) * 2
 	self:Refresh()
@@ -891,8 +907,9 @@ function UI:ScheduleRefresh(delay)
 	end)
 end
 
+-- Core already limits these notices to one per half second.
 function UI:OnDataChanged()
-	if self.frame and self.frame:IsShown() then self:ScheduleRefresh(0.3) end
+	if self.frame and self.frame:IsShown() then self:Refresh() end
 end
 
 -- An error while drawing is reported once and kept for /pg status.
@@ -995,22 +1012,20 @@ local function fillRows(rows, lines, offset)
 	end
 end
 
-local localMiss = {} -- recipes the game could not describe in this session
+local gameChecked = {} -- recipes the game was asked about in this session
 
 -- Reagents, their cost and the value of the crafted item.
 function UI:DrawReagents(s)
 	local d = self.detail
 	d.reagentTitle:SetText(ns.T("HEAD_REAGENTS"))
-	local reagents = ns.reagents and ns.reagents:Get(s.recipeID)
-	if not reagents and ns.reagents and not localMiss[s.recipeID] then
-		-- the game may describe recipes we do not know ourselves; then no guildmate is needed
+	if ns.reagents and not gameChecked[s.recipeID] then
+		-- the game describes recipes we do not know ourselves; then no guildmate is needed,
+		-- and what the game says replaces what a guildmate said
+		gameChecked[s.recipeID] = true
 		local fromGame = ns.Scanner.RecipeReagents(s.recipeID)
-		if fromGame and ns.reagents:Set(s.recipeID, fromGame) then
-			reagents = ns.reagents:Get(s.recipeID)
-		else
-			localMiss[s.recipeID] = true
-		end
+		if fromGame then ns.reagents:Set(s.recipeID, fromGame) end
 	end
+	local reagents = ns.reagents and ns.reagents:Get(s.recipeID)
 	local lines = {}
 	if reagents then
 		for itemID, count in pairs(reagents) do
@@ -1023,14 +1038,23 @@ function UI:DrawReagents(s)
 				left = string.format("%dx %s", count, name), right = right }
 		end
 		table.sort(lines, function(a, b) return a.name < b.name end)
-		d.reagentNote:SetText(#lines > REAGENT_ROWS and ns.T("REAGENTS_MORE", #lines - REAGENT_ROWS) or "")
+		d.reagentNote:Hide()
 	else
 		if ns.reagents then ns.reagents:Want(s.recipeID) end
 		d.reagentNote:SetText(ns.T(ns.reagents and ns.reagents:IsAsking(s.recipeID) and "REAGENTS_ASKING" or "REAGENTS_UNKNOWN"))
+		d.reagentNote:Show()
 	end
-	d.reagentCount:SetText(reagents and tostring(#lines) or "")
-	fillRows(d.reagentRows, lines, 0)
-	if #lines > REAGENT_ROWS then d.reagentNote:Show() elseif reagents then d.reagentNote:Hide() else d.reagentNote:Show() end
+	-- more reagents than rows: the mouse wheel scrolls them and the heading says which are shown
+	local maxOffset = math.max(0, #lines - REAGENT_ROWS)
+	self.reagentOffset = math.max(0, math.min(maxOffset, math.floor(self.reagentOffset or 0)))
+	if not reagents then
+		d.reagentCount:SetText("")
+	elseif maxOffset > 0 then
+		d.reagentCount:SetText(string.format("%d-%d / %d", self.reagentOffset + 1, self.reagentOffset + REAGENT_ROWS, #lines))
+	else
+		d.reagentCount:SetText(tostring(#lines))
+	end
+	fillRows(d.reagentRows, lines, self.reagentOffset)
 
 	-- cost of one craft and what the item sells for
 	local source = ns.Prices.Source()
@@ -1137,13 +1161,27 @@ function UI:Draw()
 	setPill(self.onlineButton, ns.T(ns.db.settings.onlineOnly and "ONLINE_ON" or "ONLINE_OFF"), ns.db.settings.onlineOnly)
 	setPill(self.syncButton, ns.T("BTN_SYNC"), false)
 
-	-- a profession that is no longer visible (dropped, filtered) shows all of them instead
-	local build = members and self.BuildMemberRows or self.BuildRecipeRows
-	local all, counts = build(self, "", nil)
-	local category = self.category
-	if category and not counts[category] then category = nil end
-	self.memberTotal = #all
-	local data = build(self, query, category)
+	-- The list is built once and kept while nothing it depends on changed, so scrolling and
+	-- selecting do not walk the whole database again.
+	local store = ns.store
+	local key = table.concat({ self.view, query, tostring(self.category), tostring(ns.db.settings.onlineOnly),
+		tostring(self.memberFilter), tostring(store), store and store.revision or 0, store and store.rosterRevision or 0,
+		tostring(ns.lang), self.nameEpoch or 0 }, "\1")
+	local cache = self.listCache
+	if not cache or cache.key ~= key then
+		local build = members and self.BuildMemberRows or self.BuildRecipeRows
+		local category = self.category
+		local data, counts, total = build(self, query, category)
+		-- a profession that is no longer visible (dropped, filtered) shows all of them instead
+		if category and not counts[category] then
+			category = nil
+			data, counts, total = build(self, query, nil)
+		end
+		cache = { key = key, data = data, counts = counts, total = total, category = category }
+		self.listCache = cache
+	end
+	local data, counts, category = cache.data, cache.counts, cache.category
+	self.memberTotal = cache.total
 	self.shownCategory = category
 
 	-- keep the selection while it is still listed

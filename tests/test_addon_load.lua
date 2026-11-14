@@ -68,6 +68,43 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(ns.guildDB.names["Player-1-00000002"], "Ana Brightwood", "sender name remembered")
 	ns.Comm:OnCommReceived("Profguild", "garbage", "GUILD", "X") -- must not error
 
+	-- the roster confirms who really sent a message
+	H.eq(ns.Comm.MAX_TEXT, 24000)
+	local maxV = ns.Store.LIMITS.maxVersion
+	local anaAtMax = { g = "Player-1-00000002", v = maxV, n = "Ana Brightwood", c = "PRIEST", p = { [171] = { s = 1, m = 1, r = {} } } }
+	local scratch = ns.Store.New({})
+	local realStore = ns.sync.store
+	ns.sync.store = scratch -- keep the real database out of this check
+	scratch:Apply(anaAtMax)
+	local changed = { g = anaAtMax.g, v = maxV, n = "Ana Brightwood", c = "PRIEST", p = { [171] = { s = 9, m = 9, r = {} } } }
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "D", pv = 1, s = anaAtMax.g, r = changed }), "GUILD", "Somebody Else")
+	H.eq(scratch:Get(anaAtMax.g).p[171].s, 1, "another sender cannot speak for Ana")
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "D", pv = 1, s = anaAtMax.g, r = changed }), "GUILD", "Ana Brightwood")
+	H.eq(scratch:Get(anaAtMax.g).p[171].s, 9, "Ana herself can, the roster knows her name")
+	ns.sync.store = realStore
+
+	-- a message that unpacks to far more than any real one is dropped and its sender ignored
+	local bomb = ns.Comm.Encode({ t = "D", pv = 1, s = "Player-1-0000000F", junk = string.rep("A", ns.Comm.MAX_SERIALIZED + 10) })
+	H.ok(#bomb < ns.Comm.MAX_TEXT, "the bomb is small on the wire (" .. #bomb .. " bytes)")
+	local msg, why = ns.Comm.Decode(bomb)
+	H.ok(msg == nil and why == "too large", "not deserialized")
+	ns.Comm:OnCommReceived("Profguild", bomb, "GUILD", "Evil Sender")
+	local good = ns.Comm.Encode({ t = "D", pv = 1, s = "Player-1-0000000F", r = { g = "Player-1-0000000F", v = 1, n = "Evil Sender", p = {} } })
+	ns.Comm:OnCommReceived("Profguild", good, "GUILD", "Evil Sender")
+	H.eq(ns.store:Get("Player-1-0000000F"), nil, "the sender is ignored for a while")
+	M.advance(ns.Comm.BLOCK_SECONDS + 1)
+	ns.Comm:OnCommReceived("Profguild", good, "GUILD", "Evil Sender")
+	H.ok(ns.store:Get("Player-1-0000000F"), "and heard again later")
+	ns.store:Remove("Player-1-0000000F")
+
+	-- many roster events in a row read the roster once
+	local reads, realRead = 0, ns.Scanner.ReadRoster
+	ns.Scanner.ReadRoster = function(...) reads = reads + 1 return realRead(...) end
+	for _ = 1, 10 do M.fire("GUILD_ROSTER_UPDATE") end
+	M.advance(3)
+	H.eq(reads, 1, "one roster read for ten events")
+	ns.Scanner.ReadRoster = realRead
+
 	-- tooltip
 	M.tooltipLines = {}
 	M.tooltipPostCall(GameTooltip, { id = 12360 })
@@ -203,6 +240,55 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	Auctionator = nil
 	UI:Refresh()
 	H.ok(UI.detail.shopButton.disabled, "no shopping list without Auctionator")
+
+	-- more reagents than rows: all of them can be reached with the mouse wheel
+	local eight = {}
+	for i = 1, 8 do eight[i] = 1 end
+	ns.reagents:Set(3865, eight)
+	UI:Refresh()
+	local shown = visible(UI.detail.reagentRows)
+	H.eq(#shown, 6, "six rows")
+	H.eq(shown[1].itemID, 1)
+	H.eq(UI.detail.reagentCount:GetText(), "1-6 / 8", "heading says which are shown")
+	H.ok(not UI.detail.reagentNote:IsShown(), "nothing drawn over the first row")
+	local reagentRow = UI.detail.reagentRows[1]
+	reagentRow._scripts.OnMouseWheel(reagentRow, -1)
+	reagentRow._scripts.OnMouseWheel(reagentRow, -1)
+	reagentRow._scripts.OnMouseWheel(reagentRow, -1)
+	shown = visible(UI.detail.reagentRows)
+	H.eq(shown[6].itemID, 8, "last reagent reached")
+	H.eq(UI.detail.reagentCount:GetText(), "3-8 / 8")
+	ns.reagents:Set(3865, { [2589] = 2 })
+
+	-- the list is built once: scrolling and selecting reuse it, and no item is looked up
+	-- for the list without a search
+	local builds, realBuild = 0, UI.BuildRecipeRows
+	UI.BuildRecipeRows = function(...) builds = builds + 1 return realBuild(...) end
+	UI:SetCategory(nil)
+	H.eq(builds, 1, "one pass over the database for a changed filter")
+	local lookups, realItemName = 0, ns.Scanner.ItemName
+	ns.Scanner.ItemName = function(...) lookups = lookups + 1 return realItemName(...) end
+	UI.selected = nil
+	UI.listCache = nil
+	UI:Refresh()
+	H.eq(lookups, 0, "no item lookups for the list without a search")
+	builds = 0
+	UI.list._scripts.OnMouseWheel(UI.list, -1)
+	UI.rows[1]._scripts.OnClick(UI.rows[1], "LeftButton")
+	UI:Refresh()
+	H.eq(builds, 0, "scrolling and selecting reuse the list")
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "D", pv = 1, s = "Player-1-00000002", r = {
+		g = "Player-1-00000002", v = 5, n = "Ana Brightwood", c = "PRIEST", a = "acc2", t = 1794615000,
+		p = { [171] = { s = 281, m = 300, k = true, r = { [17187] = 12360, [11479] = 3577 } } } } }), "GUILD", "Ana Brightwood")
+	UI:Refresh()
+	H.eq(builds, 1, "new data rebuilds it")
+	UI.BuildRecipeRows, ns.Scanner.ItemName = realBuild, realItemName
+	UI.selected = nil
+	UI:SetCategory(197)
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.recipeID == 3865 then r._scripts.OnClick(r, "LeftButton") end
+	end
 	H.ok(UI.detail.costValue:GetText():find(ns.T("NO_PRICES"), 1, true), "says how to get prices")
 
 	-- online only: Ana is offline, so her recipes disappear
@@ -241,6 +327,16 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(UI.memberFilter, nil, "chip clears the member filter")
 	UI.recipesTab._scripts.OnClick(UI.recipesTab)
 	UI:SetCategory(nil)
+
+	-- a steady stream of changes still refreshes the open window
+	local refreshes, realRefresh = 0, UI.Refresh
+	UI.Refresh = function(...) refreshes = refreshes + 1 return realRefresh(...) end
+	for _ = 1, 25 do
+		ns.OnDataChanged()
+		M.advance(0.2, 0.1)
+	end
+	H.ok(refreshes >= 5, "window refreshed during 5 s of constant changes (" .. refreshes .. ")")
+	UI.Refresh = realRefresh
 
 	-- sync button and language switch redraw without errors
 	UI.syncButton._scripts.OnClick(UI.syncButton)
@@ -395,6 +491,7 @@ H.test("addon: roster without GUIDs prunes former members by name", function()
 	M.advance(5)
 	H.eq(ns.store:Get("Player-1-00000001").n, "Frost Winterborn", "own record uses the roster name")
 	M.fire("GUILD_ROSTER_UPDATE")
+	M.advance(2)
 	H.eq(ns.store:Get("Player-1-00000003"), nil, "former member removed by name")
 	H.ok(ns.store:Get("Player-1-00000002") and ns.store:Get("Player-1-00000001"), "members kept")
 	H.eq(ns.lastError, nil, "no handler errors: " .. tostring(ns.lastError))

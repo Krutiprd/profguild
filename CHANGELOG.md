@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.11 – 2026-11-14
+
+Fixes from a code review.
+
+- Sync: a requested record whose answer was lost is requested again after 60 s instead of
+  staying missing for the session.
+- Sync: answers are sent one at a time with a pause, so a record somebody else already sent can
+  still be skipped. A client with an empty database no longer makes every member queue their
+  whole database at once.
+- Sync: a forged record with the maximum version no longer pins a character's data. At that
+  version the copy sent by the owner replaces a different one; the owner is the sender the game
+  names, checked against the guild roster. The owner's hello carries a checksum there, so
+  members holding another copy fetch the owner's. Needs a roster with GUIDs.
+- Comm: received messages are limited to 24 kB encoded; one that unpacks to more than 256 kB is
+  dropped before it is deserialized and its sender is ignored for 10 minutes.
+- Reagents: an answer from a guildmate is stored only for a recipe this client asked for within
+  the last minute; what the game says about a recipe replaces it. The catalog takes at most
+  20000 recipes from guildmates.
+- Roster: a read that did not return every member updates only those members, so nobody turns
+  stale by mistake. Several roster events in a row cause one read. Roster changes no longer
+  rebuild the recipe index.
+- Window: the list is built in one pass and kept until something it depends on changes; item
+  data is requested only for a search. The window keeps refreshing during a long sync.
+- Window: recipes with more than 6 reagents scroll with the mouse wheel; the note that covered
+  the first reagent is gone.
+
 ## 0.1.10 – 2026-11-14
 
 - Addon icon (minimap button, window header, addon list) is the Leatherworking icon.

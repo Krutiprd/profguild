@@ -100,7 +100,7 @@ function Sim:transmit(client, msg)
 		for _, c in ipairs(self.clients) do
 			if c.online and c.guild == sender.guild then
 				local before = c.store.revision
-				c.sync:OnMessage(decode(text)) -- includes the echo to the sender
+				c.sync:OnMessage(decode(text), sender.name) -- includes the echo to the sender
 				if c ~= sender and c.store.revision ~= before then useful = true end
 			end
 		end
@@ -134,6 +134,8 @@ function Sim:addClient(name, guild, profs, recipes)
 		end,
 		random = sim.rng,
 		myGuid = function() return c.guid end,
+		-- the roster of the simulated guild: character X has the guid "Player-1-X"
+		isOwner = function(guid, senderName) return guid == "Player-1-" .. tostring(senderName) end,
 		ownVersion = function(guid) if guid == c.guid then return c.own.v end end,
 		onOwnConflict = function(_, seen, received)
 			c.conflicts = (c.conflicts or 0) + 1
@@ -333,7 +335,7 @@ H.test("sim: whole guild logs in at once (raid night) and converges within 3 min
 	H.ok(converged and converged <= 180, "did not converge in 3 minutes")
 end)
 
-H.test("sizes: a maxed character and a large digest stay far below Comm.MAX_TEXT (40000)", function()
+H.test("sizes: a maxed character and a large digest stay far below Comm.MAX_TEXT (24000)", function()
 	local p = {}
 	local base = 100
 	for _, skillLine in ipairs({ 165, 197, 185, 129, 356 }) do
@@ -347,7 +349,7 @@ H.test("sizes: a maxed character and a large digest stay far below Comm.MAX_TEXT
 	for i = 1, 400 do d[string.format("Player-%d-%08X", 1000 + i % 7, i * 7919)] = i end
 	local hello = encode({ t = "H", pv = 1, s = "Player-1-0ABCDEF0", av = "0.1.0", d = d })
 	io.write(string.format("       maxed record (2600 recipes): %d bytes, %d parts; digest of 400 characters: %d bytes\n", #text, math.ceil(#text / 254), #hello))
-	H.ok(#text < 40000 and #hello < 40000)
+	H.ok(#text < 24000 / 2 and #hello < 24000 / 2)
 end)
 
 H.test("sim: a hello queued in a dungeon still goes out right after leaving", function()
@@ -438,4 +440,89 @@ H.test("sim: a forged copy with the maximum version does not start an endless ex
 	sim:runUntil(2000)
 	H.ok(sim.messages.D - before <= 2, "no D ping-pong: " .. (sim.messages.D - before))
 	H.eq(a.own.v, max); H.ok(Store.Validate(a.own.rec), "owner record stays valid")
+end)
+
+H.test("sim: a forged copy with the maximum version does not pin the owner's record", function()
+	local max = Store.LIMITS.maxVersion
+	local sim = newSim(24)
+	local a = sim:addClient("A", "G", { [197] = { s = 1, m = 75 } }, {})
+	local b = sim:addClient("B", "G", {}, {})
+	local c = sim:addClient("C", "G", {}, {})
+	sim:login(a); sim:login(b)
+	sim:runUntil(60)
+	local forged = { g = a.guid, v = max, n = "A", p = { [171] = { s = 300, m = 300, k = true, r = { [1] = 2 } } } }
+	-- the forger is not the owner: its name does not match A's guid
+	sim:transmit(b, { t = "D", pv = Sync.PROTOCOL, s = "Player-1-Evil", r = forged })
+	c.store:Apply(forged) -- C got the forged copy too and is offline while the guild repairs it
+	sim:runUntil(200)
+	H.eq(a.own.v, max, "owner is at the maximum version")
+	H.ok(b.store:Get(a.guid).p[197] and not b.store:Get(a.guid).p[171], "B took the owner's copy back")
+	-- the owner keeps publishing changes although its version cannot rise
+	a.profs[197].s = 42; sim:refresh(a)
+	sim:runUntil(260)
+	H.eq(b.store:Get(a.guid).p[197].s, 42, "later changes still reach B")
+	-- a forged copy sent again does not replace the owner's
+	sim:transmit(b, { t = "D", pv = Sync.PROTOCOL, s = "Player-1-Evil", r = forged })
+	sim:runUntil(300)
+	H.eq(b.store:Get(a.guid).p[197].s, 42, "forged copy ignored")
+	-- C comes back with the forged copy: the owner's hello shows a different checksum
+	sim:login(c)
+	sim:at(340, function() a.sync.lastHello = -1e9; a.sync:Hello(true) end)
+	sim:runUntil(420)
+	H.eq(c.store:Get(a.guid).p[197] and c.store:Get(a.guid).p[197].s, 42, "C repaired from the owner")
+end)
+
+H.test("sim: a record whose answer was lost is requested again", function()
+	local sim = newSim(26)
+	local a = sim:addClient("A", "G", { [197] = { s = 5, m = 75 } }, {})
+	local b = sim:addClient("B", "G", {}, {})
+	local c = sim:addClient("C", "G", {}, {})
+	sim:login(a); sim:login(b)
+	sim:runUntil(60)
+	sim:logout(a)
+	sim:login(c)
+	c.sync.lastHello = -1e9
+	-- C learns from B's hello that A exists, asks, and B logs off before answering
+	sim:at(70, function() b.sync.lastHello = -1e9; b.sync:Hello(true) end)
+	sim:runUntil(70.5)
+	sim:runUntil(72)
+	sim:at(72.05, function() sim:logout(b) end)
+	sim:runUntil(100)
+	if c.store:Get(a.guid) == nil then
+		H.ok(c.sync.wanted[a.guid] ~= nil, "still wanted")
+		-- B is back; its next hellos advertise the same version
+		b.sync.pendingD, b.sync.sendQueue = {}, {} -- a new game session starts without pending answers
+		sim:login(b)
+		for t = 130, 400, 30 do
+			sim:at(t, function() b.sync.lastHello = -1e9; b.sync:Hello(true) end)
+		end
+		sim:runUntil(420)
+	end
+	H.ok(c.store:Get(a.guid), "C finally received A's record")
+end)
+
+H.test("sim: an empty database does not make everyone send everything", function()
+	local sim = newSim(28)
+	local all = {}
+	for i = 1, 12 do
+		local c = sim:addClient("P" .. i, "G", { [197] = { s = 300, m = 300 } }, { [197] = recipes(i * 1000, 20) })
+		all[#all + 1] = c
+		sim:at(i, function() sim:login(c) end)
+	end
+	-- 60 more members who are offline: everybody holds their records
+	local offline = {}
+	for i = 1, 60 do
+		local rec = { g = "Player-1-Off" .. i, v = 3, n = "Off" .. i, c = "MAGE", t = 1, p = { [171] = { s = 100, m = 150, k = true, r = recipes(50000 + i * 100, 10) } } }
+		offline[#offline + 1] = rec
+		for _, c in ipairs(all) do c.store:Apply(rec) end
+	end
+	sim:runUntil(200)
+	local before = sim.messages.D
+	local newcomer = sim:addClient("New", "G", {}, {})
+	sim:login(newcomer)
+	sim:runUntil(600)
+	for _, rec in ipairs(offline) do H.ok(newcomer.store:Get(rec.g), "newcomer has " .. rec.g) end
+	local sent = sim.messages.D - before
+	io.write(string.format("       newcomer: %d records needed, %d D messages sent\n", 72, sent))
+	H.ok(sent <= 72 * 1.25, "close to one D per record (99 before answers were paced): " .. sent)
 end)

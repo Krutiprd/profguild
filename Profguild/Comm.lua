@@ -9,7 +9,15 @@ local Comm = {}
 ns.Comm = Comm
 
 Comm.PREFIX = "Profguild"
-Comm.MAX_TEXT = 40000 -- largest real message is a few kB; also caps decompression size
+-- Size limits for received messages. The largest real message (a character with every
+-- profession maxed) is about 11 kB encoded. LibDeflate cannot stop a decompression half way,
+-- so the encoded size is what bounds the work for one message; a message that unpacks to more
+-- than MAX_SERIALIZED is dropped before it is deserialized and its sender is ignored for
+-- BLOCK_SECONDS, so highly compressible junk cannot be used to stall the game over and over.
+Comm.MAX_TEXT = 24000
+Comm.MAX_SERIALIZED = 262144
+Comm.BLOCK_SECONDS = 600
+Comm.blocked = {} -- sender name -> time until which its messages are ignored
 
 local AceComm = LibStub("AceComm-3.0")
 local LibSerialize = LibStub("LibSerialize")
@@ -29,6 +37,7 @@ function Comm.Decode(text)
 	if not compressed then return nil end
 	local serialized = LibDeflate:DecompressDeflate(compressed)
 	if not serialized then return nil end
+	if #serialized > Comm.MAX_SERIALIZED then return nil, "too large" end
 	local ok, msg = LibSerialize:Deserialize(serialized)
 	if not ok or type(msg) ~= "table" then return nil end
 	return msg
@@ -60,9 +69,16 @@ end
 
 function Comm:OnCommReceived(prefix, text, distribution, sender)
 	if prefix ~= Comm.PREFIX or distribution ~= "GUILD" then return end
-	local ok, msg = pcall(Comm.Decode, text)
+	local now = GetTime()
+	if type(sender) == "string" and (Comm.blocked[sender] or 0) > now then return end
+	local ok, msg, why = pcall(Comm.Decode, text)
 	if not ok or not msg then
-		ns.Debug("could not decode a message from %s", tostring(sender))
+		if why == "too large" and type(sender) == "string" then
+			Comm.blocked[sender] = now + Comm.BLOCK_SECONDS
+			ns.Debug("oversized message from %s, ignoring the sender for %d s", sender, Comm.BLOCK_SECONDS)
+		else
+			ns.Debug("could not decode a message from %s", tostring(sender))
+		end
 		return
 	end
 	-- Remember how the game names the sender: that is the name a whisper needs.
@@ -73,6 +89,6 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 	if msg.t == "Q" or msg.t == "C" then
 		if ns.reagents then ns.reagents:OnMessage(msg) end
 	elseif ns.sync then
-		ns.sync:OnMessage(msg)
+		ns.sync:OnMessage(msg, sender)
 	end
 end

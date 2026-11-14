@@ -109,6 +109,7 @@ end)
 H.test("Reagents: junk in messages is ignored, own scan replaces and reports changes", function()
 	local g = newGuild()
 	local me = g.add("Player-1-A")
+	me.r:Want(5); me.r:Want(6); me.r:Want(8)
 	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-X", c = { [5] = { [1] = "x" }, x = { [1] = 1 }, [6] = { [7] = 2 } } })
 	H.eq(me.r:Get(5), nil); H.eq(me.r:Get(6)[7], 2)
 	me.r:OnMessage({ t = "C", pv = 2, s = "Player-1-X", c = { [8] = { [7] = 2 } } })
@@ -119,6 +120,42 @@ H.test("Reagents: junk in messages is ignored, own scan replaces and reports cha
 	H.ok(not me.r:Set(6, { [7] = 3 }), "same again is no change")
 	H.ok(not me.r:Set(6, nil), "empty scan keeps the known list")
 	H.eq(me.r:Get(6)[7], 3)
+end)
+
+H.test("Reagents: only answers to our own recent questions are stored", function()
+	local g = newGuild()
+	local me = g.add("Player-1-A")
+	local other = g.add("Player-1-B")
+	-- nobody asked
+	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-X", c = { [100] = { [7] = 2 } } })
+	H.eq(me.r:Get(100), nil, "unsolicited entry ignored")
+	-- somebody else asked: we stay quiet about it and do not store the answer either
+	other.r:Want(200)
+	g.run(1)
+	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-X", c = { [200] = { [7] = 2 } } })
+	H.eq(me.r:Get(200), nil, "an answer to someone else's question is not stored")
+	-- we asked, but the answer comes far too late
+	me.r:Want(300)
+	g.run(Reagents.ASK_AGAIN + 1)
+	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-X", c = { [300] = { [7] = 2 } } })
+	H.eq(me.r:Get(300), nil, "expired question")
+	-- we asked and the answer comes in time; a second, different answer changes nothing
+	me.r:Want(400)
+	g.run(1)
+	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-X", c = { [400] = { [7] = 2 } } })
+	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-Y", c = { [400] = { [9] = 9 } } })
+	H.eq(me.r:Get(400)[7], 2, "first answer kept")
+	-- what the game says replaces what a guildmate said
+	H.ok(me.r:Set(400, { [8] = 1 }), "game data replaces it")
+	H.eq(me.r:Get(400)[7], nil); H.eq(me.r:Get(400)[8], 1)
+	-- a full catalog takes nothing more from guildmates
+	local oldMax = Reagents.MAX_CATALOG
+	Reagents.MAX_CATALOG = me.r:Count()
+	me.r:Want(500)
+	g.run(1)
+	me.r:OnMessage({ t = "C", pv = 1, s = "Player-1-X", c = { [500] = { [7] = 2 } } })
+	Reagents.MAX_CATALOG = oldMax
+	H.eq(me.r:Get(500), nil, "catalog full")
 end)
 
 H.test("Prices: Auctionator auction price, then vendor price, then TSM", function()

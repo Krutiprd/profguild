@@ -97,6 +97,36 @@ local function deepEqual(a, b)
 end
 Store.DeepEqual = deepEqual
 
+-- Number that identifies the content of a record (not its version or time). Used to notice
+-- two copies with the same version and different content. Not cryptographic.
+function Store.Checksum(rec)
+	if type(rec) ~= "table" then return 0 end
+	local h = 5381
+	local function mix(n)
+		h = (h * 33 + n) % 2147483647
+	end
+	local function mixStr(s)
+		s = tostring(s or "")
+		for i = 1, #s do mix(s:byte(i)) end
+		mix(#s)
+	end
+	mixStr(rec.n); mixStr(rec.c); mixStr(rec.a)
+	local lines = {}
+	for skillLine in pairs(rec.p or {}) do lines[#lines + 1] = skillLine end
+	table.sort(lines)
+	for _, skillLine in ipairs(lines) do
+		local prof = rec.p[skillLine]
+		mix(skillLine); mix(prof.s or 0); mix(prof.m or 0); mix(prof.k and 1 or 0)
+		local ids = {}
+		for recipeID in pairs(prof.r or {}) do ids[#ids + 1] = recipeID end
+		table.sort(ids)
+		for _, recipeID in ipairs(ids) do
+			mix(recipeID); mix(prof.r[recipeID] or 0)
+		end
+	end
+	return h
+end
+
 local function deepCopy(t)
 	if type(t) ~= "table" then return t end
 	local c = {}
@@ -116,7 +146,8 @@ StoreMT.__index = StoreMT
 function Store.New(guildDB)
 	guildDB.records = guildDB.records or {}
 	guildDB.roster = guildDB.roster or {}
-	local self = setmetatable({ db = guildDB, revision = 0 }, StoreMT)
+	-- revision counts changes of the records, rosterRevision changes of the roster
+	local self = setmetatable({ db = guildDB, revision = 0, rosterRevision = 0 }, StoreMT)
 	return self
 end
 
@@ -147,7 +178,11 @@ end
 
 -- Applies a record received from the network (or produced locally).
 -- Returns "new", "updated", "same", "older" or "invalid".
-function StoreMT:Apply(rec)
+-- fromOwner: the record comes from its owner (our own record, or a sender the roster confirms).
+-- At the maximum version nobody can publish a higher one any more, so there the owner's copy
+-- replaces a different copy with the same version. Without this, one forged record with the
+-- maximum version would stay in the guild for good.
+function StoreMT:Apply(rec, fromOwner)
 	local clean, why = Store.Validate(rec)
 	if not clean then return "invalid", why end
 	local cur = self.db.records[clean.g]
@@ -161,6 +196,11 @@ function StoreMT:Apply(rec)
 		touch(self)
 		return "updated"
 	elseif clean.v == cur.v then
+		if fromOwner and clean.v >= L.maxVersion and Store.Checksum(cur) ~= Store.Checksum(clean) then
+			self.db.records[clean.g] = clean
+			touch(self)
+			return "updated"
+		end
 		return "same"
 	end
 	return "older"
@@ -246,9 +286,16 @@ end
 -- Entries without a GUID are matched to records by name instead (if the client's roster
 -- does not return GUIDs). normalize(name) -> name in the form used for that match (optional):
 -- the roster may carry a realm suffix that the name in a record does not have.
-function StoreMT:SetRoster(entries, normalize)
+-- partial: the game returned only some of the members (roster still loading, or offline
+-- members hidden). Then the members that were read are updated and the others are kept, so
+-- nobody loses their last-online data and turns stale by mistake.
+function StoreMT:SetRoster(entries, normalize, partial)
 	normalize = normalize or function(n) return n end
 	local roster, byName = {}, {}
+	if partial then
+		for guid, entry in pairs(self.db.roster or {}) do roster[guid] = entry end
+		for name, entry in pairs(self.rosterByName or {}) do byName[name] = entry end
+	end
 	for _, e in ipairs(entries) do
 		local entry = { name = e.name, online = e.online and true or false, days = e.daysOffline, c = e.classFile }
 		if e.guid then roster[e.guid] = entry end
@@ -257,7 +304,8 @@ function StoreMT:SetRoster(entries, normalize)
 	self.db.roster = roster
 	self.rosterByName = byName
 	self.normalizeName = normalize
-	touch(self)
+	-- the recipe index depends only on the records, so the roster has its own revision
+	self.rosterRevision = self.rosterRevision + 1
 end
 
 function StoreMT:RosterEntry(guid)

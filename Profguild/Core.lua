@@ -231,12 +231,14 @@ function ns.NormalizeName(name)
 	return (name:gsub("%-.*$", ""))
 end
 
-local dataChangedToken = 0
+-- Tells the window that data changed, at most once per half second. A pending notice is not
+-- postponed by further changes: during a long sync the window keeps refreshing.
+local dataChangedPending = false
 function ns.OnDataChanged()
-	dataChangedToken = dataChangedToken + 1
-	local token = dataChangedToken
+	if dataChangedPending then return end
+	dataChangedPending = true
 	C_Timer.After(0.5, function()
-		if token ~= dataChangedToken then return end
+		dataChangedPending = false
 		if ns.UI and ns.UI.OnDataChanged then ns.UI:OnDataChanged() end
 	end)
 end
@@ -253,6 +255,14 @@ local adapter = {
 		if guid == UnitGUID("player") and own then return own.v end
 	end,
 	onOwnConflict = onOwnConflict,
+	-- The game names the real sender of an addon message. When the roster row with this guid
+	-- carries that name, the message comes from the owner of the record. Rows matched only by
+	-- name (a roster without GUIDs) prove nothing and do not count.
+	isOwner = function(guid, senderName)
+		local entry = ns.store and ns.store.db.roster[guid]
+		return entry ~= nil and type(entry.name) == "string" and type(senderName) == "string"
+			and ns.NormalizeName(entry.name) == ns.NormalizeName(senderName)
+	end,
 	onChanged = function() ns.OnDataChanged() end,
 	log = function(...) ns.Debug(...) end,
 }
@@ -295,7 +305,8 @@ function ns.OnRosterUpdate()
 	if not ns.store then return end
 	local entries, complete, namesComplete = Scanner.ReadRoster()
 	if #entries == 0 then return end
-	ns.store:SetRoster(entries, ns.NormalizeName)
+	-- a read that did not return every member only updates the members it returned
+	ns.store:SetRoster(entries, ns.NormalizeName, not namesComplete)
 	ns.rosterHasGuids = complete
 	local myGuid = UnitGUID("player")
 	local keep = { [myGuid or ""] = true }
@@ -750,12 +761,24 @@ function events.PLAYER_GUILD_UPDATE(unit)
 	C_Timer.After(2, ns.SetupGuild)
 end
 
+-- The event fires on every login, logout and zone change of any member, often several times
+-- in a row. The roster is read once, a second after the first of them.
+local rosterPending = false
 function events.GUILD_ROSTER_UPDATE()
 	if not ns.store then
 		C_Timer.After(1, ns.SetupGuild)
 		return
 	end
-	ns.OnRosterUpdate()
+	if rosterPending then return end
+	rosterPending = true
+	C_Timer.After(1, function()
+		rosterPending = false
+		local ok, err = pcall(ns.OnRosterUpdate)
+		if not ok then
+			ns.lastError = "roster: " .. tostring(err)
+			ns.Log("ERROR %s", ns.lastError)
+		end
+	end)
 end
 
 function events.SKILL_LINES_CHANGED()

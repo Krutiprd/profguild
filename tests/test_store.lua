@@ -254,3 +254,59 @@ H.test("Roster without GUIDs matches names in a different form", function()
 	H.ok(s:IsOnline("A"), "online although the roster name carries the realm")
 	H.eq(s:RosterEntry("A").name, "Ana Brightwood-Realm", "roster name kept for whispers")
 end)
+
+H.test("Checksum follows the content, not the version or the order", function()
+	local a = { g = "G", v = 1, n = "Ana", c = "MAGE", p = { [197] = { s = 10, m = 75, k = true, r = { [1] = 2, [3] = 4 } } } }
+	local b = { g = "G", v = 9, t = 5, n = "Ana", c = "MAGE", p = { [197] = { s = 10, m = 75, k = true, r = { [3] = 4, [1] = 2 } } } }
+	H.eq(Store.Checksum(a), Store.Checksum(b), "same content")
+	b.p[197].r[3] = 5
+	H.ok(Store.Checksum(a) ~= Store.Checksum(b), "different item")
+	b.p[197].r[3] = 4; b.p[197].s = 11
+	H.ok(Store.Checksum(a) ~= Store.Checksum(b), "different skill")
+	H.eq(Store.Checksum(nil), 0)
+end)
+
+H.test("Apply: at the maximum version only the owner's copy replaces a different one", function()
+	local max = Store.LIMITS.maxVersion
+	local store = Store.New({})
+	local forged = { g = "G", v = max, n = "Ana", p = { [171] = { s = 1, m = 1, r = {} } } }
+	local real = { g = "G", v = max, n = "Ana", p = { [197] = { s = 300, m = 300, r = { [1] = 2 } } } }
+	H.eq(store:Apply(forged), "new")
+	H.eq(store:Apply(real), "same", "a copy from anyone else is ignored")
+	H.eq(store:Apply(real, true), "updated", "the owner's copy wins")
+	H.ok(store:Get("G").p[197], "owner content stored")
+	H.eq(store:Apply(real, true), "same", "identical copy changes nothing")
+	H.eq(store:Apply(forged), "same", "and the forged one cannot come back")
+	-- below the maximum the usual rule stays: same version, nothing replaced
+	local low = Store.New({})
+	low:Apply({ g = "G", v = 5, n = "Ana", p = {} })
+	H.eq(low:Apply({ g = "G", v = 5, n = "Ana", p = { [197] = { s = 1, m = 1, r = {} } } }, true), "same")
+end)
+
+H.test("SetRoster: a partial read keeps the members it did not return", function()
+	local store = Store.New({})
+	store:Apply({ g = "A", v = 1, n = "Ana", t = 100, p = {} })
+	store:Apply({ g = "B", v = 1, n = "Bob", t = 100, p = {} })
+	store:SetRoster({ { guid = "A", name = "Ana", online = false, daysOffline = 1 },
+		{ guid = "B", name = "Bob", online = false, daysOffline = 2 } })
+	local now = 100 + 90 * 86400
+	H.ok(not store:IsStale("B", 30, now), "Bob was online 2 days ago")
+	-- only online members come back
+	store:SetRoster({ { guid = "A", name = "Ana", online = true, daysOffline = 0 } }, nil, true)
+	H.ok(store:IsOnline("A"), "Ana updated")
+	H.ok(not store:IsStale("B", 30, now), "Bob keeps his roster entry")
+	-- a complete read replaces everything
+	store:SetRoster({ { guid = "A", name = "Ana", online = true, daysOffline = 0 } })
+	H.eq(store:RosterEntry("B"), nil, "Bob left the guild")
+end)
+
+H.test("SetRoster does not rebuild the recipe index", function()
+	local store = Store.New({})
+	store:Apply({ g = "A", v = 1, n = "Ana", p = { [197] = { s = 1, m = 1, r = { [1] = 2 } } } })
+	local index, rosterRevision = store:Index(), store.rosterRevision
+	store:SetRoster({ { guid = "A", name = "Ana", online = true } })
+	H.eq(store:Index(), index, "same index table")
+	H.ok(store.rosterRevision > rosterRevision, "roster revision moved")
+	store:Apply({ g = "A", v = 2, n = "Ana", p = {} })
+	H.ok(store:Index() ~= index, "a record change rebuilds it")
+end)
