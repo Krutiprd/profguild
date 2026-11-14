@@ -1,0 +1,8 @@
+# CurseForge / BigWigs packager: the addon lives in the Profguild/ subfolder.
+package-as: Profguild
+move-folders:
+  Profguild/Profguild: Profguild
+ignore:
+  - tests
+  - tools
+  - docs

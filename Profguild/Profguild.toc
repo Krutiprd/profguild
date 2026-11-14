@@ -1,0 +1,26 @@
+## Interface: 16001
+## Title: Profguild
+## Notes: Share professions and recipes inside your guild. Who can craft what, no server needed.
+## Notes-skSK: Zdieľanie profesií a receptov v guilde. Kto čo vyrobí, bez servera.
+## Author: Profguild team
+## Version: 0.1.0
+## SavedVariables: ProfguildDB
+## IconTexture: Interface\Icons\Trade_BlackSmithing
+## AddonCompartmentFunc: Profguild_OnAddonCompartmentClick
+## X-License: MIT
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\AceComm-3.0\ChatThrottleLib.lua
+Libs\AceComm-3.0\AceComm-3.0.lua
+Libs\LibSerialize\LibSerialize.lua
+Libs\LibDeflate\LibDeflate.lua
+
+Locale.lua
+Store.lua
+Sync.lua
+Scanner.lua
+Comm.lua
+Tooltip.lua
+UI.lua
+Core.lua
