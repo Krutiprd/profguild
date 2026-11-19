@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.1.15.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.1.16.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -46,6 +46,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 | Vstúp do dungeonu, nauč sa recept / zmeň skill | `/pg status` ukazuje čakajúce správy; po odchode sa odošlú |
 | `/pg` | Okno v troch paneloch: profesie, recepty, detail; krížik a Esc ho zavrú |
 | Klik na profesiu vľavo | Len jej recepty; po `/reload` ostane vybraná. „Všetky“ ukáže všetko |
+| Zoznam receptov (aj spoluhráča) | Zlaté nadpisy skupín podľa typu itemu (napr. „Armor – Plate“), brnenie prvé, enchanty v „Ostatné“ na konci; v skupine najvyšší item level hore; nadpis sa nedá vybrať |
 | Koliesko myši nad zoznamom | Zoznam sa posunie, vpravo sa hýbe zlatý pruh |
 | „Len online“ a „Sync guildy“ | Filter len online crafterov; sync vypíše správu do chatu |
 | Klik na ikonu pri minimape | Otvorí a zavrie okno; ťahaním sa ikona posúva okolo minimapy |

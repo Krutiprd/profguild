@@ -318,8 +318,35 @@ local function craftersOf(entry, onlineOnly, now, staleDays)
 	return list
 end
 
--- Recipes with at least one visible crafter. Returns the rows (sorted by name), the number
--- of recipes per profession counted before the search and profession filters, and their sum.
+-- Recipe groups, like the categories of the profession window but taken from the crafted item:
+-- the game describes any item, while profession categories are known only for one's own open
+-- professions. Armour first, then weapons, then the other item classes by name; recipes
+-- without a known item (enchants) last. Inside a group: highest item level first (like the
+-- profession window; items the client has not loaded yet at the end), then required level,
+-- equipment slot and name.
+local CLASS_RANK = { [4] = 1, [2] = 2 } -- Armor, Weapon
+local RANK_OTHER_CLASS, RANK_NO_ITEM, SLOT_UNKNOWN = 3, 4, 99
+local SLOT_ORDER = {}
+for i, slot in ipairs({ "INVTYPE_HEAD", "INVTYPE_NECK", "INVTYPE_SHOULDER", "INVTYPE_CLOAK", "INVTYPE_CHEST",
+	"INVTYPE_ROBE", "INVTYPE_BODY", "INVTYPE_TABARD", "INVTYPE_WRIST", "INVTYPE_HAND", "INVTYPE_WAIST",
+	"INVTYPE_LEGS", "INVTYPE_FEET", "INVTYPE_FINGER", "INVTYPE_TRINKET", "INVTYPE_WEAPON", "INVTYPE_2HWEAPON",
+	"INVTYPE_WEAPONMAINHAND", "INVTYPE_WEAPONOFFHAND", "INVTYPE_SHIELD", "INVTYPE_HOLDABLE", "INVTYPE_RANGED",
+	"INVTYPE_RANGEDRIGHT", "INVTYPE_THROWN", "INVTYPE_AMMO", "INVTYPE_RELIC" }) do
+	SLOT_ORDER[slot] = i
+end
+
+-- rank, title, slot rank of the group a recipe's item belongs to
+local function recipeGroup(itemID)
+	local c = ns.Scanner.ItemClass(itemID)
+	if not c then return RANK_NO_ITEM, ns.T("GROUP_OTHER"), SLOT_UNKNOWN end
+	local title = c.class ~= "" and c.class or ns.T("GROUP_OTHER")
+	if c.subclass ~= "" and c.subclass ~= c.class then title = title .. " – " .. c.subclass end
+	return CLASS_RANK[c.classID] or RANK_OTHER_CLASS, title, SLOT_ORDER[c.slot] or SLOT_UNKNOWN
+end
+
+-- Recipes with at least one visible crafter. Returns the rows (grouped by profession when all
+-- are shown, then by item group, each group led by a header row), the number of recipes per
+-- profession counted before the search and profession filters, and their sum.
 function UI:BuildRecipeRows(query, category)
 	local store = ns.store
 	local rows, counts, total = {}, {}, 0
@@ -345,14 +372,40 @@ function UI:BuildRecipeRows(query, category)
 				end
 				if not hit then hit = matches(query, ns.Scanner.ItemName(entry.itemID)) end
 				if hit then
+					local groupRank, group, slotRank = recipeGroup(entry.itemID)
+					local ilvl, req = ns.Scanner.ItemLevel(entry.itemID)
 					rows[#rows + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = entry.itemID,
-						skillLine = skillLine, name = name, prof = prof, crafters = crafters }
+						skillLine = skillLine, name = name, prof = prof, crafters = crafters,
+						groupRank = groupRank, group = group, slotRank = slotRank, ilvl = ilvl or -1, req = req or -1 }
 				end
 			end
 		end
 	end
-	table.sort(rows, function(a, b) return a.name < b.name end)
-	return rows, counts, total
+	table.sort(rows, function(a, b)
+		if a.skillLine ~= b.skillLine then
+			if a.prof ~= b.prof then return a.prof < b.prof end
+			return a.skillLine < b.skillLine
+		end
+		if a.groupRank ~= b.groupRank then return a.groupRank < b.groupRank end
+		if a.group ~= b.group then return a.group < b.group end
+		if a.ilvl ~= b.ilvl then return a.ilvl > b.ilvl end
+		if a.req ~= b.req then return a.req > b.req end
+		if a.slotRank ~= b.slotRank then return a.slotRank < b.slotRank end
+		if a.name ~= b.name then return a.name < b.name end
+		return a.recipeID < b.recipeID
+	end)
+	-- a header row before every group; with all professions shown it names the profession too
+	local out, last = {}, nil
+	for _, r in ipairs(rows) do
+		local title = category and r.group or (r.prof .. " · " .. r.group)
+		local key = r.skillLine .. "\1" .. r.group
+		if key ~= last then
+			out[#out + 1] = { kind = "header", key = "h" .. key, title = title }
+			last = key
+		end
+		out[#out + 1] = r
+	end
+	return out, counts, total
 end
 
 -- Members (not stale, online filter). Returns the rows (online first), the number of members
@@ -411,6 +464,10 @@ end
 
 local function rowColor(row)
 	local d = row.data
+	if d and d.kind == "header" then
+		paint(row, C.clear, C.clear)
+		return
+	end
 	local selected = d and UI.selected and UI.selected.key == d.key
 	paint(row, selected and C.selected or C.row, selected and C.border or C.line)
 end
@@ -432,6 +489,7 @@ local function createListRow(parent, index)
 	row:EnableMouseWheel(true)
 	row:SetScript("OnMouseWheel", function(_, delta) UI:Scroll(delta) end)
 	row:SetScript("OnEnter", function(self)
+		if self.data and self.data.kind == "header" then return end
 		paint(self, C.hover, C.border)
 		if self.data and self.data.kind == "recipe" then recipeTooltip(self, self.data) end
 	end)
@@ -441,7 +499,7 @@ local function createListRow(parent, index)
 	end)
 	row:SetScript("OnClick", function(self)
 		local d = self.data
-		if not d then return end
+		if not d or d.kind == "header" then return end
 		if d.kind == "recipe" and IsShiftKeyDown() then
 			insertLink(d.recipeID, d.itemID)
 			return
@@ -1070,7 +1128,24 @@ function UI:DrawList(data)
 		local row, d = self.rows[i], data[self.offset + i]
 		row.data = d
 		if d then
-			if d.kind == "recipe" then
+			-- a group header: gold title at the bottom of the row, next to its first recipe
+			local header = d.kind == "header"
+			if header ~= row.isHeader then
+				row.isHeader = header
+				row.name:ClearAllPoints()
+				if header then
+					row.name:SetPoint("BOTTOMLEFT", 6, 5)
+					row.name:SetWidth(LIST_W - 48)
+				else
+					row.name:SetPoint("TOPLEFT", 40, -4)
+					row.name:SetWidth(LIST_W - 86)
+				end
+				showIf(row.icon, not header)
+			end
+			if header then
+				row.name:SetText(HEX_GOLD .. d.title .. "|r")
+				row.sub:SetText("")
+			elseif d.kind == "recipe" then
 				setIcon(row.icon, recipeIcon(d))
 				row.name:SetText(qualityName(d))
 				row.sub:SetText((self.shownCategory and "" or (HEX_GOLD .. d.prof .. "|r  ")) .. crafterText(d.crafters, 3))
@@ -1280,7 +1355,9 @@ function UI:Draw()
 			category = nil
 			data, counts, total = build(self, query, nil)
 		end
-		cache = { key = key, data = data, counts = counts, total = total, category = category }
+		local listed = 0 -- rows without the group headers
+		for _, d in ipairs(data) do if d.kind ~= "header" then listed = listed + 1 end end
+		cache = { key = key, data = data, counts = counts, total = total, category = category, listed = listed }
 		self.listCache = cache
 	end
 	local data, counts, category = cache.data, cache.counts, cache.category
@@ -1297,7 +1374,7 @@ function UI:Draw()
 	self:DrawSidebar(counts, category)
 
 	self.listTitle:SetText(ns.T(members and "HEAD_MEMBERS" or "HEAD_RECIPES"))
-	self.listCount:SetText(ns.T(members and "COUNT_MEMBERS" or "MEMBER_RECIPES", #data))
+	self.listCount:SetText(ns.T(members and "COUNT_MEMBERS" or "MEMBER_RECIPES", cache.listed))
 	if members then
 		self.playerButton:Hide()
 		self.playerMenu:Hide()
@@ -1319,7 +1396,7 @@ function UI:Draw()
 		self.listEmpty:SetText(ns.T("NO_GUILD"))
 	elseif ns.store:Count() == 0 then
 		self.listEmpty:SetText(ns.T("EMPTY_DB"))
-	elseif #data == 0 then
+	elseif cache.listed == 0 then
 		self.listEmpty:SetText(ns.T("NO_RESULTS"))
 	else
 		self.listEmpty:SetText("")

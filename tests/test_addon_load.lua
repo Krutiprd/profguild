@@ -114,7 +114,11 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	local UI = ns.UI
 	local function visible(list)
 		local out = {}
-		for _, r in ipairs(list) do if r:IsShown() then out[#out + 1] = rawget(r, "data") end end
+		-- group headers of the recipe list are not results
+		for _, r in ipairs(list) do
+			local d = rawget(r, "data")
+			if r:IsShown() and not (d and d.kind == "header") then out[#out + 1] = d end
+		end
 		return out
 	end
 	local function profButton(skillLine)
@@ -129,7 +133,11 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.ok(#rows == 5, "all 5 recipes listed (" .. #rows .. ")")
 	H.eq(rows[1].kind, "recipe")
 	H.ok((rawget(UI.rows[1], "_width") or 0) > 0, "rows have a fixed width")
-	for i = 2, #rows do H.ok(rows[i - 1].name <= rows[i].name, "sorted by name") end
+	H.eq(rawget(UI.rows[1], "data").kind, "header", "the list starts with a group header")
+	H.eq(UI.listCount:GetText(), ns.T("MEMBER_RECIPES", 5), "the count leaves the headers out")
+	for i = 2, #rows do
+		if rows[i - 1].skillLine == rows[i].skillLine then H.ok(rows[i - 1].name <= rows[i].name, "sorted by name") end
+	end
 
 	-- the close button hides the window
 	UI.closeButton._scripts.OnClick(UI.closeButton, "LeftButton")
@@ -163,9 +171,49 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(#visible(UI.rows), 5, "unknown profession falls back to All")
 	UI:SetCategory(171)
 
+	-- groups come from the crafted item: armour before other classes, a header before each group;
+	-- inside a group the highest item level comes first, items not loaded yet last; a header
+	-- cannot be selected
+	C_Item.GetItemInfoInstant = function(id)
+		if id == 3577 then return id, "Armor", "Plate", "INVTYPE_CHEST", 1, 4, 4 end
+		if id == 12360 then return id, "Trade Goods", "Metal & Stone", "", 1, 7, 7 end
+	end
+	local grouped = UI:BuildRecipeRows("", 171)
+	H.eq(#grouped, 4, "two headers, two recipes")
+	H.eq(grouped[1].kind, "header")
+	H.eq(grouped[1].title, "Armor – Plate")
+	H.eq(grouped[2].recipeID, 11479)
+	H.eq(grouped[3].title, "Trade Goods – Metal & Stone")
+	H.eq(grouped[4].recipeID, 17187)
+	local realGetItemInfo = C_Item.GetItemInfo
+	local levels = { [3577] = 30, [4305] = 45, [14342] = 60 }
+	C_Item.GetItemInfo = function(id)
+		if levels[id] then return "Item " .. id, "link", 2, levels[id], levels[id] - 5 end
+		return realGetItemInfo(id)
+	end
+	C_Item.GetItemInfoInstant = function(id)
+		if id == 4305 or id == 14342 or id == 7777 then return id, "Armor", "Cloth", "INVTYPE_HEAD", 1, 4, 1 end
+	end
+	local tailoring = UI:BuildRecipeRows("", 197)
+	H.eq(#tailoring, 3, "one Cloth group")
+	H.eq(tailoring[2].itemID, 14342, "item level 60 before 45")
+	H.eq(tailoring[3].itemID, 4305)
+	C_Item.GetItemInfo = realGetItemInfo
+	local all = UI:BuildRecipeRows("", nil)
+	local titles = {}
+	for _, d in ipairs(all) do if d.kind == "header" then titles[#titles + 1] = d.title end end
+	H.eq(titles[1], "Alchemy · Armor – Plate", "all professions: the header names the profession")
+	C_Item.GetItemInfoInstant = nil
+	UI.listCache = nil
+	UI:Refresh()
+	local headerRow = UI.rows[1]
+	H.eq(rawget(headerRow, "data").kind, "header")
+	headerRow._scripts.OnClick(headerRow, "LeftButton")
+	H.eq(UI.selected, nil, "a header is not selectable")
+
 	-- details: clicking a recipe lists its crafters, clicking a crafter whispers
 	H.ok(UI.detail.empty:IsShown(), "details ask to choose a recipe")
-	local first = UI.rows[1]
+	local first = UI.rows[2] -- the first recipe, under its group header
 	first._scripts.OnEnter(first)
 	first._scripts.OnLeave(first)
 	first._scripts.OnClick(first, "LeftButton")

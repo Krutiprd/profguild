@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.16 – 2026-11-15
+
+- The recipe list is grouped like a profession window: a gold header before every group, named
+  after the crafted item's type ("Armor – Plate", "Weapon – Swords", "Consumable – Potion").
+  Armour comes first, then weapons, then the other types; recipes without an item (enchants)
+  go to "Other" at the end. Inside a group the highest item level comes first (then required
+  level, equipment slot and name); an item the game has not loaded yet is asked for once and
+  sorts in when it arrives.
+  With all professions shown, the recipes are grouped by profession first.
+
 ## 0.1.15 – 2026-11-14
 
 - Player filter in the Recipes view: the "PLAYER: ALL" button opens a menu of everyone who has

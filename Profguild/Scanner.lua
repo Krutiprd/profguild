@@ -72,6 +72,51 @@ function Scanner.ItemName(itemID)
 	return nil
 end
 
+-- What kind of item a recipe makes: { classID, subclassID, class, subclass, slot }, or nil when
+-- the client does not know the item. GetItemInfoInstant reads the client's own item data
+-- without asking the server, so it works for every guildmate's recipe and never loads items.
+local itemClassCache = {}
+
+function Scanner.ItemClass(itemID)
+	if not itemID or itemID == 0 then return nil end
+	local cached = itemClassCache[itemID]
+	if cached then return cached end
+	local getInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+	local ok, id, itemType, itemSubType, equipLoc, _, classID, subclassID = call(getInstant, itemID)
+	if not ok or not id or type(classID) ~= "number" then return nil end
+	cached = {
+		classID = classID, subclassID = type(subclassID) == "number" and subclassID or 0,
+		class = type(itemType) == "string" and itemType or "",
+		subclass = type(itemSubType) == "string" and itemSubType or "",
+		slot = type(equipLoc) == "string" and equipLoc or "",
+	}
+	itemClassCache[itemID] = cached
+	return cached
+end
+
+-- Item level and required level of an item, or nil while the client does not have the item.
+-- Unlike the item class this needs the item loaded: a missing item is requested from the
+-- server once per session, and GET_ITEM_INFO_RECEIVED then rebuilds the list.
+local itemLevelCache, levelRequested = {}, {}
+
+function Scanner.ItemLevel(itemID)
+	if not itemID or itemID == 0 then return nil end
+	local cached = itemLevelCache[itemID]
+	if cached then return cached.ilvl, cached.req end
+	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+	local ok, name, _, _, itemLevel, minLevel = call(getInfo, itemID)
+	if ok and name and type(itemLevel) == "number" then
+		cached = { ilvl = itemLevel, req = type(minLevel) == "number" and minLevel or 0 }
+		itemLevelCache[itemID] = cached
+		return cached.ilvl, cached.req
+	end
+	if not levelRequested[itemID] and C_Item and C_Item.RequestLoadItemDataByID then
+		levelRequested[itemID] = true
+		call(C_Item.RequestLoadItemDataByID, itemID)
+	end
+	return nil
+end
+
 ---------------------------------------------------------------------------
 -- Character identity
 ---------------------------------------------------------------------------
