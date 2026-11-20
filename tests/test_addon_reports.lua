@@ -232,7 +232,8 @@ H.test("addon reports: an alt's report in the account's guild data is kept, and 
 	local rec = ns.reports.list[r.shared]
 	H.ok(ns.reports.list[r.shared], "held")
 	rec.by = "Player-1-0000ABCD"
-	local altId = "Player-1-0000ABCD:" .. r.t .. ":" .. r.n
+	rec.t = r.t - 100 -- older than the guild's reports below
+	local altId = "Player-1-0000ABCD:" .. rec.t .. ":" .. r.n
 	ns.reports.list[r.shared] = nil
 	rec.id = altId
 	ns.reports.list[altId] = rec
@@ -243,6 +244,7 @@ H.test("addon reports: an alt's report in the account's guild data is kept, and 
 			who = "X", text = "newer " .. i })
 	end
 	H.ok(ns.reports:Get(altId), "the alt's report is still held")
+	H.eq(ns.reports:HeldCount(), ns.Reports.MAX_HELD + 1, "the others are limited")
 	-- a report of ours whose copy is gone goes out again with the same id
 	ns.Bugs.Slash("second")
 	local r2 = ns.Bugs.All()[2]
