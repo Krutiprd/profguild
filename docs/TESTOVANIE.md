@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.4.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.5.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -102,6 +102,16 @@ Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
    `WTF\Account\<účet>\SavedVariables\Profguild.lua`, časť `bugs`.
 
 `/pg bug list` vypíše posledné hlásenia, `/pg bug clear confirm` ich zmaže aj so zapamätanými chybami.
+
+Od 0.5.0 ide hlásenie samo autorovi cez guildu (ak je niektorá z jeho postáv v guilde). V chate
+sa ukáže „Hlásenie ide autorovi cez guildu…“ a neskôr „Tvoje hlásenie #N prišlo autorovi“.
+
+| Test | Čo má byť |
+|---|---|
+| A uloží hlásenie, autor je online | Autorovi príde do pár sekúnd „Nové hlásenie chyby od A…“, A dostane „prišlo autorovi“ |
+| A uloží hlásenie, autor offline, B online; A sa odhlási, potom príde autor | Autor ho dostane od B (do pár minút po prihlásení) |
+| Autor: `/pg bug inbox` | Posledné hlásenia s menom, časom, verziou a textom |
+| `/pg status` | Riadok „Nesené hlásenia chýb: …, autor v guilde: áno“ |
 
 ## 7. Čo poslať späť
 

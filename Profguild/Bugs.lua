@@ -3,7 +3,8 @@
 -- read from the file after /reload or logout. A report carries the player's text and what
 -- was on the screen: version, view, the selected recipe, the numbers of the details, the
 -- price source, the last Lua errors of Profguild and the last lines of the diagnostic log.
--- A report is a plain table of strings and numbers, so it can later be sent to the guild.
+-- A report is a plain table of strings and numbers; it is also handed to the guild for the
+-- author (Reports.lua, ns.OnBugReport in Core.lua).
 --
 -- Lua errors: the game's error handler is wrapped. An error whose text names a Profguild file
 -- is remembered (ProfguildDB.errors), then the previous handler runs as before, so BugSack or
@@ -222,11 +223,13 @@ function Bugs.Add(text, context)
 	if type(db.bugs) ~= "table" then db.bugs = {} end
 	db.bugSeq = (tonumber(db.bugSeq) or 0) + 1
 	local okGuild, guild = pcall(GetGuildInfo, "player")
+	local okGuid, guid = pcall(UnitGUID, "player")
 	local report = {
 		n = db.bugSeq,
 		t = now(),
 		v = ns.version,
 		who = playerName(),
+		by = okGuid and type(guid) == "string" and guid or nil, -- the character, for sharing later
 		guild = okGuild and type(guild) == "string" and guild or nil,
 		lang = db.settings and db.settings.lang,
 		text = Bugs.Cut(text, Bugs.MAX_TEXT),
@@ -257,7 +260,29 @@ function Bugs.Clear()
 	ns.db.errors = {}
 end
 
--- /pg bug [text | list | clear confirm]
+-- Hands a saved report to the guild (after the "saved" line). Never breaks the caller.
+function Bugs.Share(report)
+	if report and ns.OnBugReport then
+		local ok, err = pcall(ns.OnBugReport, report)
+		if not ok then pcall(Bugs.Record, tostring(err), nil, true) end
+	end
+end
+
+-- Text from a guildmate for the chat: plain, and no escape sequence of the game left working.
+function Bugs.Safe(text)
+	return (Bugs.Plain(text):gsub("|", "||"))
+end
+
+function Bugs.Inbox()
+	return ns.db and type(ns.db.inbox) == "table" and ns.db.inbox or {}
+end
+
+local function stampOf(t)
+	local ok, s = pcall(date, "%d.%m. %H:%M", t)
+	return ok and s or tostring(t)
+end
+
+-- /pg bug [text | list | clear confirm | inbox | inbox clear confirm]
 function Bugs.Slash(rest)
 	rest = rest or ""
 	local word = rest:lower():gsub("%s+", " ")
@@ -268,9 +293,21 @@ function Bugs.Slash(rest)
 		ns.Say("BUG_LIST", #list, Bugs.ErrorCount())
 		for i = math.max(1, #list - 4), #list do
 			local r = list[i]
-			local okDate, stamp = pcall(date, "%d.%m. %H:%M", r.t)
-			ns.Print("#%d %s: %s", r.n or i, okDate and stamp or tostring(r.t), Bugs.Cut(Bugs.Plain(r.text), 80))
+			ns.Print("#%d %s: %s", r.n or i, stampOf(r.t), Bugs.Cut(Bugs.Plain(r.text), 80))
 		end
+	elseif word == "inbox" then
+		local inbox = Bugs.Inbox()
+		ns.Say("BUG_INBOX", #inbox)
+		for i = math.max(1, #inbox - 4), #inbox do
+			local r = inbox[i]
+			ns.Print("%s %s (%s): %s", stampOf(r.t), Bugs.Safe(tostring(r.who or "?")), Bugs.Safe(tostring(r.v or "?")),
+				Bugs.Safe(Bugs.Cut(tostring(r.text or ""), 80)))
+		end
+	elseif word == "inbox clear" then
+		ns.Say("BUG_INBOX_CLEAR_CONFIRM")
+	elseif word == "inbox clear confirm" then
+		if ns.db then ns.db.inbox = {} end
+		ns.Say("BUG_INBOX_CLEARED")
 	elseif word == "clear" then
 		ns.Say("BUG_CLEAR_CONFIRM")
 	elseif word == "clear confirm" then
@@ -278,7 +315,10 @@ function Bugs.Slash(rest)
 		ns.Say("BUG_CLEARED")
 	else
 		local r = Bugs.Add(rest)
-		if r then ns.Say("BUG_SAVED", r.n) end
+		if r then
+			ns.Say("BUG_SAVED", r.n)
+			Bugs.Share(r)
+		end
 	end
 end
 

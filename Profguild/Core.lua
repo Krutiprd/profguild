@@ -4,7 +4,7 @@
 local ADDON, ns = ...
 
 local Store, Sync, Scanner, Comm, Reagents, Catalog = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents, ns.Catalog
-local GuildPrices, Requests = ns.GuildPrices, ns.Requests
+local GuildPrices, Requests, Reports = ns.GuildPrices, ns.Requests, ns.Reports
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -413,6 +413,123 @@ local requestsAdapter = {
 	end,
 }
 
+-- Bug reports carried to the author (Reports.lua) ----------------------------------------
+
+local function myRealm()
+	local okFull, _, realm = pcall(UnitFullName, "player")
+	if okFull and type(realm) == "string" and realm ~= "" then return realm end
+	local ok, r = pcall(GetNormalizedRealmName)
+	return ok and r or nil
+end
+
+-- This character is one of the receivers of bug reports.
+function ns.IsReportReceiver()
+	local ok, name = pcall(UnitName, "player")
+	return ok and Reports.IsReceiverName(name, myRealm()) or false
+end
+
+-- A receiver is a member of our guild (the roster is read at most every 30 s).
+local receiverSeen = { at = -1e9, value = false }
+function ns.ReceiverInGuild()
+	if not ns.guildKey then return false end
+	local now = GetTime()
+	if now - receiverSeen.at < 30 then return receiverSeen.value end
+	local value = ns.IsReportReceiver()
+	if not value and GetNumGuildMembers and GetGuildRosterInfo then
+		local realm = myRealm()
+		local ok, total = pcall(GetNumGuildMembers)
+		for i = 1, ok and tonumber(total) or 0 do
+			local okRow, name = pcall(GetGuildRosterInfo, i)
+			if okRow and Reports.IsReceiverName(name, nil, realm) then
+				value = true
+				break
+			end
+		end
+	end
+	receiverSeen.at, receiverSeen.value = now, value
+	return value
+end
+
+ns.INBOX_MAX = 100
+
+-- The receiver's inbox (account-wide, so every receiver character sees it).
+local function deliverReport(rec)
+	local inbox = ns.db.inbox
+	if type(inbox) ~= "table" then inbox = {} ns.db.inbox = inbox end
+	for _, old in ipairs(inbox) do
+		if old.id == rec.id then return end
+	end
+	local entry = {}
+	for k, v in pairs(rec) do entry[k] = v end
+	entry.st = nil
+	entry.got = GetServerTime()
+	entry.guild = ns.guildName
+	inbox[#inbox + 1] = entry
+	while #inbox > ns.INBOX_MAX do table.remove(inbox, 1) end
+	if rec.by ~= UnitGUID("player") then
+		ns.Say("BUG_INBOX_NEW", ns.Bugs.Safe(entry.who or "?"), ns.Bugs.Safe(ns.Bugs.Cut(entry.text or "", 60)))
+	end
+end
+
+-- A report of this account reached a receiver: noted on the report, told once (also when the
+-- mark came while another character of the account was playing: ns.CheckReports).
+local function reportChanged(id, what)
+	if what ~= "delivered" then return end
+	for _, r in ipairs(ns.Bugs.All()) do
+		if r.shared == id and not r.delivered then
+			r.delivered = GetServerTime()
+			ns.Say("BUG_DELIVERED", r.n or 0)
+		end
+	end
+end
+
+local reportsAdapter = {
+	send = function(msg) Comm.Send(msg) end,
+	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
+	now = function() return GetTime() end,
+	clock = function() return GetServerTime() end,
+	after = function(delay, fn) C_Timer.After(delay, function() ns.Bugs.Call(fn) end) end,
+	random = function() return math.random() end,
+	myGuid = function() return UnitGUID("player") end,
+	isReceiver = function() return ns.IsReportReceiver() end,
+	receiverInGuild = function() return ns.ReceiverInGuild() end,
+	deliver = deliverReport,
+	onChanged = reportChanged,
+}
+
+-- A report was just saved (Bugs.Add): handed to the guild for the author. quiet: no chat line
+-- (a report saved earlier, shared now).
+function ns.OnBugReport(report, quiet)
+	if not ns.reports or type(report) ~= "table" or report.shared then return end
+	local rec = ns.reports:Share(report)
+	if not rec then return end
+	report.shared = rec.id
+	if rec.st == "d" then
+		report.delivered = GetServerTime()
+		if not quiet then ns.Say("BUG_INBOX_OWN") end
+	elseif ns.ReceiverInGuild() and not quiet then
+		ns.Say("BUG_SHARED")
+	end
+end
+
+-- After the guild is set up: this character's reports saved while it could not share them
+-- (outside the guild, right after login) go out now; marks that arrived while another character
+-- of the account was playing are told.
+function ns.CheckReports()
+	if not ns.reports then return end
+	local me, clock = UnitGUID("player"), GetServerTime()
+	for _, r in ipairs(ns.Bugs.All()) do
+		if not r.shared and r.by == me and (r.guild == nil or r.guild == ns.guildName)
+			and type(r.t) == "number" and r.t > clock - Reports.KEEP then
+			ns.OnBugReport(r, true)
+		end
+		if r.shared and not r.delivered then
+			local rec = ns.reports:Get(r.shared)
+			if rec and rec.st == "d" then reportChanged(r.shared, "delivered") end
+		end
+	end
+end
+
 -- Name of a guildmate for the window: roster name without the realm, then the sender name.
 function ns.MemberName(guid)
 	if guid == UnitGUID("player") then return UnitName("player") end
@@ -433,6 +550,7 @@ function ns.Hello(force)
 	if sent and ns.catalog then ns.catalog:Announce() end
 	if sent and ns.guildPrices then ns.guildPrices:Announce() end
 	if sent and ns.requests then ns.requests:Announce() end
+	if sent and ns.reports then ns.reports:Announce() end
 	return sent
 end
 
@@ -444,8 +562,10 @@ function ns.SetupGuild()
 	-- the old guild's prices must not reach the new guild (its timers may still run)
 	if ns.guildPrices then ns.guildPrices:Stop() end
 	if ns.requests then ns.requests:Stop() end
+	if ns.reports then ns.reports:Stop() end
+	receiverSeen.at = -1e9
 	if not key then
-		ns.store, ns.sync, ns.guildDB, ns.guildPrices, ns.requests = nil, nil, nil, nil, nil
+		ns.store, ns.sync, ns.guildDB, ns.guildPrices, ns.requests, ns.reports = nil, nil, nil, nil, nil, nil
 		ns.OnDataChanged()
 		return
 	end
@@ -471,6 +591,11 @@ function ns.SetupGuild()
 	-- item requests of this guild (Requests.lua)
 	ns.requests = Requests.New(requestsAdapter, ns.guildDB)
 	ns.requests:Prune()
+	-- bug reports carried to the author (Reports.lua)
+	ns.reports = Reports.New(reportsAdapter, ns.guildDB)
+	ns.reports:Prune()
+	ns.reports:TakeHeld()
+	ns.CheckReports()
 	if not ns.Prices.StartSharing() then
 		-- Auctionator may still be setting up its database
 		C_Timer.After(10, function() ns.Prices.StartSharing() end)
@@ -483,6 +608,13 @@ function ns.SetupGuild()
 end
 
 function ns.OnRosterUpdate()
+	-- the author may be in a roster that was not read yet at login
+	local knew = receiverSeen.value
+	receiverSeen.at = -1e9
+	if not knew and ns.reports and ns.ReceiverInGuild() then
+		ns.reports:Announce()
+		ns.CheckReports()
+	end
 	if not ns.store then return end
 	local entries, complete, namesComplete = Scanner.ReadRoster()
 	if #entries == 0 then return end
@@ -684,6 +816,11 @@ function ns.Status()
 		end
 		local s3 = ns.requests.stats
 		ns.Say("STATUS_REQUESTS", open, taken, s3.sentU, s3.sentD, s3.sentR, s3.recvU, s3.recvD, s3.recvR)
+	end
+	if ns.reports then
+		local s4 = ns.reports.stats
+		ns.Say("STATUS_REPORTS", ns.reports:HeldCount(), ns.reports:MarkCount(),
+			ns.ReceiverInGuild() and ns.T("YES") or ns.T("NO"), s4.sentU, s4.sentD, s4.sentR, s4.recvU, s4.recvD, s4.recvR)
 	end
 	if ns.guildPrices then
 		local gp, s2 = ns.guildPrices, ns.guildPrices.stats

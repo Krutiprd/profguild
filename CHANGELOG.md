@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 – 2026-11-20
+
+- Bug reports reach the author through the guild: a report saved with "Report a bug" or
+  `/pg bug <text>` is handed to every guildmate with Profguild, who keep it (without showing it)
+  and pass it on, so it arrives even when the reporter and the author are never online together
+  (messages `BU`, `BD`, `BR`). The author's characters get it in an inbox
+  (`ProfguildDB.inbox`, `/pg bug inbox`) with a chat notice; the reporter is told when it
+  arrived. Only guilds with one of the author's characters pass reports on; reports are kept
+  14 days, 60 in the guild, 10 per player.
+- The game's own look: dialog frames with the gold border, the red panel buttons.
+- A logo, also as the icon of the minimap button and in the addon list.
+- `/pg status` shows the carried reports.
+
 ## 0.4.0 – 2026-11-20
 
 - Item requests inside the guild: "ASK THE GUILD" in a recipe's details sends a request (count

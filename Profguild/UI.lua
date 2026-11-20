@@ -1598,6 +1598,7 @@ function UI:SaveBugReport()
 	local report = ns.Bugs.Add(bug.edit:GetText(), self.bugContext)
 	if not report then return end
 	ns.Say("BUG_SAVED", report.n)
+	ns.Bugs.Share(report)
 	self:CloseBugReport(true)
 end
 

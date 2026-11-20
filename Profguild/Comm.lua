@@ -67,6 +67,8 @@ function Comm.Send(msg)
 				if ns.guildPrices then ns.guildPrices:OnSendFailed(msg) end
 			elseif msg.t == "TU" or msg.t == "TD" or msg.t == "TR" then
 				if ns.requests then ns.requests:OnSendFailed(msg) end
+			elseif msg.t == "BU" or msg.t == "BD" or msg.t == "BR" then
+				if ns.reports then ns.reports:OnSendFailed(msg) end
 			elseif ns.sync then
 				ns.sync:OnSendFailed(msg)
 			end
@@ -102,6 +104,8 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 		if ns.guildPrices then ns.guildPrices:OnMessage(msg) end
 	elseif msg.t == "TU" or msg.t == "TD" or msg.t == "TR" then
 		if ns.requests then ns.requests:OnMessage(msg) end
+	elseif msg.t == "BU" or msg.t == "BD" or msg.t == "BR" then
+		if ns.reports then ns.reports:OnMessage(msg) end
 	elseif ns.sync then
 		ns.sync:OnMessage(msg, sender)
 	end
