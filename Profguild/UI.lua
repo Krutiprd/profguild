@@ -47,6 +47,10 @@ local C = {
 }
 local HEX_ONLINE, HEX_OFFLINE, HEX_MUTED, HEX_GOLD = "|cff70d08c", "|cff8a8f94", "|cff9a9ea3", "|cffebc273"
 local HEX_LOSS = "|cffe06c5f"
+local HEX_PROFIT = "|cff70d08c"
+-- skill-up colours of the profession window: 0 optimal, 1 medium, 2 easy, 3 trivial
+local HEX_DIFFICULTY = { [0] = "|cffff8040", [1] = "|cffffff00", [2] = "|cff40bf40", [3] = "|cff808080" }
+local HEX_SKILL_MIN = "|cffff2020"
 
 -- base profession skill line -> icon
 local PROF_ICONS = {
@@ -128,6 +132,7 @@ local function pill(parent, width, height)
 	b.text = label(b, "GameFontHighlightSmall", C.text)
 	b.text:SetPoint("CENTER")
 	b.text:SetJustifyH("CENTER")
+	b.text:SetWidth(width - 8) -- a long text (a player's name) is cut, not drawn over the neighbour
 	b:SetScript("OnEnter", function(self) paint(self, C.hover, self.active and C.border or C.line) end)
 	b:SetScript("OnLeave", function(self) paint(self, self.active and C.selected or C.row, self.active and C.border or C.line) end)
 	return b
@@ -274,6 +279,95 @@ local function daysText(rec)
 	return ns.T("DAYS_AGO", days)
 end
 
+-- Where the recipe comes from and what its recipe item costs at the auction house (Data.lua
+-- from Wowhead, the price live from Auctionator or TSM). Returns the text for the details and a
+-- short price text for the list ("" when the item is not on the auction house), or nil.
+local SOURCE_KEYS = { d = "SRC_DROP", v = "SRC_VENDOR", q = "SRC_QUEST", c = "SRC_CRAFT" }
+-- The game's own text is asked for only when a recipe is opened (ask = true), once, and kept in
+-- ProfguildDB.sources; the list uses what is already known.
+local function recipeItemText(recipeID, ask)
+	local sources = ns.db.sources
+	if ask and sources and sources[recipeID] == nil then
+		sources[recipeID] = ns.Scanner.RecipeSource(recipeID) or false
+	end
+	local gameText = sources and sources[recipeID] or nil
+	local itemID, src = ns.Prices.RecipeItem(recipeID)
+	if not itemID then
+		if gameText then return gameText, "" end -- already says "Vendor: ...", "Drop: ..."
+		if itemID == false then return ns.T("RECIPE_FROM", ns.T("RECIPE_TRAINER")), "" end
+		return nil
+	end
+	local parts = {}
+	for letter in src:gmatch("%a") do
+		if SOURCE_KEYS[letter] then parts[#parts + 1] = ns.T(SOURCE_KEYS[letter]) end
+	end
+	local text = gameText or ns.T("RECIPE_FROM", #parts > 0 and table.concat(parts, ", ") or "?")
+	local price, kind, age = ns.Prices.Get(itemID)
+	if price and kind == "ah" then
+		local onAH = age and ns.T("RECIPE_AH", ns.Prices.Format(price), age <= 0 and ns.T("TODAY") or ns.T("DAYS_AGO", age))
+			or ns.T("RECIPE_AH_PRICE", ns.Prices.Format(price))
+		local onMarket = ns.Prices.Available(itemID)
+		if onMarket then onAH = onAH .. ", " .. ns.T("PCS", onMarket) end
+		return text .. " · " .. onAH, ns.T("LIST_RECIPE_AH", ns.Prices.Format(price))
+	end
+	return text .. " · " .. ns.T("RECIPE_NO_AH"), ""
+end
+
+-- Profit of one craft: item price minus the reagents, or nil when a price is missing. Reagents
+-- come from the catalog of guildmates or straight from the game (asked once per session).
+local gameReagents = {}
+local function craftProfit(d)
+	if not d.itemID or d.itemID == 0 or not ns.Prices.Source() then return nil end
+	local reagents = ns.reagents and ns.reagents:Get(d.recipeID)
+	if not reagents then
+		if gameReagents[d.recipeID] == nil then gameReagents[d.recipeID] = ns.Scanner.RecipeReagents(d.recipeID) or false end
+		reagents = gameReagents[d.recipeID] or nil
+	end
+	if not reagents then return nil end
+	-- an item that binds on pickup cannot be sold: one craft costs the reagents
+	local value = ns.Scanner.ItemBoP(d.itemID) and 0 or ns.Prices.Get(d.itemID)
+	if not value then return nil end
+	local total, missing = ns.Prices.Cost(reagents)
+	if missing > 0 then return nil end
+	return value - total
+end
+UI.CraftProfit = craftProfit
+
+-- Skill levels of a recipe: learnable from (recipe item tooltip) and grey from (the game).
+-- ask = true (recipe opened): what is missing is asked from the game once and kept.
+local function recipeSkill(recipeID, ask)
+	local all = ns.db.recipeInfo
+	if not all then return nil end
+	local info = all[recipeID]
+	if ask then
+		info = info or {}
+		if info.g == nil then info.g = ns.Scanner.RecipeTrivial(recipeID) end
+		if info.m == nil then
+			local itemID = ns.Prices.RecipeItem(recipeID)
+			if itemID then info.m = ns.Scanner.RecipeItemSkill(itemID) end
+		end
+		if next(info) then all[recipeID] = info end
+	end
+	return info
+end
+
+local function recipeSkillText(recipeID)
+	local info = recipeSkill(recipeID, true)
+	if not info or not (info.g or info.m) then return nil end
+	-- only coloured numbers, like Wowhead: red = learnable from, grey = no more skill-ups from
+	local parts = {}
+	if info.m then parts[#parts + 1] = HEX_SKILL_MIN .. info.m .. "|r" end
+	if info.g then parts[#parts + 1] = HEX_DIFFICULTY[3] .. info.g .. "|r" end
+	return table.concat(parts, "  ")
+end
+
+-- Colour of a recipe for the logged-in character (only recipes it knows), as a dot.
+local function ownColorDot(recipeID)
+	local own = ns.OwnState and ns.OwnState()
+	local difficulty = own and own.colors and own.colors[recipeID]
+	return difficulty and HEX_DIFFICULTY[difficulty] and (HEX_DIFFICULTY[difficulty] .. "•|r ") or ""
+end
+
 local function crafterText(crafters, max)
 	local parts = {}
 	for i = 1, math.min(max, #crafters) do
@@ -318,6 +412,18 @@ local function craftersOf(entry, onlineOnly, now, staleDays)
 	return list
 end
 
+-- True when somebody in the guild who is not inactive knows the recipe, online or not.
+local function anyCrafter(entry, now, staleDays)
+	for _, guid in ipairs(entry.guids) do
+		if not ns.store:IsStale(guid, staleDays, now) then return true end
+	end
+	return false
+end
+
+-- Recipe filter states in click order: somebody can craft it, nobody in the guild knows it, all.
+local RECIPE_FILTERS = { known = "unknown", unknown = "all", all = "known" }
+local RECIPE_FILTER_TEXT = { known = "RECIPES_KNOWN", unknown = "RECIPES_UNKNOWN", all = "RECIPES_ALL" }
+
 -- Recipe groups, like the categories of the profession window but taken from the crafted item:
 -- the game describes any item, while profession categories are known only for one's own open
 -- professions. Armour first, then weapons, then the other item classes by name; recipes
@@ -344,40 +450,58 @@ local function recipeGroup(itemID)
 	return CLASS_RANK[c.classID] or RANK_OTHER_CLASS, title, SLOT_ORDER[c.slot] or SLOT_UNKNOWN
 end
 
--- Recipes with at least one visible crafter. Returns the rows (grouped by profession when all
--- are shown, then by item group, each group led by a header row), the number of recipes per
+-- Recipes for the recipe filter (ns.db.settings.recipeFilter): "known" lists recipes with at
+-- least one visible crafter, "unknown" the recipes of the catalog nobody in the guild knows,
+-- "all" both (and recipes whose crafters are all offline while "online only" is on). A player
+-- filter always lists that player's known recipes. Returns the rows (grouped by profession when
+-- all are shown, then by item group, each group led by a header row), the number of recipes per
 -- profession counted before the search and profession filters, and their sum.
 function UI:BuildRecipeRows(query, category)
 	local store = ns.store
 	local rows, counts, total = {}, {}, 0
 	if not store then return rows, counts, total end
 	local onlineOnly = ns.db.settings.onlineOnly
+	local mode = self.memberFilter and "known" or ns.db.settings.recipeFilter or "known"
 	local now, staleDays = GetServerTime(), ns.StaleDays()
-	for recipeID, entry in pairs(store:Index().recipes) do
-		local crafters = craftersOf(entry, onlineOnly, now, staleDays)
-		if #crafters > 0 then
-			local skillLine = entry.skillLine
-			counts[skillLine] = (counts[skillLine] or 0) + 1
-			total = total + 1
-			if not category or category == skillLine then
-				local name = recipeName(recipeID, entry.itemID)
-				local prof = ns.Scanner.ProfessionName(skillLine)
-				-- the item name is looked up only for a search: asking for it makes the game
-				-- load the item, which must not happen for every recipe each time the list is drawn
-				local hit = query == "" or matches(query, name, prof)
-				if not hit then
-					for _, c in ipairs(crafters) do
-						if c.name:lower():find(query, 1, true) then hit = true break end
-					end
-				end
-				if not hit then hit = matches(query, ns.Scanner.ItemName(entry.itemID)) end
-				if hit then
-					local groupRank, group, slotRank = recipeGroup(entry.itemID)
-					local ilvl, req = ns.Scanner.ItemLevel(entry.itemID)
-					rows[#rows + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = entry.itemID,
-						skillLine = skillLine, name = name, prof = prof, crafters = crafters,
-						groupRank = groupRank, group = group, slotRank = slotRank, ilvl = ilvl or -1, req = req or -1 }
-				end
+	local index = store:Index().recipes
+
+	local function consider(recipeID, skillLine, itemID, entry)
+		local crafters = entry and craftersOf(entry, onlineOnly, now, staleDays) or {}
+		local nobody = #crafters == 0 and not (entry and anyCrafter(entry, now, staleDays))
+		if mode == "known" and #crafters == 0 then return end
+		if mode == "unknown" and not nobody then return end
+		counts[skillLine] = (counts[skillLine] or 0) + 1
+		total = total + 1
+		if category and category ~= skillLine then return end
+		local name = recipeName(recipeID, itemID)
+		local prof = ns.Scanner.ProfessionName(skillLine)
+		-- the item name is looked up only for a search: asking for it makes the game
+		-- load the item, which must not happen for every recipe each time the list is drawn
+		local hit = query == "" or matches(query, name, prof)
+		if not hit then
+			for _, c in ipairs(crafters) do
+				if c.name:lower():find(query, 1, true) then hit = true break end
+			end
+		end
+		if not hit then hit = matches(query, ns.Scanner.ItemName(itemID)) end
+		if not hit then return end
+		local groupRank, group, slotRank = recipeGroup(itemID)
+		local ilvl, req = ns.Scanner.ItemLevel(itemID)
+		rows[#rows + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = itemID,
+			skillLine = skillLine, name = name, prof = prof, crafters = crafters, nobody = nobody,
+			groupRank = groupRank, group = group, slotRank = slotRank, ilvl = ilvl or -1, req = req or -1 }
+	end
+
+	local catalog = ns.catalog and ns.catalog:All() or {}
+	for recipeID, entry in pairs(index) do
+		local itemID = entry.itemID
+		if (not itemID or itemID == 0) and catalog[entry.skillLine] then itemID = catalog[entry.skillLine][recipeID] or itemID end
+		consider(recipeID, entry.skillLine, itemID or 0, entry)
+	end
+	if mode ~= "known" then
+		for skillLine, list in pairs(catalog) do
+			for recipeID, itemID in pairs(list) do
+				if not index[recipeID] then consider(recipeID, skillLine, itemID, nil) end
 			end
 		end
 	end
@@ -405,6 +529,29 @@ function UI:BuildRecipeRows(query, category)
 		end
 		out[#out + 1] = r
 	end
+	return out, counts, total
+end
+
+-- Leveling: the recipes of the recipe filter without group headers, sorted by the skill from
+-- which they turn grey (the game knows it for every recipe of an opened profession window),
+-- then by the skill they are learned at. Recipes without skill data come last.
+function UI:BuildLevelingRows(query, category)
+	local rows, counts, total = self:BuildRecipeRows(query, category)
+	local out = {}
+	for _, d in ipairs(rows) do
+		if d.kind == "recipe" then
+			local info = ns.db.recipeInfo and ns.db.recipeInfo[d.recipeID]
+			d.grey = info and info.g or 99999
+			d.minSkill = info and info.m or d.grey
+			out[#out + 1] = d
+		end
+	end
+	table.sort(out, function(a, b)
+		if a.grey ~= b.grey then return a.grey < b.grey end
+		if a.minSkill ~= b.minSkill then return a.minSkill < b.minSkill end
+		if a.name ~= b.name then return a.name < b.name end
+		return a.recipeID < b.recipeID
+	end)
 	return out, counts, total
 end
 
@@ -446,7 +593,24 @@ end
 -- Window
 ---------------------------------------------------------------------------
 
+-- A tooltip of an item the client has not loaded says "Retrieving item information" and does
+-- not update by itself: the shown tooltip is drawn again when the item arrives.
+local tooltipShown -- { owner =, draw = function } while one of our tooltips is shown
+local function showTooltip(owner, draw)
+	tooltipShown = { owner = owner, draw = draw }
+	draw()
+end
+local function hideTooltip()
+	tooltipShown = nil
+	GameTooltip:Hide()
+end
+function UI:OnItemInfo(itemID)
+	local t = tooltipShown
+	if t and GameTooltip:IsShown() and GameTooltip:GetOwner() == t.owner then t.draw() end
+end
+
 local function recipeTooltip(owner, d)
+	ns.Scanner.WantItem(d.itemID, true)
 	GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
 	if ns.Tooltip then ns.Tooltip.suppress = true end
 	local ok = false
@@ -457,6 +621,9 @@ local function recipeTooltip(owner, d)
 	GameTooltip:AddLine(ns.T("CRAFTERS") .. ":", C.gold[1], C.gold[2], C.gold[3])
 	for _, c in ipairs(d.crafters) do
 		if c.online then GameTooltip:AddLine(c.name, 0.44, 0.82, 0.55) else GameTooltip:AddLine(c.name, 0.55, 0.56, 0.58) end
+	end
+	if #d.crafters == 0 then
+		GameTooltip:AddLine(ns.T(d.nobody and "NOBODY_KNOWS" or "NOBODY_ONLINE"), C.muted[1], C.muted[2], C.muted[3])
 	end
 	GameTooltip:AddLine(ns.T("ROW_HINT"), C.muted[1], C.muted[2], C.muted[3], true)
 	GameTooltip:Show()
@@ -485,16 +652,27 @@ local function createListRow(parent, index)
 	row.sub = label(row, "GameFontHighlightSmall", C.muted)
 	row.sub:SetPoint("TOPLEFT", 40, -20)
 	row.sub:SetWidth(LIST_W - 86)
+	-- profit or loss of one craft, right of the name
+	row.profit = label(row, "GameFontHighlightSmall", C.text)
+	row.profit:SetPoint("TOPRIGHT", -8, -5)
+	row.profit:SetJustifyH("RIGHT")
+	-- character level the crafted item requires, under the profit
+	row.level = label(row, "GameFontHighlightSmall", C.muted)
+	row.level:SetPoint("TOPRIGHT", -8, -20)
+	row.level:SetJustifyH("RIGHT")
 	row:RegisterForClicks("LeftButtonUp")
 	row:EnableMouseWheel(true)
 	row:SetScript("OnMouseWheel", function(_, delta) UI:Scroll(delta) end)
 	row:SetScript("OnEnter", function(self)
 		if self.data and self.data.kind == "header" then return end
 		paint(self, C.hover, C.border)
-		if self.data and self.data.kind == "recipe" then recipeTooltip(self, self.data) end
+		if self.data and self.data.kind == "recipe" then
+			local d = self.data
+			showTooltip(self, function() recipeTooltip(self, d) end)
+		end
 	end)
 	row:SetScript("OnLeave", function(self)
-		GameTooltip:Hide()
+		hideTooltip()
 		rowColor(self)
 	end)
 	row:SetScript("OnClick", function(self)
@@ -573,13 +751,16 @@ local function createReagentRow(parent, index)
 		self.bg:SetColorTexture(unpack(C.hover))
 		local d = self.data
 		if not d then return end
-		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		pcall(GameTooltip.SetItemByID, GameTooltip, d.itemID)
-		GameTooltip:Show()
+		ns.Scanner.WantItem(d.itemID, true)
+		showTooltip(self, function()
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			pcall(GameTooltip.SetItemByID, GameTooltip, d.itemID)
+			GameTooltip:Show()
+		end)
 	end)
 	row:SetScript("OnLeave", function(self)
 		self.bg:SetColorTexture(unpack(C.clear))
-		GameTooltip:Hide()
+		hideTooltip()
 	end)
 	row:SetScript("OnClick", function(self)
 		if self.data and IsShiftKeyDown() then insertLink(0, self.data.itemID) end
@@ -656,8 +837,11 @@ function UI:Create()
 	self.membersTab = pill(f, 110, 24)
 	self.membersTab:SetPoint("TOPRIGHT", -44, -20)
 	self.membersTab:SetScript("OnClick", function() UI:SetView("members") end)
+	self.levelingTab = pill(f, 110, 24)
+	self.levelingTab:SetPoint("RIGHT", self.membersTab, "LEFT", -6, 0)
+	self.levelingTab:SetScript("OnClick", function() UI:SetView("leveling") end)
 	self.recipesTab = pill(f, 110, 24)
-	self.recipesTab:SetPoint("RIGHT", self.membersTab, "LEFT", -6, 0)
+	self.recipesTab:SetPoint("RIGHT", self.levelingTab, "LEFT", -6, 0)
 	self.recipesTab:SetScript("OnClick", function() UI:SetView("recipes") end)
 	hline(f, 14, -64, WIDTH - 28)
 
@@ -706,15 +890,31 @@ function UI:Create()
 	end)
 	self.search, self.searchHint = search, hint
 
-	self.onlineButton = pill(mid, 130, 20)
+	self.onlineButton = pill(mid, 78, 20)
 	self.onlineButton:SetPoint("TOPLEFT", 12, -66)
 	self.onlineButton:SetScript("OnClick", function()
 		ns.db.settings.onlineOnly = not ns.db.settings.onlineOnly
 		UI.offset = 0
 		UI:Refresh()
 	end)
+	-- recipe filter: known by somebody, known by nobody, all (click switches to the next)
+	self.recipeButton = pill(mid, 128, 20)
+	self.recipeButton:SetPoint("LEFT", self.onlineButton, "RIGHT", 4, 0)
+	self.recipeButton:SetScript("OnClick", function(self)
+		if self.disabled then return end
+		ns.db.settings.recipeFilter = RECIPE_FILTERS[ns.db.settings.recipeFilter] or "known"
+		UI.offset = 0
+		UI.selected = nil
+		UI:Refresh()
+	end)
+	self.recipeButton:HookScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:AddLine(ns.T("RECIPE_FILTER_HINT"), 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	self.recipeButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
 	-- player filter: a button that opens a menu of everyone who has recipes
-	self.playerButton = pill(mid, 170, 20)
+	self.playerButton = pill(mid, 92, 20)
 	self.playerButton:SetPoint("TOPRIGHT", -12, -66)
 	self.playerButton:SetScript("OnClick", function()
 		if UI.playerMenu:IsShown() then
@@ -796,6 +996,19 @@ function UI:Create()
 	local d = { frame = det }
 	d.title = label(det, "GameFontNormal", C.gold)
 	d.title:SetPoint("TOPLEFT", 12, -12)
+	-- at the auction house: search the item, its reagents and its recipe item for current prices
+	d.refreshButton = pill(det, 140, 18)
+	d.refreshButton:SetPoint("TOPRIGHT", -10, -8)
+	d.refreshButton:SetFrameLevel((det:GetFrameLevel() or 1) + 10)
+	d.refreshButton:SetScript("OnClick", function() UI:RefreshPrices() end)
+	d.refreshButton:HookScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:AddLine(ns.T("BTN_REFRESH"), C.gold[1], C.gold[2], C.gold[3])
+		GameTooltip:AddLine(ns.T("REFRESH_HINT"), 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	d.refreshButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
+	d.refreshButton:Hide()
 	hline(det, 10, -32, DETAIL_W - 20)
 	d.empty = label(det, "GameFontHighlight", C.muted)
 	d.empty:SetPoint("CENTER", 0, 20)
@@ -816,17 +1029,21 @@ function UI:Create()
 	d.sub:SetPoint("TOPLEFT", 64, -64)
 	d.sub:SetWidth(DETAIL_W - 80)
 	d.value = label(body, "GameFontHighlightSmall", C.muted)
-	d.value:SetPoint("TOPLEFT", 64, -80)
+	d.value:SetPoint("TOPLEFT", 64, -78)
 	d.value:SetWidth(DETAIL_W - 80)
+	-- where the recipe comes from and its price at the auction house
+	d.recipeInfo = label(body, "GameFontHighlightSmall", C.muted)
+	d.recipeInfo:SetPoint("TOPLEFT", 14, -91)
+	d.recipeInfo:SetWidth(DETAIL_W - 28)
 	local hover = CreateFrame("Frame", nil, body)
 	hover:SetPoint("TOPLEFT", 12, -40)
 	hover:SetSize(DETAIL_W - 24, 54)
 	hover:EnableMouse(true)
 	hover:SetScript("OnEnter", function(self)
 		local s = UI.selected
-		if s and s.kind == "recipe" then recipeTooltip(self, s) end
+		if s and s.kind == "recipe" then showTooltip(self, function() recipeTooltip(self, s) end) end
 	end)
-	hover:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	hover:SetScript("OnLeave", hideTooltip)
 	hover:SetScript("OnMouseUp", function()
 		local s = UI.selected
 		if s and s.kind == "recipe" and IsShiftKeyDown() then insertLink(s.recipeID, s.itemID) end
@@ -950,7 +1167,15 @@ function UI:Create()
 	end)
 	local events = CreateFrame("Frame", nil, f)
 	events:RegisterEvent("GET_ITEM_INFO_RECEIVED")
-	events:SetScript("OnEvent", function()
+	-- the refresh button is shown only while the auction house is open
+	pcall(events.RegisterEvent, events, "AUCTION_HOUSE_SHOW")
+	pcall(events.RegisterEvent, events, "AUCTION_HOUSE_CLOSED")
+	events:SetScript("OnEvent", function(_, event, itemID)
+		if event ~= "GET_ITEM_INFO_RECEIVED" then
+			if f:IsShown() then UI:ScheduleRefresh(0.3) end
+			return
+		end
+		UI:OnItemInfo(itemID)
 		UI.nameEpoch = (UI.nameEpoch or 0) + 1 -- item names may have arrived: rebuild the list
 		if f:IsShown() then UI:ScheduleRefresh(0.5) end
 	end)
@@ -971,6 +1196,7 @@ function UI:SetView(view)
 	self.view = view
 	self.selected = nil
 	self.offset = 0
+	self.levelJump = view == "leveling"
 	self:Refresh()
 end
 
@@ -979,6 +1205,7 @@ function UI:SetCategory(skillLine)
 	self.category = skillLine
 	ns.db.settings.category = skillLine
 	self.offset = 0
+	self.levelJump = self.view == "leveling"
 	self:Refresh()
 end
 
@@ -1142,13 +1369,34 @@ function UI:DrawList(data)
 				end
 				showIf(row.icon, not header)
 			end
+			-- a recipe nobody in the guild knows has a grey icon
+			row.icon:SetDesaturated(d.kind == "recipe" and d.nobody or false)
+			-- items on screen are loaded first
+			if d.kind == "recipe" then ns.Scanner.WantItem(d.itemID, true) end
+			local profit = d.kind == "recipe" and craftProfit(d) or nil
+			row.profit:SetText(profit and ((profit < 0 and HEX_LOSS or HEX_PROFIT) .. ns.Prices.Short(profit) .. "|r") or "")
+			if not header then row.name:SetWidth(LIST_W - 86 - (profit and 44 or 0)) end
+			local req = d.kind == "recipe" and d.req or -1
+			row.level:SetText(req > 1 and ns.T("LIST_LEVEL", req) or "")
+			row.sub:SetWidth(LIST_W - 86 - (req > 1 and 40 or 0))
 			if header then
 				row.name:SetText(HEX_GOLD .. d.title .. "|r")
 				row.sub:SetText("")
 			elseif d.kind == "recipe" then
 				setIcon(row.icon, recipeIcon(d))
-				row.name:SetText(qualityName(d))
-				row.sub:SetText((self.shownCategory and "" or (HEX_GOLD .. d.prof .. "|r  ")) .. crafterText(d.crafters, 3))
+				row.name:SetText(ownColorDot(d.recipeID) .. qualityName(d))
+				local who = #d.crafters > 0 and crafterText(d.crafters, 3)
+					or (HEX_MUTED .. ns.T(d.nobody and "NOBODY_KNOWS" or "NOBODY_ONLINE") .. "|r")
+				if d.nobody then
+					local _, short = recipeItemText(d.recipeID)
+					if short and short ~= "" then who = who .. HEX_MUTED .. " · |r" .. short end
+				end
+				if self.view == "leveling" then
+					-- the skill levels go first: learnable from (red) and grey from
+					local skill = recipeSkillText(d.recipeID)
+					who = (skill and (skill .. "  ") or (HEX_MUTED .. ns.T("SKILL_UNKNOWN") .. "|r  ")) .. who
+				end
+				row.sub:SetText((self.shownCategory and "" or (HEX_GOLD .. d.prof .. "|r  ")) .. who)
 			else
 				setClassIcon(row.icon, d.rec.c)
 				row.name:SetText(classColored(d.name, d.rec.c) .. (d.online and (" " .. HEX_ONLINE .. ns.T("STATE_ONLINE") .. "|r") or ""))
@@ -1210,6 +1458,8 @@ function UI:DrawReagents(s)
 			local name = ns.Scanner.ItemName(itemID) or ("#" .. itemID)
 			local price, kind = ns.Prices.Get(itemID)
 			local right = price and ns.Prices.Format(price * count) or (HEX_MUTED .. "?|r")
+			local onMarket = kind == "ah" and ns.Prices.Available(itemID)
+			if onMarket then right = HEX_MUTED .. ns.T("PCS", onMarket) .. "|r  " .. right end
 			if kind == "vendor" then right = HEX_MUTED .. ns.T("PRICE_VENDOR") .. "|r " .. right end
 			lines[#lines + 1] = { itemID = itemID, count = count, name = name,
 				icon = safeCall(C_Item and C_Item.GetItemIconByID, itemID) or safeCall(GetItemIcon, itemID) or QUESTION,
@@ -1236,8 +1486,14 @@ function UI:DrawReagents(s)
 
 	-- cost of one craft and what the item sells for
 	local source = ns.Prices.Source()
-	local value = s.itemID and s.itemID > 0 and ns.Prices.Get(s.itemID)
-	d.value:SetText(value and ns.T("ITEM_VALUE", ns.Prices.Format(value)) or "")
+	local bop = ns.Scanner.ItemBoP(s.itemID)
+	local value = s.itemID and s.itemID > 0 and (bop and 0 or ns.Prices.Get(s.itemID))
+	local skill = recipeSkillText(s.recipeID)
+	local valueText = bop and (HEX_LOSS .. ns.T("ITEM_BOP") .. "|r") or (value and ns.T("ITEM_VALUE", ns.Prices.Format(value))) or ""
+	local onMarket = value and not bop and ns.Prices.Available(s.itemID)
+	if onMarket then valueText = valueText .. " " .. HEX_MUTED .. "(" .. ns.T("PCS", onMarket) .. ")|r" end
+	if skill then valueText = valueText ~= "" and (valueText .. "  ·  " .. skill) or skill end
+	d.value:SetText(valueText)
 	d.costLabel:SetText(ns.T("COST_LABEL"))
 	d.profitLabel:SetText(ns.T("PROFIT_LABEL"))
 	if not source then
@@ -1259,9 +1515,44 @@ function UI:DrawReagents(s)
 	setPill(d.shopButton, ns.T("BTN_SHOP"), false, not (reagents and ns.Prices.CanShop()))
 end
 
+-- Searches the auction house (through Auctionator) for the selected recipe's item, reagents
+-- and recipe item; the window is drawn again when Auctionator has saved the prices.
+function UI:RefreshPrices()
+	local s = self.selected
+	if not s or s.kind ~= "recipe" then return end
+	local ids = {}
+	if s.itemID and s.itemID > 0 and not ns.Scanner.ItemBoP(s.itemID) then ids[#ids + 1] = s.itemID end
+	local reagents = (ns.reagents and ns.reagents:Get(s.recipeID)) or ns.Scanner.RecipeReagents(s.recipeID) or {}
+	local sorted = {}
+	for itemID in pairs(reagents) do sorted[#sorted + 1] = itemID end
+	table.sort(sorted)
+	for _, itemID in ipairs(sorted) do ids[#ids + 1] = itemID end
+	local recipeItem = ns.Prices.RecipeItem(s.recipeID)
+	if recipeItem then ids[#ids + 1] = recipeItem end
+	local function redraw()
+		UI.listCache = nil
+		UI:ScheduleRefresh(0.5) -- Auctionator saves the prices a frame after its notice
+	end
+	local n, why = ns.Prices.Refresh(ids, redraw)
+	if n then
+		ns.Say("REFRESH_STARTED", n)
+		-- in case a notice is missed: draw again a few times while the search runs
+		for _, delay in ipairs({ 1, 3, 6 }) do C_Timer.After(delay, redraw) end
+	elseif why == "names" then
+		for _, itemID in ipairs(ids) do ns.Scanner.WantItem(itemID, true) end
+		ns.Say("SHOP_NAMES")
+	elseif why == "closed" then
+		ns.Say("REFRESH_CLOSED")
+	else
+		ns.Say("SHOP_FAILED")
+	end
+end
+
 function UI:DrawDetail()
 	local d, s = self.detail, self.selected
 	d.title:SetText(ns.T("HEAD_DETAILS"))
+	setPill(d.refreshButton, ns.T("BTN_REFRESH"), false)
+	showIf(d.refreshButton, s ~= nil and s.kind == "recipe" and ns.Prices.CanRefresh())
 	if not s then
 		d.body:Hide()
 		d.empty:SetText(ns.T(self.view == "members" and "PICK_MEMBER" or "PICK_RECIPE"))
@@ -1278,7 +1569,9 @@ function UI:DrawDetail()
 		d.rows, d.action = d.crafterRows, d.linkButton
 		setIcon(d.icon, recipeIcon(s))
 		d.name:SetText(qualityName(s))
-		d.sub:SetText(s.prof)
+		local _, req = ns.Scanner.ItemLevel(s.itemID)
+		d.sub:SetText(s.prof .. ((req and req > 1) and ("  " .. HEX_MUTED .. ns.T("REQ_LEVEL", req) .. "|r") or ""))
+		d.recipeInfo:SetText((recipeItemText(s.recipeID, true)) or "")
 		self:DrawReagents(s)
 		d.crafterTitle:SetText(ns.T("HEAD_CRAFTERS"))
 		d.crafterCount:SetText(tostring(#s.crafters))
@@ -1286,7 +1579,9 @@ function UI:DrawDetail()
 			lines[#lines + 1] = { guid = c.guid, left = classColored(c.name, c.rec and c.rec.c),
 				right = c.online and (HEX_ONLINE .. ns.T("STATE_ONLINE") .. "|r") or daysText(c.rec) }
 		end
-		d.recipeHint:SetText(ns.T(#s.crafters > CRAFTER_ROWS and "HINT_CRAFTER_SCROLL" or "HINT_CRAFTER"))
+		local hint = #s.crafters > CRAFTER_ROWS and "HINT_CRAFTER_SCROLL" or "HINT_CRAFTER"
+		if #s.crafters == 0 then hint = s.nobody and "HINT_NOBODY" or "HINT_NOBODY_ONLINE" end
+		d.recipeHint:SetText(ns.T(hint))
 		setPill(d.linkButton, ns.T("BTN_LINK"), false)
 	else
 		d.recipeBody:Hide()
@@ -1297,6 +1592,7 @@ function UI:DrawDetail()
 		d.name:SetText(classColored(s.name, rec.c))
 		d.sub:SetText(s.online and (HEX_ONLINE .. ns.T("STATE_ONLINE") .. "|r") or ns.T("MEMBER_UPDATED", daysText(rec)))
 		d.value:SetText("")
+		d.recipeInfo:SetText("")
 		d.section:SetText(ns.T("HEAD_MEMBER_PROFS"))
 		for skillLine, prof in pairs(rec.p) do
 			local n = 0
@@ -1325,8 +1621,13 @@ function UI:DrawDetail()
 end
 
 function UI:Draw()
+	-- recipe items from the auction house database: a new match redraws the list
+	if ns.Prices.IndexRecipeItems() > 0 then
+		ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+	end
 	local query = (self.search:GetText() or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 	local members = self.view == "members"
+	local leveling = self.view == "leveling"
 
 	-- texts that follow the language
 	self.title:SetText(ns.T("WINDOW_TITLE"):upper())
@@ -1334,20 +1635,26 @@ function UI:Draw()
 	self.subtitle:SetText(ns.T("SUBTITLE"))
 	self.sideTitle:SetText(ns.T("HEAD_PROFESSIONS"))
 	self.searchHint:SetText(ns.T("SEARCH_HINT"))
-	setPill(self.recipesTab, ns.T("HEAD_RECIPES"), not members)
+	setPill(self.recipesTab, ns.T("HEAD_RECIPES"), self.view == "recipes")
+	setPill(self.levelingTab, ns.T("HEAD_LEVELING"), leveling)
 	setPill(self.membersTab, ns.T("HEAD_MEMBERS"), members)
 	setPill(self.onlineButton, ns.T(ns.db.settings.onlineOnly and "ONLINE_ON" or "ONLINE_OFF"), ns.db.settings.onlineOnly)
+	local recipeFilter = ns.db.settings.recipeFilter or "known"
+	setPill(self.recipeButton, ns.T(RECIPE_FILTER_TEXT[recipeFilter] or "RECIPES_KNOWN"), recipeFilter ~= "known",
+		self.memberFilter ~= nil) -- a player filter lists that player's known recipes
+	showIf(self.recipeButton, not members)
 	setPill(self.syncButton, ns.T("BTN_SYNC"), false)
 
 	-- The list is built once and kept while nothing it depends on changed, so scrolling and
 	-- selecting do not walk the whole database again.
 	local store = ns.store
 	local key = table.concat({ self.view, query, tostring(self.category), tostring(ns.db.settings.onlineOnly),
+		tostring(ns.db.settings.recipeFilter), ns.catalog and ns.catalog.revision or 0,
 		tostring(self.memberFilter), tostring(store), store and store.revision or 0, store and store.rosterRevision or 0,
-		tostring(ns.lang), self.nameEpoch or 0 }, "\1")
+		tostring(ns.lang), self.nameEpoch or 0, ns.recipeInfoRevision or 0 }, "\1")
 	local cache = self.listCache
 	if not cache or cache.key ~= key then
-		local build = members and self.BuildMemberRows or self.BuildRecipeRows
+		local build = members and self.BuildMemberRows or (leveling and self.BuildLevelingRows) or self.BuildRecipeRows
 		local category = self.category
 		local data, counts, total = build(self, query, category)
 		-- a profession that is no longer visible (dropped, filtered) shows all of them instead
@@ -1363,6 +1670,17 @@ function UI:Draw()
 	local data, counts, category = cache.data, cache.counts, cache.category
 	self.memberTotal = cache.total
 	self.shownCategory = category
+	-- leveling opens at the first recipe that still gives skill to this character
+	if leveling and self.levelJump then
+		self.levelJump = false
+		local own = ns.OwnState and ns.OwnState()
+		local mine = category and own and own.profs and own.profs[category]
+		if mine and mine.s then
+			for i, d in ipairs(data) do
+				if d.grey and d.grey > mine.s then self.offset, self.levelStart = i - 1, i break end
+			end
+		end
+	end
 
 	-- keep the selection while it is still listed
 	if self.selected then
@@ -1373,7 +1691,7 @@ function UI:Draw()
 
 	self:DrawSidebar(counts, category)
 
-	self.listTitle:SetText(ns.T(members and "HEAD_MEMBERS" or "HEAD_RECIPES"))
+	self.listTitle:SetText(ns.T(members and "HEAD_MEMBERS" or (leveling and "HEAD_LEVELING") or "HEAD_RECIPES"))
 	self.listCount:SetText(ns.T(members and "COUNT_MEMBERS" or "MEMBER_RECIPES", cache.listed))
 	if members then
 		self.playerButton:Hide()
@@ -1396,6 +1714,10 @@ function UI:Draw()
 		self.listEmpty:SetText(ns.T("NO_GUILD"))
 	elseif ns.store:Count() == 0 then
 		self.listEmpty:SetText(ns.T("EMPTY_DB"))
+	elseif cache.listed == 0 and not members and (ns.db.settings.recipeFilter or "known") ~= "known"
+		and not self.memberFilter and not (ns.catalog and next(ns.catalog:All())) then
+		-- the catalog fills only from opened profession windows (own or a guildmate's)
+		self.listEmpty:SetText(ns.T("CATALOG_EMPTY"))
 	elseif cache.listed == 0 then
 		self.listEmpty:SetText(ns.T("NO_RESULTS"))
 	else

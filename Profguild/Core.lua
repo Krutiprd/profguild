@@ -3,7 +3,7 @@
 
 local ADDON, ns = ...
 
-local Store, Sync, Scanner, Comm, Reagents = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents
+local Store, Sync, Scanner, Comm, Reagents, Catalog = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents, ns.Catalog
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -80,6 +80,17 @@ local function initDB()
 	db.own = db.own or {}
 	-- reagents per recipe: game data, kept for the whole account (see Reagents.lua)
 	if type(db.reagents) ~= "table" then db.reagents = {} end
+	-- every recipe of every profession, learned or not: game data, kept for the whole account
+	if type(db.catalog) ~= "table" then db.catalog = {} end
+	-- where recipes are found, asked from the game when a recipe is opened in the window
+	if type(db.sources) ~= "table" then db.sources = {} end
+	-- skill levels of recipes: [recipeID] = { g = grey from, m = learnable from (recipe item) }
+	if type(db.recipeInfo) ~= "table" then db.recipeInfo = {} end
+	-- recipe items seen at the auction house: [recipeID] = itemID (Prices.IndexRecipeItems)
+	if type(db.recipeItems) ~= "table" then db.recipeItems = {} end
+	if db.settings.recipeFilter ~= "unknown" and db.settings.recipeFilter ~= "all" then
+		db.settings.recipeFilter = "known"
+	end
 	ns.db = db
 	ns.SetLanguage(db.settings.lang)
 end
@@ -195,7 +206,11 @@ function ns.RemindToScan()
 	if not own or not own.profs then return end
 	local names = {}
 	for skillLine in pairs(own.profs) do
-		if not (own.scanned and own.scanned[skillLine]) and not reminded[skillLine] then
+		local scanned = own.scanned and own.scanned[skillLine]
+		-- scanned before the recipe catalog existed (0.1.x): its unlearned recipes are missing
+		local noCatalog = scanned and ns.catalog and not ns.catalog:Get(skillLine)
+			and own.recipes and own.recipes[skillLine] and next(own.recipes[skillLine]) ~= nil
+		if (not scanned or noCatalog) and not reminded[skillLine] then
 			reminded[skillLine] = true
 			names[#names + 1] = Scanner.ProfessionName(skillLine)
 		end
@@ -304,6 +319,38 @@ local reagentAdapter = {
 	onChanged = function() ns.OnDataChanged() end,
 }
 
+-- A recipe ID from a guildmate is taken only when the game knows the recipe and does not put
+-- it into another profession. Returns the crafted item (0 for none) or nil.
+local function verifyRecipe(recipeID, skillLine)
+	local known, itemID = Scanner.RecipeInGame(recipeID)
+	if not known then return nil end
+	local prof = Scanner.ProfessionForRecipe(recipeID)
+	if prof and prof ~= skillLine and Scanner.ProfessionName(prof) ~= Scanner.ProfessionName(skillLine) then
+		return nil
+	end
+	return itemID
+end
+
+local catalogAdapter = {
+	send = function(msg) Comm.Send(msg) end,
+	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
+	now = function() return GetTime() end,
+	after = function(delay, fn) C_Timer.After(delay, fn) end,
+	random = function() return math.random() end,
+	myGuid = function() return UnitGUID("player") end,
+	verify = verifyRecipe,
+	onChanged = function() ns.OnDataChanged() end,
+}
+
+-- Sends a hello and, when it went out, the recipe catalog digest after it.
+-- Returns what Sync:Hello returned.
+function ns.Hello(force)
+	if not ns.sync then return false end
+	local sent = ns.sync:Hello(force)
+	if sent and ns.catalog then ns.catalog:Announce() end
+	return sent
+end
+
 -- (Re)creates the store and sync for the current guild. Called on login and guild changes.
 function ns.SetupGuild()
 	local key, guildName, realm = Scanner.GuildKey()
@@ -332,9 +379,7 @@ function ns.SetupGuild()
 	Scanner.RequestRoster()
 	ns.RefreshOwn()
 	local d = ns.Config.loginHelloDelay
-	C_Timer.After(d[1] + math.random() * (d[2] - d[1]), function()
-		if ns.sync then ns.sync:Hello(true) end
-	end)
+	C_Timer.After(d[1] + math.random() * (d[2] - d[1]), function() ns.Hello(true) end)
 	ns.OnDataChanged()
 end
 
@@ -395,7 +440,21 @@ local function scheduleScan()
 	local token = scanToken
 	C_Timer.After(1, function()
 		if token ~= scanToken then return end
-		local skillLine, recipes, count, reagents = Scanner.ScanOpenProfession()
+		-- timer callbacks are not protected like event handlers: an error is logged, not lost
+		local ok, err = pcall(ns.ScanNow)
+		if not ok then
+			ns.lastError = "scan: " .. tostring(err)
+			ns.Log("ERROR %s", ns.lastError)
+			ns.Print("%s", ns.lastError)
+		end
+	end)
+end
+
+-- Reads the open profession window: own recipes, reagents and the recipe catalog.
+function ns.ScanNow()
+	ns.Log("scan: profession window event")
+	do
+		local skillLine, recipes, count, reagents, listInfo = Scanner.ScanOpenProfession()
 		if not skillLine then
 			ns.Debug("scan skipped: %s", tostring(recipes))
 			return
@@ -403,6 +462,22 @@ local function scheduleScan()
 		local own = ownState()
 		if not own then return end
 		skillLine = resolveSkillLine(own, skillLine)
+		-- every recipe of the window, learned or not, goes to the recipe catalog
+		if ns.catalog and listInfo and next(listInfo.all) then
+			local added = ns.catalog:Add(skillLine, listInfo.all)
+			if added > 0 then ns.Log("catalog %s: %d recipes added", Scanner.ProfessionName(skillLine), added) end
+		end
+		if listInfo then
+			for recipeID, grey in pairs(listInfo.trivial) do
+				local info = ns.db.recipeInfo[recipeID] or {}
+				info.g = grey
+				ns.db.recipeInfo[recipeID] = info
+			end
+			ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+			-- colour of each own recipe for this character (not published)
+			own.colors = own.colors or {}
+			for recipeID, difficulty in pairs(listInfo.difficulty) do own.colors[recipeID] = difficulty end
+		end
 		-- never replace a known list with an empty one (data not loaded yet)
 		local old = own.recipes and own.recipes[skillLine]
 		if count == 0 and old and next(old) then return end
@@ -413,6 +488,10 @@ local function scheduleScan()
 		local withReagents = 0
 		for _ in pairs(reagents or {}) do withReagents = withReagents + 1 end
 		ns.Log("scan %s (%s): %d recipes, %d with reagents", Scanner.ProfessionName(skillLine), tostring(skillLine), count, withReagents)
+		if listInfo then
+			ns.Log("scan %s: recipe list %d ids, %d not learned; %s", Scanner.ProfessionName(skillLine),
+				listInfo.total, listInfo.unlearned, table.concat(listInfo.samples, "; "))
+		end
 		if ns.reagents then
 			for recipeID, list in pairs(reagents or {}) do ns.reagents:Set(recipeID, list) end
 		end
@@ -420,7 +499,7 @@ local function scheduleScan()
 			ns.Say("SCANNED", Scanner.ProfessionName(skillLine), count)
 		end
 		ns.ScheduleRefresh()
-	end)
+	end
 end
 
 local learnedNames = {}
@@ -492,6 +571,11 @@ function ns.Status()
 	if ns.reagents then
 		local r = ns.reagents.stats
 		ns.Say("STATUS_REAGENTS", ns.reagents:Count(), r.sentQ, r.sentC, r.recvQ, r.recvC, r.learned)
+	end
+	if ns.catalog then
+		local recipes, profs = ns.catalog:Total()
+		local k = ns.catalog.stats
+		ns.Say("STATUS_CATALOG", recipes, profs, k.sentD, k.sentR, k.sentL, k.recvD, k.recvR, k.recvL)
 	end
 	ns.Say("STATUS_PRICES", ns.Prices and ns.Prices.Source() or ns.T("NO_PRICES"))
 	if ns.sync.newerProtocolSeen then ns.Say("NEWER_VERSION") end
@@ -608,6 +692,7 @@ function ns.DebugDump(silent)
 		exists("C_TradeSkillUI.GetTradeSkillLineForRecipe", C_TradeSkillUI, "GetTradeSkillLineForRecipe")
 		exists("C_TradeSkillUI.GetRecipeSchematic", C_TradeSkillUI, "GetRecipeSchematic")
 		exists("C_TradeSkillUI.GetAllRecipeIDs", C_TradeSkillUI, "GetAllRecipeIDs")
+		exists("C_TradeSkillUI.GetRecipeSourceText", C_TradeSkillUI, "GetRecipeSourceText")
 		exists("C_ChatInfo.InChatMessagingLockdown", C_ChatInfo, "InChatMessagingLockdown")
 		exists("ChatFrameUtil.SendTell", ChatFrameUtil, "SendTell")
 		exists("ChatFrameUtil.OpenChat", ChatFrameUtil, "OpenChat")
@@ -666,6 +751,26 @@ function ns.DebugDump(silent)
 				mine[id] and " (own)" or "")
 		end
 		add("Known recipes from the game: %s", table.concat(parts, "; "))
+	end)
+
+	section("Recipe list", function()
+		local li = Scanner.lastListInfo
+		if li then
+			add("Last profession window: %d recipe ids, %d not learned; %s", li.total, li.unlearned, table.concat(li.samples, "; "))
+			for _, kind in ipairs({ "learned", "unlearned" }) do
+				if li.fields and li.fields[kind] then add("Recipe fields (%s): %s", kind, li.fields[kind]) end
+			end
+		else
+			add("Last profession window: none opened in this session")
+		end
+		if ns.catalog then
+			local parts = {}
+			for skillLine, n in pairs(ns.catalog:Digest()) do
+				parts[#parts + 1] = Scanner.ProfessionName(skillLine) .. "=" .. n
+			end
+			table.sort(parts)
+			add("Recipe catalog: %s", #parts > 0 and table.concat(parts, ", ") or "empty")
+		end
 	end)
 
 	section("Own recipes", function()
@@ -735,7 +840,7 @@ function ns.SyncNow()
 	Scanner.RequestRoster()
 	ns.RefreshOwn()
 	local reason = ns.SendBlockReason()
-	if not ns.sync:Hello(true) then return ns.Say("SYNC_TOO_SOON") end
+	if not ns.Hello(true) then return ns.Say("SYNC_TOO_SOON") end
 	if reason then return ns.Say("SYNC_BLOCKED", ns.T(reason)) end
 	ns.Say("SYNC_STARTED")
 	local before = {}
@@ -772,6 +877,26 @@ local function slash(input)
 		ns.SyncNow()
 	elseif cmd == "status" then
 		ns.Status()
+	elseif cmd == "catalog" then
+		-- /pg catalog clear [profession]: forget the recipe catalog (all, or one profession by name)
+		local sub, name = rest:match("^(%S*)%s*(.-)$")
+		if sub ~= "clear" or not ns.catalog then return ns.Say("CATALOG_USAGE") end
+		local cleared = 0
+		for skillLine in pairs(ns.catalog:All()) do
+			if name == "" or Scanner.ProfessionName(skillLine):lower() == name:lower() then
+				ns.catalog:Remove(skillLine)
+				cleared = cleared + 1
+			end
+		end
+		ns.Say("CATALOG_CLEARED", cleared)
+		ns.OnDataChanged()
+	elseif cmd == "scan" then
+		-- reads the open profession window now, without waiting for an event of the game
+		Scanner.lastListInfo = nil
+		local ok, err = pcall(ns.ScanNow)
+		if not ok then ns.Print("scan: %s", tostring(err)) end
+		local li = Scanner.lastListInfo
+		if li then ns.Say("SCAN_RESULT", li.total, li.unlearned) else ns.Say("SCAN_NONE") end
 	elseif cmd == "debug" then
 		if rest == "on" or rest == "off" then
 			ns.db.settings.debug = rest == "on"
@@ -796,7 +921,7 @@ local function slash(input)
 		ns.store:Clear(keep)
 		ns.RefreshOwn()
 		ns.sync.lastHello = -1e9
-		ns.sync:Hello(true)
+		ns.Hello(true)
 		ns.Say("RESET_DONE")
 		ns.OnDataChanged()
 	else
@@ -833,6 +958,7 @@ function events.ADDON_LOADED(name)
 	if name ~= ADDON then return end
 	initDB()
 	ns.reagents = Reagents.New(reagentAdapter, ns.db.reagents)
+	ns.catalog = Catalog.New(catalogAdapter, ns.db.catalog)
 	Comm:Init()
 	if ns.Tooltip then ns.Tooltip:Init() end
 	frame:UnregisterEvent("ADDON_LOADED")
@@ -850,9 +976,7 @@ function events.PLAYER_LOGIN()
 	-- diagnostics land in SavedVariables without typing /pg debug
 	ns.Log("login, version %s", tostring(ns.version))
 	C_Timer.After(45, function() ns.DebugDump(true) end)
-	C_Timer.NewTicker(ns.Config.helloInterval, function()
-		if ns.sync then ns.sync:Hello(false) end
-	end)
+	C_Timer.NewTicker(ns.Config.helloInterval, function() ns.Hello(false) end)
 	C_Timer.NewTicker(ns.Config.rosterInterval, function()
 		if IsInGuild() then Scanner.RequestRoster() end
 	end)
@@ -887,10 +1011,56 @@ function events.SKILL_LINES_CHANGED()
 	if ns.store then ns.ScheduleRefresh(ns.Config.skillDebounce) end
 end
 
-function events.TRADE_SKILL_SHOW() scheduleScan() end
+function events.TRADE_SKILL_SHOW() ns.Log("event TRADE_SKILL_SHOW") scheduleScan() end
 function events.TRADE_SKILL_LIST_UPDATE() scheduleScan() end
-function events.TRADE_SKILL_DATA_SOURCE_CHANGED() scheduleScan() end
+function events.TRADE_SKILL_DATA_SOURCE_CHANGED() ns.Log("event TRADE_SKILL_DATA_SOURCE_CHANGED") scheduleScan() end
 function events.NEW_RECIPE_LEARNED(recipeID) onRecipeLearned(recipeID) end
+
+-- A profession trainer says which skill every recipe needs: kept as the skill the recipe is
+-- learnable from (ProfguildDB.recipeInfo[recipeID].m), matched to the catalog by name.
+local function readTrainer()
+	if type(GetNumTrainerServices) ~= "function" or type(GetTrainerServiceSkillReq) ~= "function" then return end
+	local n = GetNumTrainerServices() or 0
+	if n == 0 or not ns.catalog then return end
+	local byName = {}
+	for _, list in pairs(ns.catalog:All()) do
+		for recipeID in pairs(list) do
+			local name = Scanner.RecipeName(recipeID)
+			if name then byName[name] = byName[name] or {}; table.insert(byName[name], recipeID) end
+		end
+	end
+	local found = 0
+	for i = 1, n do
+		local name, _, category = GetTrainerServiceInfo(i)
+		local _, rank = GetTrainerServiceSkillReq(i)
+		if name and category ~= "header" and type(rank) == "number" and rank > 0 and byName[name] then
+			for _, recipeID in ipairs(byName[name]) do
+				local info = ns.db.recipeInfo[recipeID] or {}
+				if info.m ~= rank then found = found + 1 end
+				info.m = rank
+				ns.db.recipeInfo[recipeID] = info
+			end
+		end
+	end
+	if found > 0 then
+		ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+		ns.Log("trainer: skill of %d recipes", found)
+		ns.OnDataChanged()
+	end
+end
+
+local trainerPending = false
+local function scheduleTrainer()
+	if trainerPending then return end
+	trainerPending = true
+	C_Timer.After(0.5, function()
+		trainerPending = false
+		local ok, err = pcall(readTrainer)
+		if not ok then ns.Log("ERROR trainer: %s", tostring(err)) end
+	end)
+end
+function events.TRAINER_SHOW() scheduleTrainer() end
+function events.TRAINER_UPDATE() scheduleTrainer() end
 
 function events.PLAYER_REGEN_ENABLED() flushSoon() end
 function events.PLAYER_ENTERING_WORLD() flushSoon() end

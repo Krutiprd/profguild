@@ -5,6 +5,7 @@ shares their professions, skill and known recipes with the guild over the hidden
 No server, no website, no setup. Everyone keeps a full copy, including members who are offline.
 
 - Search recipes, items, professions or members: `/pg`
+- Every recipe of a profession, also the ones nobody in the guild knows yet (filter: available / unavailable / all)
 - Three-panel window: professions, recipes or members, and details with everyone who can craft the recipe
 - Reagents of every recipe with Auctionator or TSM prices, craft cost, profit and an Auctionator shopping list
 - "Crafted by" line in item tooltips (online crafters in green)
@@ -24,6 +25,8 @@ be directly inside `AddOns\Profguild\`). Then open each of your professions once
 | --- | --- |
 | `/pg` | Open or close the window |
 | `/pg sync` | Ask the guild for updates |
+| `/pg scan` | Read the open profession window now |
+| `/pg catalog clear [profession]` | Forget the recipe catalog (one profession or all) |
 | `/pg status` | Database size, guildmates seen, queue, traffic, last error |
 | `/pg debug` | Print what the game API returns (saved to `ProfguildDB.debug`) |
 | `/pg debug on` / `off` | Verbose logging in chat |
@@ -57,12 +60,15 @@ ChatThrottleLib into 255-byte parts within the game's limit (10 messages, then 1
 ```
 lua5.1 tests/run.lua        # unit tests, simulated 20-member guild, full addon load in a fake client
 tools/package.sh            # builds dist/Profguild-<version>.zip
+python -I tools/recipe_data.py <WTF/.../SavedVariables/Profguild.lua>
+                            # adds recipe items and their sources from Wowhead to Profguild/Data.lua
 ```
 
 | File | Role |
 | --- | --- |
 | `Store.lua` | Records, validation, versions, digests, pruning, search index (pure Lua) |
 | `Sync.lua` | H/R/D protocol, duplicate suppression, queue (pure Lua, adapter-based) |
+| `Catalog.lua` | Every recipe of every profession, learned or not, and its KD/KR/KL exchange (pure Lua) |
 | `Scanner.lua` | Reads own professions, recipes and the guild roster from the game |
 | `Comm.lua` | Encoding and the GUILD addon channel |
 | `Core.lua` | Startup, events, slash commands, status and debug |

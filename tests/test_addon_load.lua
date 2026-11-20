@@ -226,6 +226,18 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	UI.detail.rows[1]._scripts.OnClick(UI.detail.rows[1], "LeftButton")
 	H.eq(M.whispered, "Ana Brightwood", "click on a crafter whispers")
 	M.whispered = nil
+	-- the tooltip of an item that was not loaded yet is drawn again when the item arrives
+	local draws, realSetItem = 0, GameTooltip.SetItemByID
+	GameTooltip.SetItemByID = function() draws = draws + 1 end
+	GameTooltip.GetOwner = function() return first end
+	first._scripts.OnEnter(first)
+	H.eq(draws, 1)
+	M.fire("GET_ITEM_INFO_RECEIVED", rawget(first, "data").itemID, true)
+	H.eq(draws, 2, "tooltip drawn again with the item data")
+	first._scripts.OnLeave(first)
+	M.fire("GET_ITEM_INFO_RECEIVED", 1, true)
+	H.eq(draws, 2, "not after the mouse left")
+	GameTooltip.SetItemByID, GameTooltip.GetOwner = realSetItem, nil
 	-- shift-click links the item
 	local oldShift = IsShiftKeyDown
 	IsShiftKeyDown = function() return true end
@@ -282,6 +294,47 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(UI.detail.profitValue:GetText(), ns.Prices.Format(700), "sells for 1000")
 	H.ok(UI.detail.value:GetText():find(ns.Prices.Format(1000), 1, true), "item value shown")
 	H.ok(not UI.detail.shopButton.disabled, "shopping list available")
+	-- the list shows the profit next to the name: 1000 - 2 x 150 copper
+	local profitRow
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.recipeID == 3865 then profitRow = r end
+	end
+	H.ok(profitRow.profit:GetText():find("+7s", 1, true), "profit in the list: " .. profitRow.profit:GetText())
+	H.eq(ns.Prices.Short(-123456), "-12g")
+	H.eq(ns.Prices.Short(250), "+2s")
+	H.eq(ns.Prices.Short(7), "+7c")
+	-- an item that binds on pickup cannot be sold: the profit is minus the reagents
+	local realGetInfo = C_Item.GetItemInfo
+	C_Item.GetItemInfo = function(id)
+		if id == 4305 then return "Item 4305", "link", 2, 45, 40, nil, nil, nil, nil, nil, nil, nil, nil, 1 end
+		return realGetInfo(id)
+	end
+	UI:Refresh()
+	H.ok(profitRow.profit:GetText():find("-3s", 1, true), "BoP: loss of the reagents: " .. profitRow.profit:GetText())
+	H.ok(UI.detail.value:GetText():find(ns.T("ITEM_BOP"), 1, true), "details say it cannot be sold")
+	H.ok(UI.detail.profitValue:GetText():find(ns.Prices.Format(300), 1, true), "profit -300 copper")
+	C_Item.GetItemInfo = realGetInfo
+	-- at the auction house a button asks Auctionator to search the item and its reagents
+	H.ok(not UI.detail.refreshButton:IsShown(), "no refresh button away from the auction house")
+	local searched, listener
+	Auctionator.API.v1.MultiSearchExact = function(_, names) searched = names end
+	Auctionator.EventBus = { Register = function(_, l) listener = l end, Unregister = function() end }
+	Auctionator.Search = { Events = { PricesProcessed = "search_prices_processed" } }
+	AuctionFrame = CreateFrame("Frame")
+	UI:Refresh()
+	H.ok(UI.detail.refreshButton:IsShown(), "refresh button at the auction house")
+	UI.detail.refreshButton._scripts.OnClick(UI.detail.refreshButton)
+	-- (4305 binds on pickup since the check above: it cannot be sold, so it is not searched)
+	H.ok(searched and searched[1] == "Item 2589" and #searched == 1, "the reagent searched, not the BoP item")
+	H.ok(listener and listener.ReceiveEvent, "waits for the prices")
+	listener:ReceiveEvent()
+	listener:ReceiveEvent() -- one notice per searched item: still listening
+	M.advance(7)
+	AuctionFrame:Hide()
+	UI:Refresh()
+	H.ok(not UI.detail.refreshButton:IsShown(), "hidden when the auction house closes")
+	AuctionFrame, Auctionator.EventBus, Auctionator.Search = nil, nil, nil
 	UI.detail.shopButton._scripts.OnClick(UI.detail.shopButton)
 	H.ok(created and created.name == "Profguild: Recipe 3865", "shopping list created")
 	H.eq(created.terms[1], "Item 2589#2", "exact reagent with quantity")
@@ -346,6 +399,181 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(#visible(UI.rows), 3, "only the online crafter's recipes")
 	UI.onlineButton._scripts.OnClick(UI.onlineButton)
 
+	-- recipe filter: recipes nobody in the guild knows come from the catalog (the profession
+	-- window lists the unlearned ones too); a click switches available -> unavailable -> all
+	H.eq(ProfguildDB.catalog[197][3866], 14342, "unlearned recipe in the catalog, with its item")
+	H.eq(ProfguildDB.catalog[197][3865], 4305, "learned ones too")
+	H.eq(ProfguildDB.settings.recipeFilter, "known", "available by default")
+	local function listed() return UI.listCache.listed end
+	local known = listed()
+	H.ok(known > 0)
+	H.eq(UI.recipeButton.text:GetText(), ns.T("RECIPES_KNOWN"))
+	-- own recipes carry the colour of the profession window
+	local ownState = ProfguildDB.own["Player-1-00000001"]
+	H.ok(ownState.colors, "colours saved by the scan")
+	ownState.colors[3865] = 1
+	UI.listCache = nil
+	UI:SetCategory(197)
+	local dotted
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.recipeID == 3865 then dotted = r.name:GetText() end
+	end
+	H.ok(dotted and dotted:find("|cffffff00•|r", 1, true) == 1, "yellow dot before the name: " .. tostring(dotted))
+	UI:SetCategory(nil)
+	UI.recipeButton._scripts.OnClick(UI.recipeButton)
+	H.eq(ProfguildDB.settings.recipeFilter, "unknown")
+	local unknown = visible(UI.rows)
+	H.eq(#unknown, 1, "one recipe nobody knows")
+	H.eq(unknown[1].recipeID, 3866)
+	H.ok(unknown[1].nobody, "marked")
+	H.ok(UI.rows[2].sub:GetText():find(ns.T("NOBODY_KNOWS"), 1, true), "the row says nobody knows it")
+	UI.rows[2]._scripts.OnEnter(UI.rows[2])
+	UI.rows[2]._scripts.OnLeave(UI.rows[2])
+	UI.rows[2]._scripts.OnClick(UI.rows[2], "LeftButton")
+	H.eq(UI.selected.recipeID, 3866)
+	H.eq(UI.detail.recipeHint:GetText(), ns.T("HINT_NOBODY"), "details say nobody knows it")
+	H.eq(#visible(UI.detail.rows), 0, "no crafters")
+	-- where the recipe comes from (Data.lua) and the price of its recipe item (Auctionator)
+	H.ok(ns.RecipeData, "Data.lua loaded")
+	ns.RecipeData[3866] = { 7777, "dv" }
+	ns.RecipeData[3865] = false
+	Auctionator = { API = { v1 = {
+		GetAuctionPriceByItemID = function(_, id) return ({ [7777] = 374000 })[id] end,
+		GetAuctionAgeByItemID = function() return 0 end,
+		GetVendorPriceByItemID = function() end,
+	} } }
+	UI.listCache = nil
+	UI:Refresh()
+	local info = UI.detail.recipeInfo:GetText()
+	H.ok(info:find(ns.T("SRC_DROP"), 1, true) and info:find(ns.T("SRC_VENDOR"), 1, true), "sources named: " .. info)
+	H.ok(info:find(ns.Prices.Format(374000), 1, true) and info:find(ns.T("TODAY"), 1, true), "price seen today")
+	H.ok(UI.rows[2].sub:GetText():find(ns.T("LIST_RECIPE_AH", ns.Prices.Format(374000)), 1, true), "the list row shows the recipe price")
+	H.eq(select(1, ns.Prices.RecipeItem(3865)), false, "a trainer recipe")
+	Auctionator = nil
+	UI:Refresh()
+	H.ok(UI.detail.recipeInfo:GetText():find(ns.T("RECIPE_NO_AH"), 1, true), "without prices: not on AH")
+	-- the game says where the recipe is found: asked once when the recipe is opened, then kept
+	local asked = 0
+	C_TradeSkillUI.GetRecipeSourceText = function(id)
+		asked = asked + 1
+		return "|cffffd200Vendor: |rBena|n|cffffd200Zone: |rThunder Bluff|T icon|t"
+	end
+	ProfguildDB.sources[3866] = nil
+	UI:Refresh()
+	UI:Refresh()
+	H.eq(asked, 1, "asked once")
+	H.ok(UI.detail.recipeInfo:GetText():find("Bena · |cffffd200Zone: |rThunder Bluff", 1, true), "game text on one line: " .. UI.detail.recipeInfo:GetText())
+	H.ok(ProfguildDB.sources[3866], "kept in SavedVariables")
+	C_TradeSkillUI.GetRecipeSourceText = nil
+	-- skill levels: grey from the game, learnable from the recipe item's tooltip
+	local realRecipeInfo = C_TradeSkillUI.GetRecipeInfo
+	C_TradeSkillUI.GetRecipeInfo = function(id) local i = realRecipeInfo(id) i.maxTrivialLevel = 320 return i end
+	C_TooltipInfo = { GetItemByID = function(id)
+		if id == 7777 then return { lines = { { leftText = "Pattern: X" }, { leftText = "|cffff2020Requires Tailoring (275)|r" } } } end
+	end }
+	ProfguildDB.recipeInfo[3866] = nil
+	UI:Refresh()
+	local skillText = UI.detail.value:GetText()
+	H.ok(skillText:find("275", 1, true) and skillText:find("320", 1, true), "learn at 275, grey at 320: " .. skillText)
+	H.eq(ProfguildDB.recipeInfo[3866].m, 275, "kept")
+	H.eq(ProfguildDB.recipeInfo[3866].g, 320)
+	C_TradeSkillUI.GetRecipeInfo, C_TooltipInfo = realRecipeInfo, nil
+	-- recipe items Auctionator has seen are matched to recipes by name, without Wowhead
+	local realGetInfo2, realInstant = C_Item.GetItemInfo, C_Item.GetItemInfoInstant
+	C_Item.GetItemInfoInstant = function(id)
+		if id == 8888 then return 8888, "Recipe", "Tailoring", "", 1, 9, 2 end
+		if id == 8889 then return 8889, "Recipe", "Alchemy", "", 1, 9, 6 end
+	end
+	C_Item.GetItemInfo = function(id)
+		if id == 8888 then return "Pattern: Recipe 18560" end
+		if id == 8889 then return "Recipe: Recipe 18560" end -- an alchemy item of the same name
+		return realGetInfo2(id)
+	end
+	Auctionator = { Database = { db = { ["8888"] = {}, ["8889"] = {}, ["2589"] = {}, ["g:123"] = {} } } }
+	H.eq(ns.Prices.IndexRecipeItems(), 1, "one recipe item found")
+	H.eq(ns.Prices.RecipeItem(18560), 8888, "matched to the Tailoring recipe, not the alchemy one")
+	H.eq(ProfguildDB.recipeItems[18560], 8888, "kept")
+	-- how many were on the market: the latest day Auctionator recorded
+	Auctionator.Database.db["2589"] = { m = 150, a = { ["2513"] = 40, ["2514"] = 12 } }
+	H.eq(ns.Prices.Available(2589), 12, "quantity of the latest day")
+	H.eq(ns.Prices.Available(8888), nil, "no quantity recorded")
+	Auctionator = nil
+	C_Item.GetItemInfo, C_Item.GetItemInfoInstant = realGetInfo2, realInstant
+	-- required character level of the crafted item
+	-- (the item was loaded earlier in this test with level 60, required 55)
+	UI.listCache = nil
+	UI:Refresh()
+	local levelShown
+	for _, r in ipairs(UI.rows) do if r.level:GetText() == ns.T("LIST_LEVEL", 55) then levelShown = true end end
+	H.ok(levelShown, "required level in the list")
+	H.ok(UI.detail.sub:GetText():find(ns.T("REQ_LEVEL", 55), 1, true), "required level: " .. UI.detail.sub:GetText())
+	UI.recipeButton._scripts.OnClick(UI.recipeButton)
+	H.eq(ProfguildDB.settings.recipeFilter, "all")
+	H.eq(UI.selected, nil, "switching the filter drops the selection")
+	H.eq(listed(), known + 1, "all: available and unavailable")
+	-- online only with all recipes: a recipe whose crafters are offline stays, marked
+	UI.onlineButton._scripts.OnClick(UI.onlineButton)
+	local offline
+	for _, d in ipairs(UI.listCache.data) do
+		if d.kind == "recipe" and #d.crafters == 0 and not d.nobody then offline = d end
+	end
+	H.ok(offline, "a recipe of an offline crafter is still listed")
+	UI.onlineButton._scripts.OnClick(UI.onlineButton)
+	UI.recipeButton._scripts.OnClick(UI.recipeButton)
+	H.eq(ProfguildDB.settings.recipeFilter, "known", "back to available")
+	H.eq(listed(), known)
+
+	-- leveling: the recipes of a profession sorted by the skill they turn grey at, with the
+	-- skill levels in the row; it opens at the first recipe that still gives skill
+	ProfguildDB.recipeInfo[3865] = { g = 260, m = 200 }
+	ProfguildDB.recipeInfo[3866] = { g = 230 }
+	ProfguildDB.recipeInfo[18560] = { g = 300 }
+	ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+	ProfguildDB.settings.recipeFilter = "all"
+	UI.levelingTab._scripts.OnClick(UI.levelingTab)
+	H.eq(UI.view, "leveling")
+	UI:SetCategory(197)
+	local lv = UI.listCache.data
+	H.eq(#lv, 3, "no headers")
+	H.eq(lv[1].recipeID, 3866); H.eq(lv[2].recipeID, 3865); H.eq(lv[3].recipeID, 18560)
+	H.eq(UI.levelStart, 2, "Frost has 250 Tailoring: starts at the recipe grey at 260")
+	H.ok(UI.rows[2].sub:GetText():find("|cffff2020200|r  |cff808080260|r", 1, true), "skill in the row: " .. UI.rows[2].sub:GetText())
+	H.eq(UI.listTitle:GetText(), ns.T("HEAD_LEVELING"))
+	-- a trainer says the skill every recipe needs
+	GetNumTrainerServices = function() return 2 end
+	GetTrainerServiceInfo = function(i) if i == 1 then return "Recipe 18560", "", "available" end return "Tailoring", "", "header" end
+	GetTrainerServiceSkillReq = function(i) return "Tailoring", i == 1 and 275 or 0, true end
+	M.fire("TRAINER_SHOW")
+	M.advance(1)
+	H.eq(ProfguildDB.recipeInfo[18560].m, 275, "skill from the trainer")
+	GetNumTrainerServices, GetTrainerServiceInfo, GetTrainerServiceSkillReq = nil, nil, nil
+	UI.recipesTab._scripts.OnClick(UI.recipesTab)
+	ProfguildDB.settings.recipeFilter = "known"
+	UI:SetCategory(nil)
+
+	-- a guildmate's list is taken only after asking, and only recipes the game puts in that
+	-- profession (the fake game puts every recipe into Cooking)
+	H.ok(ns.catalog:Want(185), "asked for Cooking")
+	H.ok(ns.catalog:Want(333), "asked for Enchanting")
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "KL", pv = 1, s = "Player-1-00000002", l = 185, c = 1,
+		r = { 7828 } }), "GUILD", "Ana Brightwood")
+	H.eq(ProfguildDB.catalog[185][7828], 14342, "Cooking recipe taken, item from the game")
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "KL", pv = 1, s = "Player-1-00000002", l = 333, c = 1,
+		r = { 7829 } }), "GUILD", "Ana Brightwood")
+	H.eq(ProfguildDB.catalog[333], nil, "a recipe of another profession is dropped")
+	-- the digest goes out after a hello
+	local sentBeforeHello = #M.sent
+	ns.sync.lastHello = -1e9
+	H.ok(ns.Hello(true))
+	M.advance(3)
+	local digest
+	for i = sentBeforeHello + 1, #M.sent do
+		local msg = ns.Comm.Decode(M.sent[i].text)
+		if msg and msg.t == "KD" then digest = msg end
+	end
+	H.ok(digest and digest.d[197] == 3, "catalog digest sent after the hello")
+
 	-- members view: a member's professions, a click shows their recipes of that profession
 	UI.membersTab._scripts.OnClick(UI.membersTab)
 	H.eq(UI.view, "members")
@@ -407,6 +635,29 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	UI:SetCategory(171)
 	UI.recipesTab._scripts.OnClick(UI.recipesTab)
 	UI:SetCategory(nil)
+
+	-- item data is asked for through a queue: 20 per half second, items on screen first,
+	-- and again after 10 s when it did not arrive
+	local requested, realRequest, realCached = {}, C_Item.RequestLoadItemDataByID, C_Item.IsItemDataCachedByID
+	C_Item.RequestLoadItemDataByID = function(id) requested[#requested + 1] = id end
+	C_Item.IsItemDataCachedByID = function() return false end
+	M.advance(1)
+	requested = {}
+	for id = 900001, 900050 do ns.Scanner.WantItem(id) end
+	ns.Scanner.WantItem(900050, true)
+	M.advance(0.5)
+	H.eq(requested[1], 900050, "the urgent item first")
+	H.ok(#requested <= 40, "paced (" .. #requested .. ")")
+	M.advance(3)
+	H.eq(#requested, 50, "all asked for")
+	ns.Scanner.WantItem(900001)
+	M.advance(1)
+	H.eq(#requested, 50, "not again right away")
+	M.advance(10)
+	ns.Scanner.WantItem(900001)
+	M.advance(1)
+	H.eq(#requested, 51, "asked again after 10 s")
+	C_Item.RequestLoadItemDataByID, C_Item.IsItemDataCachedByID = realRequest, realCached
 
 	-- a guildmate with a newer version: one notice per session, shown in the window too
 	local noticeAt = #M.chat

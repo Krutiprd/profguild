@@ -88,6 +88,8 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 	end
 	if msg.t == "Q" or msg.t == "C" then
 		if ns.reagents then ns.reagents:OnMessage(msg) end
+	elseif msg.t == "KD" or msg.t == "KR" or msg.t == "KL" then
+		if ns.catalog then ns.catalog:OnMessage(msg) end
 	elseif ns.sync then
 		ns.sync:OnMessage(msg, sender)
 	end

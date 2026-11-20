@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.2.0 – 2026-11-19
+
+- Recipe catalog: every recipe of a profession, also the ones nobody in the guild has learned.
+  The profession window lists the unlearned recipes too, so opening a profession once fills
+  the catalog. It is kept for the whole account and shared with the guild: after each hello a
+  client sends how many recipes it holds per profession (`KD`), a guildmate with fewer asks for
+  that profession (`KR`) and one holder sends the recipe IDs (`KL`). A list is stored only when
+  this client asked for it, and each recipe only when the game knows it and puts it in that
+  profession; the crafted item comes from the game.
+- Recipe filter in the Recipes view: "RECIPES: AVAILABLE" (somebody can craft it, as before),
+  "UNAVAILABLE" (nobody in the guild knows it) and "ALL". A recipe nobody knows has a grey
+  icon and says so in the list, the tooltip and the details; its reagents and their prices are
+  shown like for any other recipe. With "online only" and all recipes, recipes whose crafters
+  are offline stay listed. A player filter always lists that player's recipes.
+- Where a recipe comes from: when a recipe is opened, the game is asked once where it is found
+  (the text of the profession window, "Vendor: … · Zone: …") and the answer is kept. The
+  details also show what its recipe item costs at the auction house, live from Auctionator with
+  the age of the price; a recipe nobody knows shows that price in the list too. Recipe items
+  come from `Data.lua`, generated from Wowhead by `tools/recipe_data.py` (156 recipe items so
+  far; the generator waits 2 s between requests and stops when Wowhead refuses one).
+- Profit or loss of one craft next to each recipe name in the list ("+12g" green, "-35s" red):
+  item price minus the reagents, shown when every price is known.
+- Skill levels: the details show from which skill a recipe can be learned (read from the
+  tooltip of its recipe item, "Requires Leatherworking (275)") and from which skill it turns
+  grey (from the game); the character level the crafted item requires; and a dot in the colour
+  of the profession window before each recipe of the logged-in character.
+- Leveling view (tab next to Recipes and Members): the recipes of a profession sorted by the
+  skill they turn grey at, each with its skill levels (red: learnable from, grey: no more
+  skill-ups) and the profit or loss of one craft. It opens at the first recipe that still gives
+  skill to the logged-in character. The recipe filter works there too.
+- At a profession trainer the skill every recipe needs is read and kept, so recipes without a
+  recipe item get their red number too.
+- An item that binds on pickup (or a quest item) cannot be sold: its profit is the cost of the
+  reagents as a loss, and the details say "BoP: cannot be sold".
+- Recipe items Auctionator has seen at the auction house are matched to the recipes by name
+  ("Pattern: Big Voodoo Robe"), so their price and the skill from their tooltip are known for
+  recipes `Data.lua` does not list. Item data is loaded through a paced queue (items on screen
+  first, asked again when it did not arrive), and a tooltip is drawn again when its item arrives.
+- "REFRESH PRICES" in the details while the auction house is open: Auctionator searches the
+  item, its reagents and its recipe item and saves the current prices; the window updates
+  when they are processed. A BoP item is not searched.
+- How many are on the market (Auctionator's highest count of the latest day) next to the price
+  of the item, of each reagent and of the recipe item.
+- `/pg scan` reads the open profession window right away; `/pg catalog clear [profession]`
+  forgets the catalog of one profession or all of them.
+- The online filter button reads "ONLINE: YES / ALL".
+- `/pg status` and `/pg debug` show the catalog; `/pg debug` also says how many recipes the
+  last profession window listed and how many of them are not learned.
+
 ## 0.1.16 – 2026-11-15
 
 - The recipe list is grouped like a profession window: a gold header before every group, named

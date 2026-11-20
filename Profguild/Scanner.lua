@@ -63,12 +63,65 @@ function Scanner.RecipeName(recipeID)
 	return name
 end
 
+-- Item data the client has not loaded is asked from the server through a queue: at most
+-- ITEM_BATCH requests every ITEM_PACE seconds, because the server drops requests that come in
+-- a flood (a list of a thousand catalog recipes asks for a thousand items). Items on screen go
+-- first (urgent), and an item that did not arrive is asked for again after ITEM_RETRY seconds.
+Scanner.ITEM_BATCH, Scanner.ITEM_PACE, Scanner.ITEM_RETRY = 20, 0.5, 10
+local itemQueue, itemQueued, itemAsked, itemPumping = {}, {}, {}, false
+
+local function itemLoaded(itemID)
+	if C_Item and C_Item.IsItemDataCachedByID then
+		local ok, cached = call(C_Item.IsItemDataCachedByID, itemID)
+		if ok then return cached and true or false end
+	end
+	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+	local ok, name = call(getInfo, itemID)
+	return ok and name ~= nil
+end
+
+local function pumpItems()
+	local sent = 0
+	while #itemQueue > 0 and sent < Scanner.ITEM_BATCH do
+		local itemID = table.remove(itemQueue, 1)
+		itemQueued[itemID] = nil
+		if not itemLoaded(itemID) then
+			call(C_Item.RequestLoadItemDataByID, itemID)
+			itemAsked[itemID] = GetTime()
+			sent = sent + 1
+		end
+	end
+	if #itemQueue > 0 then
+		C_Timer.After(Scanner.ITEM_PACE, pumpItems)
+	else
+		itemPumping = false
+	end
+end
+
+function Scanner.WantItem(itemID, urgent)
+	if not itemID or itemID == 0 or not (C_Item and C_Item.RequestLoadItemDataByID) then return end
+	local asked = itemAsked[itemID]
+	if asked and GetTime() - asked < Scanner.ITEM_RETRY then return end
+	if itemQueued[itemID] then
+		if not urgent then return end
+		for i, id in ipairs(itemQueue) do if id == itemID then table.remove(itemQueue, i) break end end
+	elseif itemLoaded(itemID) then
+		return
+	end
+	itemQueued[itemID] = true
+	if urgent then table.insert(itemQueue, 1, itemID) else itemQueue[#itemQueue + 1] = itemID end
+	if not itemPumping then
+		itemPumping = true
+		C_Timer.After(0, pumpItems)
+	end
+end
+
 function Scanner.ItemName(itemID)
 	if not itemID or itemID == 0 then return nil end
 	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 	local ok, name = call(getInfo, itemID)
 	if ok and name then return name end
-	if C_Item and C_Item.RequestLoadItemDataByID then call(C_Item.RequestLoadItemDataByID, itemID) end
+	Scanner.WantItem(itemID)
 	return nil
 end
 
@@ -96,8 +149,8 @@ end
 
 -- Item level and required level of an item, or nil while the client does not have the item.
 -- Unlike the item class this needs the item loaded: a missing item is requested from the
--- server once per session, and GET_ITEM_INFO_RECEIVED then rebuilds the list.
-local itemLevelCache, levelRequested = {}, {}
+-- server through the item queue, and GET_ITEM_INFO_RECEIVED then rebuilds the list.
+local itemLevelCache = {}
 
 function Scanner.ItemLevel(itemID)
 	if not itemID or itemID == 0 then return nil end
@@ -110,11 +163,21 @@ function Scanner.ItemLevel(itemID)
 		itemLevelCache[itemID] = cached
 		return cached.ilvl, cached.req
 	end
-	if not levelRequested[itemID] and C_Item and C_Item.RequestLoadItemDataByID then
-		levelRequested[itemID] = true
-		call(C_Item.RequestLoadItemDataByID, itemID)
-	end
+	Scanner.WantItem(itemID)
 	return nil
+end
+
+-- True when an item binds on pickup (or is a quest item): it cannot be sold at the auction
+-- house. nil while the client has not loaded the item (it is requested by ItemLevel).
+local bindCache = {}
+function Scanner.ItemBoP(itemID)
+	if not itemID or itemID == 0 then return nil end
+	if bindCache[itemID] ~= nil then return bindCache[itemID] end
+	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+	local ok, name, _, _, _, _, _, _, _, _, _, _, _, _, bindType = call(getInfo, itemID)
+	if not ok or not name or type(bindType) ~= "number" then return nil end
+	bindCache[itemID] = bindType == 1 or bindType == 4
+	return bindCache[itemID]
 end
 
 ---------------------------------------------------------------------------
@@ -210,6 +273,78 @@ function Scanner.RecipeOutputItem(recipeID)
 	return 0
 end
 
+-- Where an unlearned recipe is found, as the profession window says it ("Vendor: ...", "Drop:
+-- ..."), on one line without textures. nil when the game does not say.
+function Scanner.RecipeSource(recipeID)
+	if not C_TradeSkillUI then return nil end
+	local ok, text = call(C_TradeSkillUI.GetRecipeSourceText, recipeID)
+	if not ok or type(text) ~= "string" then return nil end
+	text = text:gsub("|T.-|t", ""):gsub("|n", "\n")
+	local parts = {}
+	for line in text:gmatch("[^\n]+") do
+		line = line:gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+		if line ~= "" then parts[#parts + 1] = line end
+	end
+	if #parts == 0 then return nil end
+	return table.concat(parts, " · ")
+end
+
+-- Skill from which a recipe is grey (gives no more skill), or nil when the game does not say.
+function Scanner.RecipeTrivial(recipeID)
+	if not C_TradeSkillUI then return nil end
+	local ok, info = call(C_TradeSkillUI.GetRecipeInfo, recipeID)
+	if ok and type(info) == "table" and type(info.maxTrivialLevel) == "number" and info.maxTrivialLevel > 0 then
+		return info.maxTrivialLevel
+	end
+	return nil
+end
+
+-- "Requires Leatherworking (275)" of the game's tooltip, turned into a pattern for any language.
+local skillPattern
+local function requiresSkillPattern()
+	if skillPattern then return skillPattern end
+	local format = type(ITEM_MIN_SKILL) == "string" and ITEM_MIN_SKILL or "Requires %s (%d)"
+	local p = format:gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1")
+	p = p:gsub("%%s", "(.+)"):gsub("%%d", "(%%d+)")
+	skillPattern = "^" .. p .. "$"
+	return skillPattern
+end
+
+-- Skill a recipe item asks for ("Requires Leatherworking (275)" in its tooltip), or nil.
+-- An item the client has not loaded yet is requested; GET_ITEM_INFO_RECEIVED redraws the window.
+function Scanner.RecipeItemSkill(itemID)
+	if not itemID or itemID == 0 then return nil end
+	local lines = {}
+	if C_TooltipInfo and C_TooltipInfo.GetItemByID then
+		local ok, data = call(C_TooltipInfo.GetItemByID, itemID)
+		if ok and type(data) == "table" and type(data.lines) == "table" then
+			for _, line in ipairs(data.lines) do
+				if type(line) == "table" and type(line.leftText) == "string" then lines[#lines + 1] = line.leftText end
+			end
+		end
+	end
+	if #lines == 0 then
+		Scanner.WantItem(itemID, true)
+		return nil
+	end
+	local pattern = requiresSkillPattern()
+	for _, text in ipairs(lines) do
+		local _, skill = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):match(pattern)
+		if skill then return tonumber(skill) end
+	end
+	return nil
+end
+
+-- Whether the game knows a recipe (any recipe, learned or not), and the item it makes (0 when
+-- it makes none, e.g. an enchant). Used to check recipe IDs that guildmates send.
+function Scanner.RecipeInGame(recipeID)
+	if not C_TradeSkillUI then return false end
+	local ok, schematic = call(C_TradeSkillUI.GetRecipeSchematic, recipeID, false)
+	if not ok or type(schematic) ~= "table" then return false end
+	local itemID = schematic.outputItemID
+	return true, (type(itemID) == "number" and itemID > 0) and itemID or 0
+end
+
 -- Basic reagents of a recipe as { [itemID] = count }, or nil when the game does not say.
 -- Optional and finishing reagent slots are left out.
 function Scanner.RecipeReagents(recipeID)
@@ -281,15 +416,54 @@ function Scanner.ScanOpenProfession()
 	if not okR or type(ids) ~= "table" then return nil, "no recipe list" end
 
 	local recipes, count, reagents = {}, 0, {}
+	-- the game lists the recipes the character has not learned too: all of them go to the
+	-- recipe catalog (listInfo.all), and /pg debug says how many there were
+	local listInfo = { total = #ids, unlearned = 0, samples = {}, all = {}, fields = {}, trivial = {}, difficulty = {} }
+	-- every plain field the game returns for one learned and one unlearned recipe (/pg debug):
+	-- shows whether skill-up colours or the required skill are available on this client
+	local function fields(kind, recipeID, info)
+		if listInfo.fields[kind] then return end
+		local parts = {}
+		for k, v in pairs(info) do
+			if type(v) ~= "table" and type(v) ~= "function" then parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+		end
+		local okS, schematic = call(C_TradeSkillUI.GetRecipeSchematic, recipeID, false)
+		if okS and type(schematic) == "table" then
+			for k, v in pairs(schematic) do
+				if type(v) ~= "table" and type(v) ~= "function" then parts[#parts + 1] = "schematic." .. tostring(k) .. "=" .. tostring(v) end
+			end
+		end
+		table.sort(parts)
+		listInfo.fields[kind] = tostring(recipeID) .. " " .. table.concat(parts, ", ")
+	end
 	for _, recipeID in ipairs(ids) do
 		local okI, info = call(C_TradeSkillUI.GetRecipeInfo, recipeID)
-		if okI and type(info) == "table" and info.learned and not info.isRecraft and not info.isDummyRecipe then
-			recipes[recipeID] = Scanner.RecipeOutputItem(recipeID)
-			reagents[recipeID] = Scanner.RecipeReagents(recipeID)
-			count = count + 1
+		if okI and type(info) == "table" and not info.isRecraft and not info.isDummyRecipe then
+			local itemID = Scanner.RecipeOutputItem(recipeID)
+			listInfo.all[recipeID] = itemID
+			fields(info.learned and "learned" or "unlearned", recipeID, info)
+			-- skill from which the recipe is grey, and its colour for this character right now
+			if type(info.maxTrivialLevel) == "number" and info.maxTrivialLevel > 0 then
+				listInfo.trivial[recipeID] = info.maxTrivialLevel
+			end
+			if info.learned and type(info.relativeDifficulty) == "number" then
+				listInfo.difficulty[recipeID] = info.relativeDifficulty
+			end
+			if info.learned then
+				recipes[recipeID] = itemID
+				reagents[recipeID] = Scanner.RecipeReagents(recipeID)
+				count = count + 1
+			else
+				listInfo.unlearned = listInfo.unlearned + 1
+				if #listInfo.samples < 3 then
+					listInfo.samples[#listInfo.samples + 1] = string.format("%d %s reagents=%s", recipeID,
+						tostring(info.name), Scanner.RecipeReagents(recipeID) and "yes" or "no")
+				end
+			end
 		end
 	end
-	return skillLine, recipes, count, reagents
+	Scanner.lastListInfo = listInfo
+	return skillLine, recipes, count, reagents, listInfo
 end
 
 ---------------------------------------------------------------------------
