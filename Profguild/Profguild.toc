@@ -23,6 +23,7 @@ Sync.lua
 Reagents.lua
 Catalog.lua
 GuildPrices.lua
+Requests.lua
 Prices.lua
 Data.lua
 Scanner.lua

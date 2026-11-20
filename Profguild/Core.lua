@@ -4,7 +4,7 @@
 local ADDON, ns = ...
 
 local Store, Sync, Scanner, Comm, Reagents, Catalog = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents, ns.Catalog
-local GuildPrices = ns.GuildPrices
+local GuildPrices, Requests = ns.GuildPrices, ns.Requests
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -358,6 +358,57 @@ local pricesAdapter = {
 	onChanged = function() ns.OnDataChanged() end,
 }
 
+-- True when one of our characters' professions knows the recipe.
+local function knowsRecipe(recipeID)
+	for _, own in pairs(ns.db and ns.db.own or {}) do
+		for _, list in pairs(type(own) == "table" and own.recipes or {}) do
+			if type(list) == "table" and list[recipeID] ~= nil then return true end
+		end
+	end
+	return false
+end
+ns.KnowsRecipe = knowsRecipe
+
+-- What a request asks for, as text: the crafted item, else the recipe.
+function ns.RequestItemName(rec)
+	local name = rec.i and rec.i > 0 and Scanner.ItemName(rec.i)
+	return name or Scanner.RecipeName(rec.r) or ("#" .. tostring(rec.r))
+end
+
+-- Chat notices about requests: a new one for a recipe we know, ours taken by somebody. Each
+-- request and kind at most once per session.
+local noticed = {}
+local function requestNotice(id, what)
+	local rec = ns.requests and ns.requests:Get(id)
+	if not rec then return end
+	local me = UnitGUID("player")
+	local key = id .. "\1" .. tostring(what)
+	if noticed[key] then return end
+	if what == "new" and rec.st == "open" and rec.by ~= me and knowsRecipe(rec.r) then
+		noticed[key] = true
+		ns.Say("REQ_NEW_NOTICE", ns.MemberName(rec.by), rec.n, ns.RequestItemName(rec))
+	elseif what == "taken" and rec.by == me and rec.cr and rec.cr ~= me then
+		key = id .. "\1taken\1" .. rec.cr
+		if noticed[key] then return end
+		noticed[key] = true
+		ns.Say("REQ_TAKEN_NOTICE", ns.MemberName(rec.cr), ns.RequestItemName(rec))
+	end
+end
+
+local requestsAdapter = {
+	send = function(msg) Comm.Send(msg) end,
+	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
+	now = function() return GetTime() end,
+	clock = function() return GetServerTime() end,
+	after = function(delay, fn) C_Timer.After(delay, fn) end,
+	random = function() return math.random() end,
+	myGuid = function() return UnitGUID("player") end,
+	onChanged = function(id, what)
+		requestNotice(id, what)
+		ns.OnDataChanged()
+	end,
+}
+
 -- Name of a guildmate for the window: roster name without the realm, then the sender name.
 function ns.MemberName(guid)
 	if guid == UnitGUID("player") then return UnitName("player") end
@@ -377,6 +428,7 @@ function ns.Hello(force)
 	local sent = ns.sync:Hello(force)
 	if sent and ns.catalog then ns.catalog:Announce() end
 	if sent and ns.guildPrices then ns.guildPrices:Announce() end
+	if sent and ns.requests then ns.requests:Announce() end
 	return sent
 end
 
@@ -387,8 +439,9 @@ function ns.SetupGuild()
 	ns.guildKey, ns.guildName = key, guildName
 	-- the old guild's prices must not reach the new guild (its timers may still run)
 	if ns.guildPrices then ns.guildPrices:Stop() end
+	if ns.requests then ns.requests:Stop() end
 	if not key then
-		ns.store, ns.sync, ns.guildDB, ns.guildPrices = nil, nil, nil, nil
+		ns.store, ns.sync, ns.guildDB, ns.guildPrices, ns.requests = nil, nil, nil, nil, nil
 		ns.OnDataChanged()
 		return
 	end
@@ -411,6 +464,9 @@ function ns.SetupGuild()
 	ns.guildPrices = GuildPrices.New(pricesAdapter, ns.guildDB)
 	local dropped = ns.guildPrices:Prune()
 	if dropped > 0 then ns.Log("guild prices: %d older than 14 days dropped", dropped) end
+	-- item requests of this guild (Requests.lua)
+	ns.requests = Requests.New(requestsAdapter, ns.guildDB)
+	ns.requests:Prune()
 	if not ns.Prices.StartSharing() then
 		-- Auctionator may still be setting up its database
 		C_Timer.After(10, function() ns.Prices.StartSharing() end)
@@ -614,6 +670,14 @@ function ns.Status()
 		local recipes, profs = ns.catalog:Total()
 		local k = ns.catalog.stats
 		ns.Say("STATUS_CATALOG", recipes, profs, k.sentD, k.sentR, k.sentL, k.recvD, k.recvR, k.recvL)
+	end
+	if ns.requests then
+		local open, taken = 0, 0
+		for _, rec in ipairs(ns.requests:All()) do
+			if rec.st == "open" then open = open + 1 elseif rec.st == "taken" then taken = taken + 1 end
+		end
+		local s3 = ns.requests.stats
+		ns.Say("STATUS_REQUESTS", open, taken, s3.sentU, s3.sentD, s3.sentR, s3.recvU, s3.recvD, s3.recvR)
 	end
 	if ns.guildPrices then
 		local gp, s2 = ns.guildPrices, ns.guildPrices.stats

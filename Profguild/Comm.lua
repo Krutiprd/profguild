@@ -65,6 +65,8 @@ function Comm.Send(msg)
 				if ns.catalog then ns.catalog:OnSendFailed(msg) end
 			elseif msg.t == "PU" or msg.t == "PD" or msg.t == "PR" then
 				if ns.guildPrices then ns.guildPrices:OnSendFailed(msg) end
+			elseif msg.t == "TU" or msg.t == "TD" or msg.t == "TR" then
+				if ns.requests then ns.requests:OnSendFailed(msg) end
 			elseif ns.sync then
 				ns.sync:OnSendFailed(msg)
 			end
@@ -98,6 +100,8 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 		if ns.catalog then ns.catalog:OnMessage(msg) end
 	elseif msg.t == "PU" or msg.t == "PD" or msg.t == "PR" then
 		if ns.guildPrices then ns.guildPrices:OnMessage(msg) end
+	elseif msg.t == "TU" or msg.t == "TD" or msg.t == "TR" then
+		if ns.requests then ns.requests:OnMessage(msg) end
 	elseif ns.sync then
 		ns.sync:OnMessage(msg, sender)
 	end
