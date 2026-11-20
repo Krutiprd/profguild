@@ -127,6 +127,7 @@ end
 function CatalogMT:Remove(skillLine)
 	if self.saved[skillLine] == nil then return false end
 	self.saved[skillLine] = nil
+	self.tried[skillLine], self.mine[skillLine], self.asked[skillLine], self.got[skillLine] = nil, nil, nil, nil
 	changed(self, skillLine)
 	return true
 end
@@ -179,8 +180,10 @@ end
 local function scheduleDigest(self)
 	if self.digestTimer or self.a.now() - self.lastDigest < Catalog.DIGEST_GAP then return end
 	self.digestTimer = true
+	self.digestCovered = false
 	self.a.after(between(self, Catalog.DIGEST_DELAY), function()
 		self.digestTimer = false
+		if self.digestCovered then return end
 		if self.a.now() - self.lastDigest >= Catalog.DIGEST_GAP then self:Announce() end
 	end)
 end
@@ -191,7 +194,13 @@ end
 local function checkAnswer(self, skillLine, theirCount, stamp)
 	self.a.after(Catalog.ANSWER_WINDOW + 1, function()
 		if self.mine[skillLine] ~= stamp then return end -- a newer request took over
-		if self.got[skillLine] and self.got[skillLine] >= stamp then
+		local got = self.got[skillLine]
+		-- parts still arriving (a long, throttled list): look again a little later
+		if got and got >= stamp and self.a.now() - got < Catalog.SEND_PACE * 10 then
+			self.mine[skillLine] = self.a.now()
+			return checkAnswer(self, skillLine, theirCount, self.mine[skillLine])
+		end
+		if got and got >= stamp then
 			if theirCount and self:Count(skillLine) < theirCount then self.tried[skillLine] = theirCount end
 		else
 			self.mine[skillLine], self.asked[skillLine] = nil, nil
@@ -315,6 +324,15 @@ function CatalogMT:OnMessage(msg)
 		if type(msg.d) ~= "table" then return end
 		self.stats.recvD = self.stats.recvD + 1
 		local n, theirs, wanted = 0, {}, false
+		-- another holder's digest lists every profession we hold: our answering digest adds nothing
+		if self.digestTimer then
+			local covered = true
+			for skillLine in pairs(self.saved) do
+				local c = msg.d[skillLine]
+				if type(c) ~= "number" or c < self:Count(skillLine) then covered = false break end
+			end
+			if covered then self.digestCovered = true end
+		end
 		for skillLine, count in pairs(msg.d) do
 			n = n + 1
 			if n > Catalog.MAX_PROFESSIONS then break end
@@ -376,11 +394,14 @@ function CatalogMT:OnMessage(msg)
 		self.stats.recvL = self.stats.recvL + 1
 		-- somebody answers with at least what we have: our own answer adds nothing
 		if validID(msg.c, Catalog.MAX_PER_PROFESSION) and msg.c >= self:Count(skillLine) then
-			cancelReply(self, skillLine, type(msg.s) == "string" and msg.s < tostring(self.a.myGuid()))
+			cancelReply(self, skillLine, msg.c > self:Count(skillLine)
+				or (type(msg.s) == "string" and msg.s < tostring(self.a.myGuid())))
 			self.lastSent[skillLine] = now -- the guild just got this list
 		end
 		local askedAt = self.mine[skillLine]
-		if not askedAt or now - askedAt > Catalog.ANSWER_WINDOW then return end
+		-- inside the window, or parts of a list that is still arriving
+		local streaming = self.got[skillLine] and now - self.got[skillLine] < Catalog.SEND_PACE * 10
+		if not askedAt or (now - askedAt > Catalog.ANSWER_WINDOW and not streaming) then return end
 		self.got[skillLine] = now -- an answer came, whatever the game accepts of it
 		local list, n = {}, 0
 		local prof = self.saved[skillLine] or {}

@@ -1192,7 +1192,7 @@ function UI:Create()
 	-- Items arrive by the dozen while the queue loads: the list is rebuilt (and the recipe items
 	-- of the auction house matched) at most once per ITEM_REBUILD seconds, not for every item.
 	local rebuildPending = false
-	events:SetScript("OnEvent", function(_, event, itemID)
+	events:SetScript("OnEvent", function(_, event, itemID, success)
 		if event ~= "GET_ITEM_INFO_RECEIVED" then
 			-- a scan may have added recipe items to the auction database
 			if event == "AUCTION_HOUSE_CLOSED" then ns.Prices.StartRecipeIndex(true) end
@@ -1202,7 +1202,8 @@ function UI:Create()
 		UI:OnItemInfo(itemID)
 		-- items loaded for other reasons (bags, chat, Auctionator) change nothing in the list
 		local asked = ns.Scanner.WasAsked(itemID)
-		ns.Scanner.Arrived(itemID)
+		-- a load that failed keeps its request time, so it is retried only after ITEM_RETRY
+		if success ~= false then ns.Scanner.Arrived(itemID) end
 		if rebuildPending or not asked then return end
 		rebuildPending = true
 		C_Timer.After(UI.ITEM_REBUILD, function()

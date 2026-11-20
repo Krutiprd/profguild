@@ -231,6 +231,9 @@ H.test("catalog: only a holder with more answers, not twice in a row, and a refu
 	h4.k:Announce()
 	g4.run(30)
 	H.eq(g4.sent.KR, kr, "not asked again")
+	-- clearing a profession forgets that it was tried: the guild can fill it again
+	refuser.k:Remove(197)
+	H.eq(refuser.k.tried[197], nil, "clear forgets the request state")
 	-- a failed request may be asked again at once
 	picky.k:OnSendFailed({ t = "KR", l = { 197 } })
 	H.eq(picky.k.tried[197], nil)
