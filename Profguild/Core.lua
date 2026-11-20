@@ -674,7 +674,9 @@ function ns.Status()
 	if ns.requests then
 		local open, taken = 0, 0
 		for _, rec in ipairs(ns.requests:All()) do
-			if rec.st == "open" then open = open + 1 elseif rec.st == "taken" then taken = taken + 1 end
+			if not ns.requests:_Expired(rec) then
+				if rec.st == "open" then open = open + 1 elseif rec.st == "taken" then taken = taken + 1 end
+			end
 		end
 		local s3 = ns.requests.stats
 		ns.Say("STATUS_REQUESTS", open, taken, s3.sentU, s3.sentD, s3.sentR, s3.recvU, s3.recvD, s3.recvR)

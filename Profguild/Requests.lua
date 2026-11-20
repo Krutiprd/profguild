@@ -5,20 +5,24 @@
 --
 -- A request: { id, by = requester guid, r = recipeID, i = itemID (0 none), n = count, note,
 --   c = created (server time), st = "open" | "taken" | "done" | "cancelled",
---   cr = crafter guid, tk = time of the take, g = { { tk, cr }, ... } takes given back (newest
---   last, at most MAX_GIVEN), u = time of the last change, ub = guid of the last change }
+--   cr = crafter guid, tk = time of the take, gn = how many times it was given back (generation),
+--   u = time of the last change, ub = guid of the last change }
 --
 -- Who may change what: the requester creates and cancels (also a taken one); anybody but the
 -- requester takes an open one; the crafter gives it back (open again) or marks it done, the
 -- requester may mark it done too. Done and cancelled are final.
 --
--- Versions of one request meet in any order on different clients, so the merge decides by the
--- request's history, the same way everywhere:
---   * of two different takes the earlier one wins (time of the take, then the lower guid), even
---     when its change is older; a take that was given back (listed in g) never comes back;
---   * a cancel by the requester wins over every state that is not final; of two final states the
---     earlier one wins;
---   * otherwise the newer change wins.
+-- Versions of one request meet in any order on different clients. They are ranked by one total
+-- order and the higher one is kept, so every client ends with the same version whatever the
+-- order of the messages (Requests.Beats):
+--   1. a final state (done, cancelled) beats any other; of two finals the earlier change wins;
+--   2. otherwise the higher generation wins: a give-back starts a new one, so a take that was
+--      given back can never come back;
+--   3. in one generation a take beats the open state, and of two takes the earlier one wins
+--      (time of the take, then the lower guid); of two open versions the later change wins.
+-- A give-back by the loser of a take race, before it heard the winner, opens the request again
+-- (rare, and the same everywhere). Own changes are refused while sending is blocked, so a take
+-- made in a dungeon cannot win minutes later as "earlier" (UI.lua).
 -- The sender of a message is not proven (as everywhere in Profguild): only the shape of a record
 -- and its history are checked.
 --
@@ -46,7 +50,7 @@ Requests.MAX_OPEN = 20           -- requests not yet final per requester
 Requests.MAX_RECORDS = 200       -- in the guild
 Requests.MAX_COUNT = 1000
 Requests.MAX_NOTE = 80           -- letters
-Requests.MAX_GIVEN = 5           -- given-back takes remembered
+Requests.MAX_GEN = 1000         -- give-backs of one request
 Requests.KEEP_OPEN = 7 * 86400   -- open and taken requests disappear this long after creation
 Requests.KEEP_FINAL = 2 * 86400  -- done and cancelled ones this long after their last change
 Requests.MAX_AHEAD = 120         -- times may be this far ahead of our clock
@@ -85,12 +89,6 @@ end
 local function cut(text, max)
 	if ns.Bugs and ns.Bugs.Cut then return ns.Bugs.Cut(text, max) end
 	return text:sub(1, max)
-end
-
-local function copyGiven(g)
-	local out = {}
-	for i, t in ipairs(g or {}) do out[i] = { t[1], t[2] } end
-	return out
 end
 
 local RequestsMT = {}
@@ -132,20 +130,37 @@ local function changed(self, id, what)
 	if self.a.onChanged then self.a.onChanged(id, what) end
 end
 
--- The take a record rests on: time and crafter, or nil.
-local function takeOf(rec)
-	if rec.cr and rec.tk then return rec.tk, rec.cr end
+-- Ranks two versions of the same request (see the top of the file): true when a beats b.
+-- Every field that can change takes part, so two different versions never tie.
+local function less(x, y)
+	if x ~= y then return x < y end
+	return nil
 end
 
-local function earlier(t1, c1, t2, c2)
-	return t1 < t2 or (t1 == t2 and c1 < c2)
-end
-
-local function given(rec, tk, cr)
-	for _, t in ipairs(rec.g or {}) do
-		if t[1] == tk and t[2] == cr then return true end
+function Requests.Beats(a, b)
+	local fa, fb = FINAL[a.st] and 1 or 0, FINAL[b.st] and 1 or 0
+	if fa ~= fb then return fa > fb end
+	local r
+	if fa == 1 then
+		-- two finals: the earlier decision
+		r = less(a.u, b.u); if r ~= nil then return r end
+		r = less(a.st, b.st); if r ~= nil then return r end
+	else
+		r = less(b.gn or 0, a.gn or 0); if r ~= nil then return r end
+		local ta, tb = a.st == "taken" and 1 or 0, b.st == "taken" and 1 or 0
+		if ta ~= tb then return ta > tb end
+		if ta == 1 then
+			r = less(a.tk, b.tk); if r ~= nil then return r end -- the earlier take
+			r = less(a.cr, b.cr); if r ~= nil then return r end
+		end
+		r = less(b.u, a.u); if r ~= nil then return r end -- open: the later change
 	end
-	return false
+	r = less(b.cr or "", a.cr or ""); if r ~= nil then return r end
+	r = less(b.tk or 0, a.tk or 0); if r ~= nil then return r end
+	r = less(b.gn or 0, a.gn or 0); if r ~= nil then return r end
+	r = less(b.u, a.u); if r ~= nil then return r end
+	r = less(b.ub, a.ub); if r ~= nil then return r end
+	return false -- the same version
 end
 
 -- True when the record is past its time.
@@ -164,11 +179,8 @@ function RequestsMT:_Valid(rec)
 	if type(rec.note) ~= "string" or #rec.note > Requests.MAX_NOTE * 4 or length(rec.note) > Requests.MAX_NOTE then return false end
 	if not STATES[rec.st] or not validInt(rec.c) or not validInt(rec.u) or rec.u < rec.c then return false end
 	if rec.u > self.a.clock() + Requests.MAX_AHEAD or not validGuid(rec.ub) then return false end
-	if rec.g ~= nil then
-		if type(rec.g) ~= "table" or #rec.g > Requests.MAX_GIVEN then return false end
-		for _, t in ipairs(rec.g) do
-			if type(t) ~= "table" or not validInt(t[1]) or not validGuid(t[2]) then return false end
-		end
+	if rec.gn ~= nil and (type(rec.gn) ~= "number" or rec.gn < 0 or rec.gn > Requests.MAX_GEN or rec.gn ~= math.floor(rec.gn)) then
+		return false
 	end
 	local hasTake = rec.cr ~= nil or rec.tk ~= nil
 	if hasTake and (not validGuid(rec.cr) or rec.cr == rec.by or not validInt(rec.tk) or rec.tk < rec.c or rec.tk > rec.u) then
@@ -181,10 +193,9 @@ function RequestsMT:_Valid(rec)
 	elseif rec.st == "cancelled" then
 		return rec.ub == rec.by
 	end
-	-- open: created by the requester, or given back by the crafter of the last given-back take
+	-- open: created by the requester, or given back by a crafter
 	if hasTake then return false end
-	local last = rec.g and rec.g[#rec.g]
-	return rec.ub == rec.by or (last ~= nil and rec.ub == last[2])
+	return rec.ub == rec.by or (rec.gn or 0) > 0
 end
 
 function RequestsMT:Get(id)
@@ -204,10 +215,11 @@ function RequestsMT:All()
 	return out
 end
 
+-- Requests of one requester that are not final and not past their time.
 local function openCount(self, by)
-	local n = 0
+	local n, clock = 0, self.a.clock()
 	for _, rec in pairs(self.list) do
-		if rec.by == by and not FINAL[rec.st] then n = n + 1 end
+		if rec.by == by and not FINAL[rec.st] and not self:_Expired(rec, clock) then n = n + 1 end
 	end
 	return n
 end
@@ -231,38 +243,9 @@ function RequestsMT:Prune()
 	return dropped
 end
 
--- Decides whether an incoming version replaces the one held (see the top of the file).
-local function wins(held, inc)
-	if inc.u == held.u and inc.st == held.st and inc.cr == held.cr and inc.tk == held.tk then return false end
-	if FINAL[held.st] then
-		if not FINAL[inc.st] then return false end
-		return inc.u < held.u or (inc.u == held.u and inc.st < held.st)
-	end
-	if inc.st == "cancelled" then return true end
-	local tIn, cIn = takeOf(inc)
-	local tH, cH = takeOf(held)
-	if tIn and given(held, tIn, cIn) then return false end -- a take that was given back
-	if held.st == "taken" then
-		if tIn then
-			if tIn == tH and cIn == cH then return FINAL[inc.st] or inc.u > held.u end
-			if given(inc, tH, cH) then return true end -- our take was given back meanwhile
-			return earlier(tIn, cIn, tH, cH)
-		end
-		-- open again: the give-back of our take, or of an earlier take than ours
-		if given(inc, tH, cH) then return true end
-		local last = inc.g and inc.g[#inc.g]
-		return last ~= nil and earlier(last[1], last[2], tH, cH)
-	end
-	-- held open
-	if tIn then return true end
-	local gi, gh = #(inc.g or {}), #(held.g or {})
-	return gi > gh or (gi == gh and inc.u > held.u)
-end
-
 local function shallow(rec)
 	local out = {}
 	for k, v in pairs(rec) do out[k] = v end
-	out.g = rec.g and copyGiven(rec.g) or nil
 	return out
 end
 
@@ -284,7 +267,7 @@ function RequestsMT:Merge(rec)
 		or held.c ~= rec.c then
 		return false -- what was asked for never changes
 	end
-	if not wins(held, rec) then return false end
+	if not Requests.Beats(rec, held) then return false end
 	local before = held
 	self.list[rec.id] = shallow(rec)
 	local what = rec.st ~= before.st and rec.st or (rec.cr ~= before.cr and "taken") or nil
@@ -307,7 +290,7 @@ function RequestsMT:_Apply(new)
 	return true
 end
 
--- A new request of ours. Returns the record, or nil and "invalid" / "limit".
+-- A new request of ours. Returns the record, or nil and "invalid" / "limit" (ours) / "full" (guild).
 function RequestsMT:Create(recipeID, itemID, n, note)
 	local me = self.a.myGuid()
 	note = type(note) == "string" and cut(note:gsub("^%s+", ""):gsub("%s+$", ""), Requests.MAX_NOTE) or ""
@@ -316,7 +299,7 @@ function RequestsMT:Create(recipeID, itemID, n, note)
 	if openCount(self, me) >= Requests.MAX_OPEN then return nil, "limit" end
 	if count(self) >= Requests.MAX_RECORDS then
 		self:Prune()
-		if count(self) >= Requests.MAX_RECORDS then return nil, "limit" end
+		if count(self) >= Requests.MAX_RECORDS then return nil, "full" end
 	end
 	local clock = math.floor(self.a.clock())
 	self.saved.requestSeq = (tonumber(self.saved.requestSeq) or 0) + 1
@@ -353,10 +336,9 @@ function RequestsMT:GiveBack(id)
 	if not rec then return false, why end
 	local me = self.a.myGuid()
 	if rec.st ~= "taken" or rec.cr ~= me then return false, "not allowed" end
+	if (rec.gn or 0) >= Requests.MAX_GEN then return false, "not allowed" end
 	local new = shallow(rec)
-	new.g = new.g or {}
-	new.g[#new.g + 1] = { rec.tk, rec.cr }
-	while #new.g > Requests.MAX_GIVEN do table.remove(new.g, 1) end
+	new.gn = (rec.gn or 0) + 1
 	new.st, new.cr, new.tk = "open", nil, nil
 	new.u, new.ub = stamp(self, rec), me
 	return self:_Apply(new)
@@ -400,9 +382,9 @@ local function send(self, msg)
 	self.a.send(msg)
 end
 
--- What tells two versions of a request apart in a digest.
+-- What tells two versions of a request apart in a digest: every field that can change.
 local function version(rec)
-	return rec.u .. ":" .. rec.st .. ":" .. (rec.cr or "") .. ":" .. #(rec.g or {})
+	return (rec.gn or 0) .. ":" .. rec.st .. ":" .. rec.u .. ":" .. (rec.tk or "") .. ":" .. (rec.cr or "") .. ":" .. rec.ub
 end
 Requests.Version = version
 

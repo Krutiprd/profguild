@@ -72,7 +72,7 @@ H.test("requests: transitions by the allowed player only", function()
 	b.clock = CLOCK0 + 20
 	H.ok(b.r:GiveBack(rec.id))
 	t = b.r:Get(rec.id)
-	H.eq(t.st, "open"); H.eq(t.cr, nil); H.eq(t.g[1][2], B, "remembers the take it gave back")
+	H.eq(t.st, "open"); H.eq(t.cr, nil); H.eq(t.gn, 1, "one give-back so far")
 	give(b, c)
 	c.clock = CLOCK0 + 30
 	H.ok(c.r:Take(rec.id), "taken again by another")
@@ -394,4 +394,131 @@ H.test("requests sync: 15 clients settle, then only digests", function()
 	local tu, tr = g.sent.TU, g.sent.TR
 	g.hellos()
 	H.eq(g.sent.TU, tu); H.eq(g.sent.TR, tr)
+end)
+
+
+-- Review round 1: versions that met in a bad order must still settle on one version everywhere.
+local function settle(clients, versions, seed)
+	-- every client hears every version in its own random order, twice
+	local rs = seed or 1
+	local function rnd(n) rs = (rs * 1103515245 + 12345) % 2147483648; return rs % n + 1 end
+	for _, c in ipairs(clients) do
+		for _ = 1, 2 do
+			local order = {}
+			for i = 1, #versions do order[i] = versions[i] end
+			for i = #order, 2, -1 do local j = rnd(i); order[i], order[j] = order[j], order[i] end
+			for _, v in ipairs(order) do c.r:Merge(copy(v)) end
+		end
+	end
+end
+
+local function sameEverywhere(clients, id)
+	local v = RQ.Version(clients[1].r:Get(id))
+	for i = 2, #clients do
+		if RQ.Version(clients[i].r:Get(id)) ~= v then return false, i end
+	end
+	return true
+end
+
+H.test("requests: a stale open version does not undo a newer take (review 1, I1)", function()
+	local a, b, c, z = client(A), client(B), client(C), client(D)
+	local rec = a.r:Create(3865, 4305, 1)
+	for _, x in ipairs({ b, c, z }) do x.r:Merge(copy(rec)) end
+	b.clock = CLOCK0 + 10; b.r:Take(rec.id)
+	b.clock = CLOCK0 + 20; b.r:GiveBack(rec.id)
+	local reopened = copy(b.r:Get(rec.id))
+	z.r:Merge(copy(reopened)); c.r:Merge(copy(reopened))
+	c.clock = CLOCK0 + 30; c.r:Take(rec.id)
+	local retake = copy(c.r:Get(rec.id))
+	a.r:Merge(copy(retake))
+	H.ok(not a.r:Merge(copy(reopened)), "Z's old open version arrives late")
+	H.eq(a.r:Get(rec.id).cr, C)
+	H.ok(z.r:Merge(copy(retake)), "Z takes the newer take")
+end)
+
+H.test("requests: done crossing a give-back, and a losing take's done, settle (review 1, I2)", function()
+	local a, b, c, x = client(A), client(B), client(C), client(D)
+	local rec = a.r:Create(3865, 4305, 1)
+	for _, o in ipairs({ b, c, x }) do o.r:Merge(copy(rec)) end
+	b.clock = CLOCK0 + 10; b.r:Take(rec.id)
+	local take = copy(b.r:Get(rec.id))
+	a.r:Merge(copy(take)); x.r:Merge(copy(take))
+	-- the requester presses done while the crafter gives it back
+	a.clock, b.clock = CLOCK0 + 20, CLOCK0 + 21
+	a.r:Done(rec.id); b.r:GiveBack(rec.id)
+	local versions = { copy(rec), take, copy(a.r:Get(rec.id)), copy(b.r:Get(rec.id)) }
+	settle({ a, b, c, x }, versions, 3)
+	H.ok(sameEverywhere({ a, b, c, x }, rec.id), "one version everywhere")
+	H.eq(a.r:Get(rec.id).st, "done", "done is final")
+	-- a take race whose loser marks done before it hears the winner
+	local r2 = a.r:Create(3865, 4305, 1)
+	for _, o in ipairs({ b, c, x }) do o.r:Merge(copy(r2)) end
+	b.clock, c.clock = CLOCK0 + 30, CLOCK0 + 31
+	b.r:Take(r2.id); c.r:Take(r2.id)
+	local tb, tc = copy(b.r:Get(r2.id)), copy(c.r:Get(r2.id))
+	c.clock = CLOCK0 + 40; c.r:Done(r2.id)
+	settle({ a, b, c, x }, { copy(r2), tb, tc, copy(c.r:Get(r2.id)) }, 5)
+	H.ok(sameEverywhere({ a, b, c, x }, r2.id), "one version everywhere")
+	-- two dones in the same second by different players
+	local r3 = a.r:Create(3865, 4305, 1)
+	b.r:Merge(copy(r3)); b.clock = CLOCK0 + 50; b.r:Take(r3.id); a.r:Merge(copy(b.r:Get(r3.id)))
+	a.clock, b.clock = CLOCK0 + 60, CLOCK0 + 60
+	a.r:Done(r3.id); b.r:Done(r3.id)
+	settle({ a, b }, { copy(a.r:Get(r3.id)), copy(b.r:Get(r3.id)) }, 7)
+	H.ok(sameEverywhere({ a, b }, r3.id))
+end)
+
+H.test("requests: many give-backs never bring back an old take (review 1, I3)", function()
+	local a = client(A)
+	local rec = a.r:Create(3865, 4305, 1)
+	local takers = {}
+	for i = 1, 8 do takers[i] = client(string.format("Player-1-%08X", 300 + i)) end
+	local versions, cur = { copy(rec) }, copy(rec)
+	for i, t in ipairs(takers) do
+		t.r:Merge(copy(cur))
+		t.clock = CLOCK0 + i * 10; t.r:Take(rec.id)
+		versions[#versions + 1] = copy(t.r:Get(rec.id))
+		t.clock = CLOCK0 + i * 10 + 5; t.r:GiveBack(rec.id)
+		cur = copy(t.r:Get(rec.id))
+		versions[#versions + 1] = cur
+	end
+	-- a newcomer hears every version; the first take, given back long ago, never wins
+	local n = client(B)
+	settle({ n, a }, versions, 11)
+	H.eq(n.r:Get(rec.id).st, "open"); H.eq(n.r:Get(rec.id).gn, 8)
+	H.ok(sameEverywhere({ n, a }, rec.id))
+end)
+
+H.test("requests: random histories delivered in random orders settle on one version", function()
+	local rs = 17
+	local function rnd(n) rs = (rs * 1103515245 + 12345) % 2147483648; return rs % n + 1 end
+	for trial = 1, 300 do
+		local guids = { A, B, C, D }
+		local cs = {}
+		for i, g in ipairs(guids) do cs[i] = client(g, CLOCK0) end
+		local rec = cs[1].r:Create(3865, 4305, 1)
+		local versions = { copy(rec) }
+		for _, c in ipairs(cs) do c.r:Merge(copy(rec)) end
+		for step = 1, 30 do
+			local c = cs[rnd(4)]
+			c.clock = CLOCK0 + step * (rnd(3) - 1)
+			local act = rnd(6)
+			if act == 1 then c.r:Take(rec.id)
+			elseif act == 2 then c.r:GiveBack(rec.id)
+			elseif act == 3 then c.r:Done(rec.id)
+			elseif act == 4 and rnd(4) == 1 then c.r:Cancel(rec.id)
+			else
+				-- a delivery: some version reaches this client
+				c.r:Merge(copy(versions[rnd(#versions)]))
+			end
+			versions[#versions + 1] = copy(c.r:Get(rec.id))
+		end
+		settle(cs, versions, trial)
+		local ok, who = sameEverywhere(cs, rec.id)
+		if not ok then
+			H.ok(false, "trial " .. trial .. ": client " .. who .. " differs")
+			return
+		end
+	end
+	H.ok(true)
 end)

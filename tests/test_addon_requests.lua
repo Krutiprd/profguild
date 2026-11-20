@@ -221,3 +221,20 @@ H.test("addon requests window: a change arriving while selected keeps the select
 	H.eq(UI.selected.request.st, "cancelled", "the new state")
 	H.ok(UI.detail.recipeInfo:GetText():find(ns.T("REQ_STATE_CANCELLED"), 1, true))
 end)
+
+
+H.test("addon requests window: actions wait while sending is blocked (review 1, I4)", function()
+	local ns = login()
+	local UI = ns.UI
+	UI:Toggle()
+	local rec = anaRequest(ns, 3865, 1)
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } })
+	openRequest(UI, rec.id)
+	IsInInstance = function() return true, "party" end
+	UI.detail.linkButton._scripts.OnClick(UI.detail.linkButton)
+	H.eq(ns.requests:Get(rec.id).st, "open", "not taken inside a dungeon")
+	H.ok(chatHas(ns.T("REQ_BLOCKED", ns.T("REASON_INSTANCE"))), "told why")
+	IsInInstance = function() return false, "none" end
+	UI.detail.linkButton._scripts.OnClick(UI.detail.linkButton)
+	H.eq(ns.requests:Get(rec.id).st, "taken")
+end)

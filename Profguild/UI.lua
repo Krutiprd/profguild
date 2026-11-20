@@ -573,7 +573,7 @@ function UI:BuildRequestRows(query, category)
 			local prof = skillLine > 0 and ns.Scanner.ProfessionName(skillLine) or "?"
 			local who = ns.MemberName(rec.by)
 			local maker = rec.cr and ns.MemberName(rec.cr) or nil
-			counts[skillLine] = (counts[skillLine] or 0) + 1
+			if skillLine > 0 then counts[skillLine] = (counts[skillLine] or 0) + 1 end
 			total = total + 1
 			if (not category or category == skillLine) and matches(query, name, prof, who, maker, rec.note) then
 				rows[#rows + 1] = { kind = "recipe", key = "q" .. rec.id, request = rec, recipeID = rec.r,
@@ -1095,7 +1095,7 @@ function UI:Create()
 	d.refreshButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
 	d.refreshButton:Hide()
 	-- ask the guild to craft the selected recipe (Requests.lua)
-	d.requestButton = pill(det, 120, 18)
+	d.requestButton = pill(det, 104, 18)
 	d.requestButton:SetPoint("RIGHT", d.refreshButton, "LEFT", -6, 0)
 	d.requestButton:SetFrameLevel((det:GetFrameLevel() or 1) + 10)
 	d.requestButton:SetScript("OnClick", function()
@@ -1358,6 +1358,10 @@ function UI:Create()
 	end
 	rq.countLabel, rq.count = field(-58, 80, 4, true)
 	rq.noteLabel, rq.note = field(-104, 332, ns.Requests.MAX_NOTE, false)
+	-- Enter or Tab in the count goes on to the note; Enter in the note sends
+	rq.count:SetScript("OnEnterPressed", function() rq.note:SetFocus() end)
+	rq.count:SetScript("OnTabPressed", function() rq.note:SetFocus() end)
+	rq.note:SetScript("OnTabPressed", function() rq.count:SetFocus() end)
 	rq.saveButton = pill(rq, 120, 24)
 	rq.saveButton:SetPoint("BOTTOMRIGHT", -14, 12)
 	rq.saveButton:SetScript("OnClick", function() UI:SaveRequest() end)
@@ -1420,16 +1424,22 @@ function UI:Toggle()
 end
 
 -- The box for a new request of the selected recipe.
-function UI:OpenRequestBox(s)
-	self:Create()
+function UI:DrawRequestBox()
 	local rq = self.requestBox
-	rq.recipeID, rq.itemID = s.recipeID, s.itemID or 0
+	if not rq then return end
 	rq.title:SetText(ns.T("REQ_BOX_TITLE"))
-	rq.item:SetText(qualityName(s))
 	rq.countLabel:SetText(ns.T("REQ_BOX_COUNT"))
 	rq.noteLabel:SetText(ns.T("REQ_BOX_NOTE"))
 	setPill(rq.saveButton, ns.T("REQ_SAVE"), false)
 	setPill(rq.cancelButton, ns.T("BUG_CANCEL"), false)
+end
+
+function UI:OpenRequestBox(s)
+	self:Create()
+	local rq = self.requestBox
+	rq.recipeID, rq.itemID = s.recipeID, s.itemID or 0
+	rq.item:SetText(qualityName(s))
+	self:DrawRequestBox()
 	rq.count:SetText("1")
 	rq.note:SetText("")
 	rq.name = s.name
@@ -1451,7 +1461,13 @@ function UI:SaveRequest()
 	local n = tonumber(rq.count:GetText() or "")
 	local rec, why = ns.requests:Create(rq.recipeID, rq.itemID, n or 0, rq.note:GetText() or "")
 	if not rec then
-		if why == "limit" then ns.Say("REQ_LIMIT", ns.Requests.MAX_OPEN) else ns.Say("REQ_INVALID", ns.Requests.MAX_COUNT) end
+		if why == "limit" then
+			ns.Say("REQ_LIMIT", ns.Requests.MAX_OPEN)
+		elseif why == "full" then
+			ns.Say("REQ_FULL", ns.Requests.MAX_RECORDS)
+		else
+			ns.Say("REQ_INVALID", ns.Requests.MAX_COUNT)
+		end
 		return
 	end
 	ns.Say("REQ_CREATED", rec.n, rq.name or ns.RequestItemName(rec))
@@ -1462,6 +1478,9 @@ end
 -- A button of a request: take, give back, done, cancel.
 function UI:RequestAction(rec, action)
 	if not ns.requests or not action then return end
+	-- a change that cannot reach the guild now would count as "earlier" when it finally does
+	local blocked = ns.SendBlockReason()
+	if blocked then return ns.Say("REQ_BLOCKED", ns.T(blocked)) end
 	local fn = ({ take = "Take", giveback = "GiveBack", done = "Done", cancel = "Cancel" })[action]
 	if not fn then return end
 	local ok = ns.requests[fn](ns.requests, rec.id)
@@ -1647,6 +1666,7 @@ end
 function UI:OnLanguageChanged()
 	if self.frame and self.frame:IsShown() then self:Refresh() end
 	if self.bugDialog and self.bugDialog:IsShown() then self:DrawBugDialog() end
+	if self.requestBox and self.requestBox:IsShown() then self:DrawRequestBox() end
 end
 
 local refreshToken = 0

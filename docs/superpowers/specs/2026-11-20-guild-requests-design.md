@@ -42,3 +42,14 @@ of a message is not proven, as in the rest of Profguild).
 ## Left to the builder
 
 Message formats and limits, pacing, the exact UI layout and wording, notices throttling.
+
+## Revision after review round 1
+
+The history-based merge (given-back list, earlier-take exceptions) diverged in fuzzing (stale
+open versions undoing newer takes, final vs non-final never settling, lost history). Replaced by
+a total order of versions; the higher one is kept, so any delivery order converges:
+final > non-final; of two finals the earlier change; otherwise the higher generation (number of
+give-backs), then taken > open, the earlier take, and for open the later change; every mutable
+field breaks remaining ties. The digest version key holds every mutable field.
+Request actions are refused while sending is blocked (instance, combat), so a hidden take cannot
+win later as "earlier".
