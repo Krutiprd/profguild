@@ -12,7 +12,7 @@
   `TU`, `TD`, `TR`). When two guildmates take a request at the same time, the earlier take wins
   everywhere. 20 open requests per player, 200 in the guild (finished ones that are no longer
   shown make room first); open and taken requests disappear
-  after 7 days, done and cancelled ones are shown for 2 days.
+  after 7 days; done ones are shown for 2 days, cancelled ones leave the list at once.
 - A request changes only while the guild can hear it: in an instance or in combat a button says
   why and does nothing; a change made just before combat goes out as soon as sending works.
   When a take does not count (somebody took it earlier), the chat says so.

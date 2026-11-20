@@ -211,15 +211,27 @@ H.test("addon requests window: a change arriving while selected keeps the select
 	local rec = anaRequest(ns, 3865, 1)
 	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } })
 	openRequest(UI, rec.id)
+	-- Bob takes it while we look at it
+	local taken = {}
+	for k, v in pairs(rec) do taken[k] = v end
+	taken.st, taken.cr, taken.tk, taken.u, taken.ub = "taken", "Player-1-00000003", rec.u + 3, rec.u + 3, "Player-1-00000003"
+	M.advance(4)
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { taken } })
+	M.advance(1)
+	H.ok(UI.selected and UI.selected.request.id == rec.id, "still selected")
+	H.eq(UI.selected.request.st, "taken", "the new state")
+	-- Ana cancels it: a cancelled request leaves the list at once
 	local cancel = {}
-	for k, v in pairs(rec) do cancel[k] = v end
-	cancel.st, cancel.u = "cancelled", rec.u + 3
+	for k, v in pairs(taken) do cancel[k] = v end
+	cancel.st, cancel.u, cancel.ub = "cancelled", taken.u + 3, ANA
 	M.advance(4)
 	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { cancel } })
 	M.advance(1)
-	H.ok(UI.selected and UI.selected.request.id == rec.id, "still selected")
-	H.eq(UI.selected.request.st, "cancelled", "the new state")
-	H.ok(UI.detail.recipeInfo:GetText():find(ns.T("REQ_STATE_CANCELLED"), 1, true))
+	H.eq(UI.selected, nil, "gone from the list")
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		H.ok(not (d and d.request and d.request.id == rec.id), "not listed")
+	end
 end)
 
 

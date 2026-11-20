@@ -209,7 +209,7 @@ H.test("requests: expiry after 7 days open, 2 days finished; the guild limit", f
 	a.r:Cancel(fin.id)
 	a.clock = CLOCK0 + 2 * 86400 + 20
 	H.eq(a.r:Prune(), 0, "the cancelled one is kept (hidden) while open versions may exist")
-	H.ok(a.r:_Hidden(a.r:Get(fin.id)), "but not shown after 2 days")
+	H.ok(a.r:_Hidden(a.r:Get(fin.id)), "a cancelled one is not shown")
 	H.ok(not a.r:_Hidden(a.r:Get(open.id)))
 	a.clock = CLOCK0 + 7 * 86400 + 1
 	H.eq(a.r:Prune(), 2, "both after 7 days")
@@ -655,4 +655,19 @@ H.test("requests: hidden finished requests make room when the guild is full (rev
 	end
 	H.eq(#full.r:All(), RQ.MAX_RECORDS)
 	H.eq(select(2, full.r:Create(3865, 4305, 1)), "full")
+end)
+
+
+H.test("requests: a cancelled request is not shown at once, a done one for 2 days", function()
+	local a, b = client(A), client(B)
+	local r1 = a.r:Create(3865, 4305, 1)
+	local r2 = a.r:Create(3865, 4305, 1)
+	b.r:Merge(copy(r2)); b.clock = CLOCK0 + 5; b.r:Take(r2.id); a.r:Merge(copy(b.r:Get(r2.id)))
+	a.clock = CLOCK0 + 10
+	a.r:Cancel(r1.id); a.r:Done(r2.id)
+	H.ok(a.r:_Hidden(a.r:Get(r1.id)), "cancelled: hidden at once")
+	H.ok(not a.r:_Hidden(a.r:Get(r2.id)), "done: still shown")
+	a.clock = CLOCK0 + 2 * 86400 + 11
+	H.ok(a.r:_Hidden(a.r:Get(r2.id)), "done: hidden after 2 days")
+	H.ok(a.r:Get(r1.id), "the cancelled one is still kept, so it cannot come back")
 end)

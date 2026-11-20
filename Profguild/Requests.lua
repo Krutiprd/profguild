@@ -52,7 +52,7 @@ Requests.MAX_COUNT = 1000
 Requests.MAX_NOTE = 80           -- letters
 Requests.MAX_GEN = 1000         -- give-backs of one request
 Requests.KEEP_OPEN = 7 * 86400   -- open and taken requests disappear this long after creation
-Requests.KEEP_FINAL = 2 * 86400  -- done and cancelled ones are shown this long after their last change;
+Requests.KEEP_FINAL = 2 * 86400  -- done ones are shown this long after their last change (cancelled ones not at all);
                                  -- they are kept (not shown) until KEEP_OPEN after creation, so an
                                  -- open version from a player who was away cannot bring them back
 Requests.MAX_AHEAD = 120         -- times may be this far ahead of our clock
@@ -186,10 +186,11 @@ function RequestsMT:_Expired(rec, clock)
 	return not FINAL[rec.st] or rec.u < clock - Requests.KEEP_FINAL
 end
 
--- True for a request that is not shown any more: expired, or finished more than KEEP_FINAL ago.
+-- True for a request that is not shown any more: expired, cancelled, or done more than
+-- KEEP_FINAL ago (the guild sees for a while who crafted it).
 function RequestsMT:_Hidden(rec, clock)
 	clock = clock or self.a.clock()
-	if self:_Expired(rec, clock) then return true end
+	if rec.st == "cancelled" or self:_Expired(rec, clock) then return true end
 	return FINAL[rec.st] and rec.u < clock - Requests.KEEP_FINAL or false
 end
 

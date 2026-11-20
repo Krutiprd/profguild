@@ -85,7 +85,7 @@ Treba 2–3 hráčov s Profguildom 0.4.0.
 | B je v dungeone alebo v boji a dá „VYROBÍM TO“ | V chate „Teraz nie: …“, požiadavka sa nezmení |
 | B dá „VZDAŤ SA“ | Požiadavka je znova otvorená |
 | B (alebo A) dá „HOTOVO“ | Stav „hotové“ u všetkých; po 2 dňoch zmizne |
-| A dá „ZRUŠIŤ POŽIADAVKU“ | Stav „zrušená“ u všetkých |
+| A dá „ZRUŠIŤ POŽIADAVKU“ | Požiadavka zmizne zo zoznamu u všetkých |
 | C sa prihlási neskôr | Do minúty vidí tie isté požiadavky v tom istom stave |
 | `/pg status` | Riadok „Požiadavky: N otvorených, M prevzatých …“ |
 
