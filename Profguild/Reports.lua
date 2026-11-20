@@ -25,6 +25,7 @@
 -- Adapter: send(msg), canSend() -> bool, now() (seconds, monotonic), clock() (server time),
 --          after(seconds, fn), random() -> [0,1), myGuid(), isReceiver() -> bool,
 --          receiverInGuild() -> bool, deliver(record) (the receiver's inbox),
+--          ownIds() -> { id -> true } (optional: reports of this account, also of its alts),
 --          onChanged(id, what) (optional; what = "new" | "delivered" | "gone")
 
 local _, ns = ...
@@ -51,7 +52,8 @@ Reports.MAX_LINE = 200           -- characters of a context or log line
 Reports.MAX_MSG = 400
 Reports.MAX_STACK = 600
 Reports.MAX_PER_MESSAGE = 2      -- reports in one update (the text is the bulk)
-Reports.MAX_DIGEST = Reports.MAX_HELD + Reports.MAX_MARKS -- entries in one digest: all we hold
+-- entries in one digest: all we hold (others' held, our own, marks)
+Reports.MAX_DIGEST = Reports.MAX_HELD + Reports.MAX_PER_REPORTER + Reports.MAX_MARKS
 Reports.MAX_ASK = 6              -- reports asked for at once (each a few kB)
 Reports.MAX_BYTES = 6000         -- characters of one record (the text alone stays under this)
 Reports.SEND_PACE = 1.0
@@ -159,6 +161,14 @@ end
 local ReportsMT = {}
 ReportsMT.__index = ReportsMT
 
+-- A test for "our own held report": this character's, or one of the account's (an alt's report
+-- in the account-wide guild data is often the only copy, too).
+local function ownTest(self)
+	local me = self.a.myGuid()
+	local ids = self.a.ownIds and self.a.ownIds() or {}
+	return function(rec) return rec.st == "h" and (rec.by == me or ids[rec.id] == true) end
+end
+
 -- saved: the guild's saved table; records live in saved.reports.
 function Reports.New(adapter, saved)
 	if type(saved.reports) ~= "table" then saved.reports = {} end
@@ -250,9 +260,9 @@ end
 -- own held reports do not count: we keep them whatever the guild holds (often the only copy).
 function ReportsMT:_WouldKeep(cand)
 	local total, mine, limitTotal = 0, 0, cand.st == "d" and Reports.MAX_MARKS or Reports.MAX_HELD
-	local me = self.a.myGuid()
+	local own = ownTest(self)
 	for _, rec in pairs(self.list) do
-		if rec.st == cand.st and rec.id ~= cand.id and newer(rec, cand) and not (rec.st == "h" and rec.by == me) then
+		if rec.st == cand.st and rec.id ~= cand.id and newer(rec, cand) and not own(rec) then
 			total = total + 1
 			if cand.st == "h" and rec.by == cand.by then mine = mine + 1 end
 		end
@@ -269,10 +279,10 @@ function ReportsMT:_Trim()
 	end
 	table.sort(held, newer)
 	table.sort(marks, newer)
-	local per, kept, me = {}, 0, self.a.myGuid()
+	local per, kept, own = {}, 0, ownTest(self)
 	for _, rec in ipairs(held) do
 		per[rec.by] = (per[rec.by] or 0) + 1
-		if rec.by == me then
+		if own(rec) then
 			-- ours: kept until delivered or old (MAX_PER_REPORTER still holds for us)
 			if per[rec.by] > Reports.MAX_PER_REPORTER then
 				self.list[rec.id] = nil
@@ -437,7 +447,13 @@ function ReportsMT:Announce()
 	self:Prune()
 	local all = {}
 	for _, rec in pairs(self.list) do all[#all + 1] = rec end
-	table.sort(all, newer)
+	-- our own held reports first: they may be the only copies
+	local own = ownTest(self)
+	table.sort(all, function(p, q)
+		local op, oq = own(p), own(q)
+		if op ~= oq then return op end
+		return newer(p, q)
+	end)
 	local x = {}
 	for i = 1, math.min(#all, Reports.MAX_DIGEST) do
 		local rec = all[i]
@@ -589,6 +605,8 @@ function ReportsMT:OnMessage(msg)
 		end
 		-- they lack a record we hold, or know less about it: our digest tells them. A full digest
 		-- leaves out their oldest records, so ours older than its oldest entry are not counted.
+		-- (clients that keep different own reports differ for good: one answering digest per
+		-- hello at most, DIGEST_GAP stops the ping-pong)
 		local full = #msg.x >= 3 * Reports.MAX_DIGEST
 		local differs, clock = false, self.a.clock()
 		for id, rec in pairs(self.list) do

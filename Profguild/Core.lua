@@ -446,7 +446,18 @@ function ns.ReceiverInGuild()
 			end
 		end
 	end
+	local appeared = value and not receiverSeen.value
 	receiverSeen.at, receiverSeen.value = now, value
+	if appeared and ns.reports then
+		-- the author just appeared (whoever asked first): waiting reports go out
+		C_Timer.After(0, function()
+			ns.Bugs.Call(function()
+				if not ns.reports then return end
+				ns.CheckReports()
+				ns.reports:AnnounceSoon()
+			end)
+		end)
+	end
 	return value
 end
 
@@ -492,6 +503,13 @@ local reportsAdapter = {
 	random = function() return math.random() end,
 	myGuid = function() return UnitGUID("player") end,
 	isReceiver = function() return ns.IsReportReceiver() end,
+	ownIds = function()
+		local ids = {}
+		for _, r in ipairs(ns.Bugs.All()) do
+			if r.shared then ids[r.shared] = true end
+		end
+		return ids
+	end,
 	receiverInGuild = function() return ns.ReceiverInGuild() end,
 	deliver = deliverReport,
 	onChanged = reportChanged,
@@ -527,7 +545,14 @@ function ns.CheckReports()
 		end
 		if r.shared and not r.delivered then
 			local rec = ns.reports:Get(r.shared)
-			if rec and rec.st == "d" then reportChanged(r.shared, "delivered") end
+			if rec and rec.st == "d" then
+				reportChanged(r.shared, "delivered")
+			elseif not rec and r.by == me and (r.guild == nil or r.guild == ns.guildName)
+				and type(r.t) == "number" and r.t > clock - Reports.KEEP then
+				-- our copy was lost (pushed out before 0.5.0's rules, or by an alt): again, same id
+				r.shared = nil
+				ns.OnBugReport(r, true)
+			end
 		end
 	end
 end
@@ -610,13 +635,22 @@ function ns.SetupGuild()
 end
 
 function ns.OnRosterUpdate()
-	-- the author may be in a roster that was not read yet at login (read again at most every 5 s)
-	local knew = receiverSeen.value
-	if not knew and GetTime() - receiverSeen.at >= 5 then
-		receiverSeen.at = -1e9
-		if ns.reports and ns.ReceiverInGuild() then
-			ns.CheckReports()
-			ns.reports:AnnounceSoon()
+	-- the author may be in a roster that was not read yet at login: read again (at most every
+	-- 5 s; an event inside that time is looked at when it ends). ReceiverInGuild sends what waits.
+	if not receiverSeen.value and not receiverSeen.recheck then
+		local wait = 5 - (GetTime() - receiverSeen.at)
+		if wait <= 0 then
+			receiverSeen.at = -1e9
+			ns.ReceiverInGuild()
+		else
+			receiverSeen.recheck = true
+			C_Timer.After(wait, function()
+				receiverSeen.recheck = false
+				if not receiverSeen.value then
+					receiverSeen.at = -1e9
+					ns.Bugs.Call(ns.ReceiverInGuild)
+				end
+			end)
 		end
 	end
 	if not ns.store then return end

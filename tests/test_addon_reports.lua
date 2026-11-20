@@ -198,8 +198,57 @@ H.test("addon reports: a report waits for a guild with the author, and goes when
 	end
 	M.advance(6)
 	ns.OnRosterUpdate()
+	M.advance(1)
 	H.ok(r.shared, "shared now")
 	H.eq(ns.reports.stats.sentU, 1, "sent")
 	M.advance(10)
 	H.ok(ns.reports.stats.sentD >= 1, "a digest followed")
+end)
+
+H.test("addon reports: the author noticed by any roster read sends waiting reports", function()
+	local ns = login()
+	ns.Bugs.Slash("waiting")
+	local r = ns.Bugs.All()[1]
+	H.eq(r.shared, nil)
+	local roster = _G.GetGuildRosterInfo
+	_G.GetNumGuildMembers = function() return 3, 2 end
+	_G.GetGuildRosterInfo = function(i)
+		if i == 3 then return "Fiona Vajcak", "Member", 3, 60, "Mage", "Zone", "", "", false, 0, "MAGE", 0, 0, false, false, 0, "Player-1-000000FD" end
+		return roster(i)
+	end
+	-- not a roster event: the cache runs out and /pg status reads the roster
+	M.advance(31)
+	SlashCmdList.PROFGUILD("status")
+	M.advance(1)
+	H.ok(r.shared, "shared once the author was seen")
+end)
+
+H.test("addon reports: an alt's report in the account's guild data is kept, and a lost one is sent again", function()
+	local ns = login({ author = true })
+	M.advance(31)
+	ns.Bugs.Slash("from an alt")
+	local r = ns.Bugs.All()[1]
+	-- as if another character of the account had written it
+	local rec = ns.reports.list[r.shared]
+	H.ok(ns.reports.list[r.shared], "held")
+	rec.by = "Player-1-0000ABCD"
+	local altId = "Player-1-0000ABCD:" .. r.t .. ":" .. r.n
+	ns.reports.list[r.shared] = nil
+	rec.id = altId
+	ns.reports.list[altId] = rec
+	r.shared = altId
+	for i = 1, 65 do
+		local guid = string.format("Player-1-%08X", 600 + i)
+		ns.reports:Merge({ id = guid .. ":" .. GetServerTime() .. ":1", by = guid, t = GetServerTime(), st = "h",
+			who = "X", text = "newer " .. i })
+	end
+	H.ok(ns.reports:Get(altId), "the alt's report is still held")
+	-- a report of ours whose copy is gone goes out again with the same id
+	ns.Bugs.Slash("second")
+	local r2 = ns.Bugs.All()[2]
+	local id2 = r2.shared
+	ns.reports.list[id2] = nil
+	ns.CheckReports()
+	H.eq(r2.shared, id2, "same id")
+	H.ok(ns.reports:Get(id2), "held again")
 end)
