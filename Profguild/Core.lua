@@ -4,6 +4,7 @@
 local ADDON, ns = ...
 
 local Store, Sync, Scanner, Comm, Reagents, Catalog = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents, ns.Catalog
+local GuildPrices = ns.GuildPrices
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -255,6 +256,8 @@ end
 -- postponed by further changes: during a long sync the window keeps refreshing.
 local dataChangedPending = false
 function ns.OnDataChanged()
+	-- new reagents or recipes: the items whose prices are shared may have changed
+	if ns.Prices and ns.Prices.InvalidateInterest then ns.Prices.InvalidateInterest() end
 	if dataChangedPending then return end
 	dataChangedPending = true
 	C_Timer.After(0.5, function()
@@ -344,12 +347,36 @@ local catalogAdapter = {
 	onChanged = function() ns.OnDataChanged() end,
 }
 
--- Sends a hello and, when it went out, the recipe catalog digest after it.
--- Returns what Sync:Hello returned.
+local pricesAdapter = {
+	send = function(msg) Comm.Send(msg) end,
+	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
+	now = function() return GetTime() end,
+	clock = function() return GetServerTime() end,
+	after = function(delay, fn) C_Timer.After(delay, fn) end,
+	random = function() return math.random() end,
+	myGuid = function() return UnitGUID("player") end,
+	onChanged = function() ns.OnDataChanged() end,
+}
+
+-- Name of a guildmate for the window: roster name without the realm, then the sender name.
+function ns.MemberName(guid)
+	if guid == UnitGUID("player") then return UnitName("player") end
+	local entry = ns.store and ns.store:RosterEntry(guid)
+	local name = entry and entry.name or (ns.guildDB and ns.guildDB.names and ns.guildDB.names[guid])
+	if not name then
+		local rec = ns.store and ns.store:Get(guid)
+		name = rec and rec.n
+	end
+	return name and (name:gsub("%-.*$", "")) or "?"
+end
+
+-- Sends a hello and, when it went out, the digests of the recipe catalog and of the guild
+-- prices after it. Returns what Sync:Hello returned.
 function ns.Hello(force)
 	if not ns.sync then return false end
 	local sent = ns.sync:Hello(force)
 	if sent and ns.catalog then ns.catalog:Announce() end
+	if sent and ns.guildPrices then ns.guildPrices:Announce() end
 	return sent
 end
 
@@ -358,8 +385,10 @@ function ns.SetupGuild()
 	local key, guildName, realm = Scanner.GuildKey()
 	if key == ns.guildKey then return end
 	ns.guildKey, ns.guildName = key, guildName
+	-- the old guild's prices must not reach the new guild (its timers may still run)
+	if ns.guildPrices then ns.guildPrices:Stop() end
 	if not key then
-		ns.store, ns.sync, ns.guildDB = nil, nil, nil
+		ns.store, ns.sync, ns.guildDB, ns.guildPrices = nil, nil, nil, nil
 		ns.OnDataChanged()
 		return
 	end
@@ -378,6 +407,14 @@ function ns.SetupGuild()
 	ns.guildDB.names = ns.guildDB.names or {}
 	ns.store = Store.New(ns.guildDB)
 	ns.sync = Sync.New(adapter, ns.store, ns.version)
+	-- auction prices shared in this guild (GuildPrices.lua); old ones are dropped
+	ns.guildPrices = GuildPrices.New(pricesAdapter, ns.guildDB)
+	local dropped = ns.guildPrices:Prune()
+	if dropped > 0 then ns.Log("guild prices: %d older than 14 days dropped", dropped) end
+	if not ns.Prices.StartSharing() then
+		-- Auctionator may still be setting up its database
+		C_Timer.After(10, function() ns.Prices.StartSharing() end)
+	end
 	Scanner.RequestRoster()
 	ns.RefreshOwn()
 	local d = ns.Config.loginHelloDelay
@@ -578,7 +615,14 @@ function ns.Status()
 		local k = ns.catalog.stats
 		ns.Say("STATUS_CATALOG", recipes, profs, k.sentD, k.sentR, k.sentL, k.recvD, k.recvR, k.recvL)
 	end
-	ns.Say("STATUS_PRICES", ns.Prices and ns.Prices.Source() or ns.T("NO_PRICES"))
+	if ns.guildPrices then
+		local gp, s2 = ns.guildPrices, ns.guildPrices.stats
+		local newest = gp:Newest()
+		ns.Say("STATUS_GUILD_PRICES", gp:Count(), newest > 0 and ns.Prices.AgoText(newest) or "-",
+			s2.recorded, s2.sentU, s2.sentD, s2.sentR, s2.recvU, s2.recvD, s2.recvR)
+	end
+	local source = ns.Prices and ns.Prices.Source()
+	ns.Say("STATUS_PRICES", source == "Guild" and ns.T("PRICE_SOURCE_GUILD") or source or ns.T("NO_PRICES"))
 	if ns.sync.newerProtocolSeen then ns.Say("NEWER_VERSION") end
 	if ns.newerVersion then ns.Say("UPDATE_AVAILABLE", ns.newerVersion, tostring(ns.version)) end
 	if ns.lastError then ns.Print("Last error: %s", ns.lastError) end
@@ -985,6 +1029,11 @@ function events.PLAYER_LOGIN()
 	C_Timer.NewTicker(ns.Config.rosterInterval, function()
 		if IsInGuild() then Scanner.RequestRoster() end
 	end)
+end
+
+-- Auctionator may have made a new database (a reset): follow its readings again.
+function events.AUCTION_HOUSE_SHOW()
+	if ns.guildPrices then ns.Prices.StartSharing() end
 end
 
 function events.PLAYER_GUILD_UPDATE(unit)

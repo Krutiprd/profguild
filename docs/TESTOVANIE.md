@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.2.2.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.3.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -58,7 +58,21 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 | Reštart hry | Dáta ostanú (`/pg status` ukazuje rovnaký počet postáv) |
 | Zahoď profesiu (na testovacej postave) | Do ~2 minút zmizne u ostatných |
 
-## 4. Hlásenie chyby
+## 4. Zdieľanie cien (0.3.0)
+
+Treba 2 hráčov s Profguildom 0.3.0, aspoň jeden s Auctionatorom.
+
+| Krok | Očakávaný výsledok |
+| --- | --- |
+| Hráč A otvorí aukciu, v detaile receptu dá AKTUALIZOVAŤ CENY | Do pár sekúnd má hráč B pri tom recepte nové ceny; v detaile „(… ks, od A, pred 1 min)“, pri surovine v tooltipe „Cena od guildy: od A, …“ |
+| A spraví plný sken (Auctionator → Full Scan) a zatvorí aukciu | B dostane ceny surovín a výrobkov, ktoré A videl v ten deň |
+| Hráč C sa prihlási neskôr | Do minúty po prihlásení má rovnaké ceny ako A (cez digest a žiadosť) |
+| B má starší sken z rána, A aktualizuje cenu | B ukazuje cenu od A, nie svoju rannú |
+| A sa odhlási a prihlási | Po prihlásení nič neodošle (staré ceny z Auctionatora sa len zapíšu) |
+| `/pg status` u oboch | Riadok „Ceny od guildy: N, najnovšia pred …“, odoslané a prijaté U/D/R |
+| Hráč bez Auctionatora | Vidí ceny od guildy, zisk aj cenu craftu |
+
+## 5. Hlásenie chyby
 
 Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
 
@@ -72,7 +86,7 @@ Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
 
 `/pg bug list` vypíše posledné hlásenia, `/pg bug clear confirm` ich zmaže aj so zapamätanými chybami.
 
-## 5. Čo poslať späť
+## 6. Čo poslať späť
 
 - Výstup `/pg debug` a `/pg status` od každého testera.
 - Každú Lua chybu (screenshot alebo text z BugSack); Profguild si ich pamätá aj sám (`errors`).

@@ -26,16 +26,16 @@ local function call(fn, ...)
 	if ok and type(a) == "number" and a > 0 then return a end
 end
 
--- Name of the price source, or nil when none is installed.
+-- Name of the price source, or nil when there is none. Without Auctionator or TSM the prices
+-- shared by guildmates are a source too.
 function Prices.Source()
 	if auctionator() then return "Auctionator" end
 	if tsm() then return "TSM" end
+	if ns.guildPrices and ns.guildPrices:Count() > 0 then return "Guild" end
 end
 
--- Price of one item in copper and where it comes from ("ah" or "vendor"), or nil.
--- For an auction price, the third value is its age in days when Auctionator knows it.
-function Prices.Get(itemID)
-	if type(itemID) ~= "number" then return nil end
+-- Price from the addons of this client: Auctionator (auction, then vendor), then TSM.
+local function localPrice(itemID)
 	local api = auctionator()
 	if api then
 		local price = call(api.GetAuctionPriceByItemID, Prices.CALLER, itemID)
@@ -55,6 +55,52 @@ function Prices.Get(itemID)
 	return nil
 end
 
+local function serverTime()
+	local ok, t = pcall(GetServerTime)
+	return ok and type(t) == "number" and t or 0
+end
+
+-- When this client's own auction price of an item was read, as server time. Auctionator keeps
+-- only the day (its scan days start at local midnight, Constants.SCAN_DAY_0), so it is the
+-- start of the newest day it has; without that, a whole day before its age.
+local function localTime(itemID, age)
+	local adb = Auctionator and Auctionator.Database and Auctionator.Database.db
+	local e = type(adb) == "table" and adb[tostring(itemID)]
+	local day0 = Auctionator and Auctionator.Constants and Auctionator.Constants.SCAN_DAY_0
+	if type(e) == "table" and type(e.h) == "table" and type(day0) == "number" then
+		local last
+		for day in pairs(e.h) do
+			local d = tonumber(day)
+			if d and (not last or d > last) then last = d end
+		end
+		if last then return day0 + last * 86400 end
+	end
+	return serverTime() - ((age or 0) + 1) * 86400
+end
+
+-- The guild's price of an item when it is newer than this client's own auction price. Our own
+-- reading in the guild table (w = us) is the price Auctionator holds now: never replaced by it.
+local function guildNewer(itemID, kind, age)
+	local e = ns.guildPrices and ns.guildPrices:Get(itemID)
+	if not e then return nil end
+	if kind ~= "ah" then return e end
+	if e.w == (UnitGUID and UnitGUID("player")) then return nil end
+	if e.t > localTime(itemID, age) then return e end
+end
+
+-- Price of one item in copper and where it comes from ("ah" or "vendor"), or nil.
+-- For an auction price, the third value is its age in days when it is known. A fourth value
+-- is the guild price entry { p, n, t, w } when a guildmate's newer price was taken.
+function Prices.Get(itemID)
+	if type(itemID) ~= "number" then return nil end
+	local price, kind, age = localPrice(itemID)
+	local e = guildNewer(itemID, kind, age)
+	if e then
+		return e.p, "ah", math.max(0, math.floor((serverTime() - e.t) / 86400)), e
+	end
+	return price, kind, age
+end
+
 -- The auction house keeps this share of every sale (5 % on Classic).
 Prices.AH_CUT = 0.05
 
@@ -69,8 +115,8 @@ end
 -- for it ("vendor", the sell price from the game). Not Auctionator's vendor price: that is what
 -- a merchant asks, not what one pays.
 function Prices.SaleValue(itemID)
-	local price, kind, age = Prices.Get(itemID)
-	if price and kind ~= "vendor" then return price, kind, age end
+	local price, kind, age, e = Prices.Get(itemID)
+	if price and kind ~= "vendor" then return price, kind, age, e end
 	-- Auctionator knew only a merchant price: TSM may still have an auction value
 	local t = tsm()
 	if t and type(itemID) == "number" then
@@ -120,7 +166,7 @@ end
 
 -- How many of an item were on the market: Auctionator keeps the highest quantity it saw on each
 -- day of a scan or search. Returns that count for the latest day it has, or nil.
-function Prices.Available(itemID)
+local function localAvailable(itemID)
 	local adb = Auctionator and Auctionator.Database and Auctionator.Database.db
 	local e = type(adb) == "table" and itemID and adb[tostring(itemID)]
 	if type(e) ~= "table" or type(e.a) ~= "table" then return nil end
@@ -130,6 +176,132 @@ function Prices.Available(itemID)
 		if d and type(n) == "number" and (not lastDay or d > lastDay) then lastDay, count = d, n end
 	end
 	return count
+end
+
+-- How many were on the market, from the guild when its price is the one shown.
+function Prices.Available(itemID)
+	local _, _, _, e = Prices.Get(itemID)
+	if e then return e.n > 0 and e.n or nil end
+	return localAvailable(itemID)
+end
+
+-- "from Ana, 2 h ago" for a guildmate's price entry.
+function Prices.FromText(e)
+	if type(e) ~= "table" then return nil end
+	local name = ns.MemberName and ns.MemberName(e.w) or "?"
+	return ns.T("PRICE_FROM", name, Prices.AgoText(e.t))
+end
+
+-- "2 h ago" for a server time.
+function Prices.AgoText(t)
+	local secs = math.max(0, serverTime() - t)
+	if secs < 3600 then return ns.T("AGO_MIN", math.max(1, math.floor(secs / 60))) end
+	if secs < 86400 then return ns.T("AGO_HOURS", math.floor(secs / 3600)) end
+	return ns.T("DAYS_AGO", math.floor(secs / 86400))
+end
+
+---------------------------------------------------------------------------
+-- Sharing with the guild (GuildPrices.lua)
+---------------------------------------------------------------------------
+
+-- Items Profguild needs prices of: reagents, crafted items and recipe items. Kept until the
+-- data changes (ns.OnDataChanged) or INTEREST_TTL seconds pass, since every price asks it.
+Prices.INTEREST_TTL = 30
+local interest, interestAt, interestRevision = nil, nil, nil
+function Prices.InvalidateInterest()
+	interest = nil
+end
+
+function Prices.InterestItems()
+	local revision = ns.catalog and ns.catalog.revision
+	if interest and interestRevision == revision and GetTime() - interestAt < Prices.INTEREST_TTL then
+		return interest
+	end
+	local items = {}
+	local function add(id) if type(id) == "number" and id > 0 then items[id] = true end end
+	for _, reagents in pairs(ns.db and ns.db.reagents or {}) do
+		if type(reagents) == "table" then for itemID in pairs(reagents) do add(itemID) end end
+	end
+	if ns.catalog then
+		for _, list in pairs(ns.catalog:All()) do
+			for _, itemID in pairs(list) do add(itemID) end
+		end
+	end
+	for _, itemID in pairs(ns.db and ns.db.recipeItems or {}) do add(itemID) end
+	for _, e in pairs(ns.RecipeData or {}) do
+		if type(e) == "table" then add(e[1]) end
+	end
+	interest, interestAt, interestRevision = items, GetTime(), revision
+	return items
+end
+
+function Prices.IsInteresting(itemID)
+	return Prices.InterestItems()[itemID] == true
+end
+
+-- What one reading of Auctionator holds: { [dbKey] = { { price, available }, ... } }, the table
+-- its Database:ProcessScan gets from a search or a full scan. Auctionator takes the lowest price
+-- and the sum of the pieces (Database/Mixin.lua); the same is taken here, for plain item keys of
+-- items Profguild needs. Returns { [itemID] = { p, n } }.
+function Prices.ReadingOf(itemIndexes)
+	local reads = {}
+	if type(itemIndexes) ~= "table" then return reads end
+	local wanted = Prices.InterestItems()
+	for key, list in pairs(itemIndexes) do
+		local itemID = type(key) == "string" and key:find("^%d+$") and tonumber(key)
+		if itemID and wanted[itemID] and type(list) == "table" and list[1] then
+			local minPrice, pieces = nil, 0
+			for _, info in ipairs(list) do
+				if type(info) == "table" and type(info.price) == "number" then
+					if not minPrice or info.price < minPrice then minPrice = info.price end
+					if type(info.available) == "number" then pieces = pieces + info.available end
+				end
+			end
+			if minPrice then reads[itemID] = { p = math.floor(minPrice), n = pieces } end
+		end
+	end
+	return reads
+end
+
+Prices.READ_DELAY = 0.5 -- readings of searches right after each other go out together
+local pendingReads, readTimer = {}, false
+
+-- Takes one reading of Auctionator for the guild.
+function Prices.OnReading(itemIndexes)
+	if not ns.guildPrices then return end
+	for itemID, v in pairs(Prices.ReadingOf(itemIndexes)) do pendingReads[itemID] = v end
+	if readTimer or not next(pendingReads) then return end
+	readTimer = true
+	C_Timer.After(Prices.READ_DELAY, function()
+		readTimer = false
+		local reads = pendingReads
+		pendingReads = {}
+		if ns.guildPrices then ns.guildPrices:Record(reads) end
+	end)
+end
+
+-- Follows every reading of Auctionator (searches and full scans go through ProcessScan). The
+-- hook only looks at the table it is given; Auctionator's own work is never touched.
+local hookedDB = nil
+function Prices.StartSharing()
+	local db = Auctionator and Auctionator.Database
+	if type(db) ~= "table" or type(db.ProcessScan) ~= "function" then return false end
+	if hookedDB == db then return true end
+	hookedDB = db
+	local function after(_, itemIndexes)
+		local ok, err = pcall(Prices.OnReading, itemIndexes)
+		if not ok and ns.Log then ns.Log("ERROR price reading: %s", tostring(err)) end
+	end
+	if type(hooksecurefunc) == "function" and not Prices.TEST_NO_HOOK then
+		hooksecurefunc(db, "ProcessScan", after)
+	else
+		local original = db.ProcessScan
+		db.ProcessScan = function(self, itemIndexes, ...)
+			after(self, itemIndexes)
+			return original(self, itemIndexes, ...)
+		end
+	end
+	return true
 end
 
 Prices.REFRESH_LISTEN = 60 -- seconds the window follows Auctionator after a refresh

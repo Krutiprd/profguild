@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0 – 2026-11-20
+
+- Guild price sharing: auction prices go to the whole guild, the newer price of an item always
+  wins. Only the items Profguild needs are shared (reagents, crafted items, recipe items), and
+  nothing is written into Auctionator; prices are kept per guild (`guilds[...].prices`).
+- Every reading of the auction house by Auctionator (a search, the refresh button, a full scan)
+  is shared as it happens: Profguild follows Auctionator's `Database:ProcessScan` and takes the
+  same lowest price and pieces of each item read, stamped with the time of the reading. An item
+  with no auctions now and what Auctionator holds from earlier sessions are never sent as new,
+  so this morning's scan cannot overwrite a guildmate's newer price.
+- Messages: `PU` (up to 100 prices: item, copper, pieces, time, who read it), `PD` (per day of
+  the last 14 days: how many prices and a checksum; after every hello, and as an answer to a
+  digest that lacks something) and `PR` (a request for the days that differ; one answer serves
+  the whole guild). Whatever a client missed (offline, a lost part, a blocked send) shows up as a
+  differing day in the next digest and is fetched then, in both directions, so the guild's price
+  tables become equal. Values are checked (1c to 999 999g, up to 100 000 pieces, at most 14 days
+  old and 2 minutes ahead), 5 000 prices at most and 3 000 read by one guildmate (full tables
+  keep the same prices everywhere: newest first), prices older than 14 days are dropped at
+  login. A holder sends one answer at a time, a minute apart, and does not resend a day that did
+  not change; the same prices of a day are asked for once per 5 minutes in the whole guild.
+- `Prices.Get` takes the newer of Auctionator's price (the start of its day, or our own reading)
+  and the guild's. The details say whose a guild price is and how old ("from Ana, 2 h ago"), also in the
+  reagent tooltip and the recipe item line; the pieces on the market come with it. Without
+  Auctionator or TSM the guild's prices are the price source.
+- `/pg status` shows the guild prices and their messages.
+
 ## 0.2.2 – 2026-11-20
 
 - Bug reports: "Report a bug" in the footer (or `/pg bug`) opens a box for the player's text.

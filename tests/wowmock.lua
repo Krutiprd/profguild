@@ -65,6 +65,8 @@ function Widget:AddLine(text) table.insert(M.tooltipLines, text) end
 M.tooltipLines = {}
 
 function M.install()
+	-- a fresh game: timers and event frames of an addon loaded by an earlier test are gone
+	M.timers, M.events = {}, {}
 	-- WoW's Lua passes extra arguments through xpcall; stock Lua 5.1 does not.
 	local rawXpcall = M.rawXpcall or xpcall
 	M.rawXpcall = rawXpcall

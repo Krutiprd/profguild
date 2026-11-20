@@ -306,9 +306,10 @@ local function recipeItemText(recipeID, ask)
 		if SOURCE_KEYS[letter] then parts[#parts + 1] = ns.T(SOURCE_KEYS[letter]) end
 	end
 	local text = gameText or ns.T("RECIPE_FROM", #parts > 0 and table.concat(parts, ", ") or "?")
-	local price, kind, age = ns.Prices.Get(itemID)
+	local price, kind, age, guild = ns.Prices.Get(itemID)
 	if price and kind == "ah" then
-		local onAH = age and ns.T("RECIPE_AH", ns.Prices.Format(price), age <= 0 and ns.T("TODAY") or ns.T("DAYS_AGO", age))
+		local onAH = guild and ns.T("RECIPE_AH", ns.Prices.Format(price), ns.Prices.FromText(guild))
+			or age and ns.T("RECIPE_AH", ns.Prices.Format(price), age <= 0 and ns.T("TODAY") or ns.T("DAYS_AGO", age))
 			or ns.T("RECIPE_AH_PRICE", ns.Prices.Format(price))
 		local onMarket = ns.Prices.Available(itemID)
 		if onMarket then onAH = onAH .. ", " .. ns.T("PCS", onMarket) end
@@ -775,6 +776,9 @@ local function createReagentRow(parent, index)
 		showTooltip(self, function()
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			pcall(GameTooltip.SetItemByID, GameTooltip, d.itemID)
+			-- a price shared by a guildmate says whose and how old it is
+			local _, _, _, guild = ns.Prices.Get(d.itemID)
+			if guild then GameTooltip:AddLine(ns.T("PRICE_GUILD_LINE", ns.Prices.FromText(guild)), 0.6, 0.62, 0.64) end
 			GameTooltip:Show()
 		end, { [d.itemID] = true })
 	end)
@@ -1685,16 +1689,26 @@ function UI:DrawReagents(s)
 	-- cost of one craft and what the item sells for
 	local source = ns.Prices.Source()
 	local bop = ns.Scanner.ItemBoP(s.itemID)
-	local value, valueSource
+	local value, valueSource, guildValue
 	if s.itemID and s.itemID > 0 then
-		if bop then value = 0 else value, valueSource = ns.Prices.SaleValue(s.itemID) end
+		if bop then value = 0 else value, valueSource, _, guildValue = ns.Prices.SaleValue(s.itemID) end
 	end
 	local skill = recipeSkillText(s.recipeID)
 	local valueText = bop and (HEX_LOSS .. ns.T("ITEM_BOP") .. "|r")
 		or (value and ns.T(valueSource == "vendor" and "ITEM_VALUE_VENDOR" or "ITEM_VALUE", ns.Prices.Format(value))) or ""
 	local onMarket = value and not bop and valueSource ~= "vendor" and ns.Prices.Available(s.itemID)
-	if onMarket then valueText = valueText .. " " .. HEX_MUTED .. "(" .. ns.T("PCS", onMarket) .. ")|r" end
-	if skill then valueText = valueText ~= "" and (valueText .. "  ·  " .. skill) or skill end
+	local extra = {}
+	if onMarket then extra[#extra + 1] = ns.T("PCS", onMarket) end
+	-- a guildmate's price: whose and how old; the skill moves to the line above to make room
+	if guildValue and not bop then extra[#extra + 1] = ns.Prices.FromText(guildValue) end
+	if #extra > 0 then valueText = valueText .. " " .. HEX_MUTED .. "(" .. table.concat(extra, ", ") .. ")|r" end
+	-- d.subBase: the line as DrawDetail wrote it (this runs again on every price refresh)
+	if skill and guildValue and not bop then
+		d.sub:SetText((d.subBase or "") .. "  " .. HEX_MUTED .. skill .. "|r")
+	else
+		if d.subBase then d.sub:SetText(d.subBase) end
+		if skill then valueText = valueText ~= "" and (valueText .. "  ·  " .. skill) or skill end
+	end
 	d.value:SetText(valueText)
 	d.costLabel:SetText(ns.T("COST_LABEL"))
 	d.profitLabel:SetText(ns.T("PROFIT_LABEL"))
@@ -1772,7 +1786,8 @@ function UI:DrawDetail()
 		setIcon(d.icon, recipeIcon(s))
 		d.name:SetText(qualityName(s))
 		local _, req = ns.Scanner.ItemLevel(s.itemID)
-		d.sub:SetText(s.prof .. ((req and req > 1) and ("  " .. HEX_MUTED .. ns.T("REQ_LEVEL", req) .. "|r") or ""))
+		d.subBase = s.prof .. ((req and req > 1) and ("  " .. HEX_MUTED .. ns.T("REQ_LEVEL", req) .. "|r") or "")
+		d.sub:SetText(d.subBase)
 		d.recipeInfo:SetText((recipeItemText(s.recipeID, true)) or "")
 		self:DrawReagents(s)
 		d.crafterTitle:SetText(ns.T("HEAD_CRAFTERS"))

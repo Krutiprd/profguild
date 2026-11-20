@@ -63,6 +63,8 @@ function Comm.Send(msg)
 			failed = true
 			if msg.t == "KD" or msg.t == "KR" or msg.t == "KL" then
 				if ns.catalog then ns.catalog:OnSendFailed(msg) end
+			elseif msg.t == "PU" or msg.t == "PD" or msg.t == "PR" then
+				if ns.guildPrices then ns.guildPrices:OnSendFailed(msg) end
 			elseif ns.sync then
 				ns.sync:OnSendFailed(msg)
 			end
@@ -94,6 +96,8 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 		if ns.reagents then ns.reagents:OnMessage(msg) end
 	elseif msg.t == "KD" or msg.t == "KR" or msg.t == "KL" then
 		if ns.catalog then ns.catalog:OnMessage(msg) end
+	elseif msg.t == "PU" or msg.t == "PD" or msg.t == "PR" then
+		if ns.guildPrices then ns.guildPrices:OnMessage(msg) end
 	elseif ns.sync then
 		ns.sync:OnMessage(msg, sender)
 	end
