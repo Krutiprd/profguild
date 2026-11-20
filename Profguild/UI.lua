@@ -352,8 +352,16 @@ local function recipeSkill(recipeID, ask)
 			if itemID then info.m = ns.Scanner.RecipeItemSkill(itemID) end
 		end
 		if next(info) then all[recipeID] = info end
-		-- a new number changes the order of the Leveling list (rebuilt on the next refresh)
-		if info.g ~= g or info.m ~= m then ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1 end
+		-- a new number changes the order of the Leveling list: rebuilt once, a moment later,
+		-- not on every scroll step that shows new rows
+		if (info.g ~= g or info.m ~= m) and not UI.skillResort then
+			UI.skillResort = true
+			C_Timer.After(UI.ITEM_REBUILD, function()
+				UI.skillResort = false
+				ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+				ns.OnDataChanged()
+			end)
+		end
 	end
 	return info
 end
@@ -1192,7 +1200,8 @@ function UI:Create()
 			return
 		end
 		UI:OnItemInfo(itemID)
-		if rebuildPending then return end
+		-- items loaded for other reasons (bags, chat, Auctionator) change nothing in the list
+		if rebuildPending or not ns.Scanner.WasAsked(itemID) then return end
 		rebuildPending = true
 		C_Timer.After(UI.ITEM_REBUILD, function()
 			rebuildPending = false

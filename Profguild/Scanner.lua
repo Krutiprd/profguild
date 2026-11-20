@@ -98,6 +98,11 @@ local function pumpItems()
 	end
 end
 
+-- True when the addon asked the server for this item (queued or requested).
+function Scanner.WasAsked(itemID)
+	return itemID ~= nil and (itemAsked[itemID] ~= nil or itemQueued[itemID] ~= nil)
+end
+
 function Scanner.WantItem(itemID, urgent)
 	if not itemID or itemID == 0 or not (C_Item and C_Item.RequestLoadItemDataByID) then return end
 	local asked = itemAsked[itemID]
@@ -341,18 +346,18 @@ end
 local outputCount = {}
 function Scanner.RecipeOutputCount(recipeID)
 	if outputCount[recipeID] then return outputCount[recipeID] end
-	local n = 1
 	if C_TradeSkillUI then
 		local ok, schematic = call(C_TradeSkillUI.GetRecipeSchematic, recipeID, false)
 		if ok and type(schematic) == "table" then
 			local lo, hi = schematic.quantityMin, schematic.quantityMax
 			if type(lo) == "number" and lo > 0 then
-				n = (type(hi) == "number" and hi >= lo) and (lo + hi) / 2 or lo
+				-- only an answer of the game is kept; without one, 1 now and asked again later
+				outputCount[recipeID] = (type(hi) == "number" and hi >= lo) and (lo + hi) / 2 or lo
+				return outputCount[recipeID]
 			end
 		end
 	end
-	outputCount[recipeID] = n
-	return n
+	return 1
 end
 
 -- Whether the game knows a recipe (any recipe, learned or not), and the item it makes (0 when

@@ -28,7 +28,7 @@ ns = ns or {}
 local Catalog = {}
 ns.Catalog = Catalog
 
-Catalog.PROTOCOL = 1
+Catalog.PROTOCOL = 2            -- 2: KR carries the asker's counts (0.2.0 sent none)
 Catalog.MAX_PROFESSIONS = 16
 Catalog.MAX_PER_PROFESSION = 2500
 Catalog.MAX_PER_MESSAGE = 200
@@ -41,7 +41,7 @@ Catalog.ANSWER_WINDOW = 120     -- parts of a list are accepted this long after 
 Catalog.REQUEST_DELAY = { 0.5, 2.0 }
 Catalog.REPLY_DELAY = { 1.0, 4.0 }
 Catalog.DIGEST_DELAY = { 2.0, 6.0 }
-Catalog.DIGEST_GAP = 120        -- an answering digest at most this often
+Catalog.DIGEST_GAP = 600        -- an answering digest at most this often
 
 local function validID(v, max)
 	return type(v) == "number" and v >= 1 and v <= (max or Catalog.MAX_ID) and v == math.floor(v)
@@ -66,6 +66,7 @@ function Catalog.New(adapter, saved)
 		lastSent = {},         -- skillLine -> time the guild last got a list of it
 		sendQueue = {},        -- lists being sent: { skillLine, ids, next }
 		pumping = false,
+		deferred = {},         -- skillLine -> true: answer when the cooldown ends
 		digestTimer = false,
 		lastDigest = -1e9,
 		stats = { sentD = 0, sentR = 0, sentL = 0, recvD = 0, recvR = 0, recvL = 0, added = 0 },
@@ -199,7 +200,18 @@ function CatalogMT:Want(skillLine, theirCount)
 	if not self.a.canSend() then return false end
 	self.asked[skillLine] = now
 	self.mine[skillLine] = now
-	if theirCount then self.tried[skillLine] = theirCount end
+	local before = self:Count(skillLine)
+	-- after the answer window: some parts came but the count stayed below the announced one
+	-- (the game refused IDs, the sets differ): do not ask again at that count. Nothing came:
+	-- forget the request, the next digest asks again.
+	self.a.after(Catalog.ANSWER_WINDOW + 1, function()
+		if self.mine[skillLine] ~= now then return end
+		if self:Count(skillLine) > before then
+			if theirCount and self:Count(skillLine) < theirCount then self.tried[skillLine] = theirCount end
+		else
+			self.mine[skillLine], self.asked[skillLine] = nil, nil
+		end
+	end)
 	self.askList[#self.askList + 1] = skillLine
 	if not self.askTimer then
 		self.askTimer = true
@@ -278,10 +290,14 @@ function CatalogMT:_ScheduleReplies()
 end
 
 -- Stops our own list of a profession that has not started: somebody else sends at least as many.
-local function cancelReply(self, skillLine)
+-- started: also a list already being sent (two holders started at once: the one with the higher
+-- GUID stops, so exactly one of them finishes)
+local function cancelReply(self, skillLine, started)
 	self.replies[skillLine] = nil
+	self.deferred[skillLine] = nil
 	for i = #self.sendQueue, 1, -1 do
-		if self.sendQueue[i].skillLine == skillLine and self.sendQueue[i].next == 1 then table.remove(self.sendQueue, i) end
+		local job = self.sendQueue[i]
+		if job.skillLine == skillLine and (job.next == 1 or started) then table.remove(self.sendQueue, i) end
 	end
 end
 
@@ -303,9 +319,9 @@ function CatalogMT:OnMessage(msg)
 				end
 			end
 		end
-		-- we hold a profession the sender lacks, or more of it: tell the guild what we have
+		-- the sender lacks a whole profession we hold (a newcomer): tell the guild what we have
 		for skillLine in pairs(self.saved) do
-			if self:Count(skillLine) > (theirs[skillLine] or 0) then
+			if not theirs[skillLine] then
 				scheduleDigest(self)
 				break
 			end
@@ -326,11 +342,22 @@ function CatalogMT:OnMessage(msg)
 					if self.askList[i] == skillLine then table.remove(self.askList, i) end
 				end
 				local theirs = type(counts[skillLine]) == "number" and counts[skillLine] or 0
-				local recent = self.lastSent[skillLine] and now - self.lastSent[skillLine] < Catalog.REPLY_COOLDOWN
-				-- only a holder with more than the asker answers, and not over and over
-				if self:Count(skillLine) > theirs and not recent then
-					self.replies[skillLine] = true
-					any = true
+				local wait = self.lastSent[skillLine] and Catalog.REPLY_COOLDOWN - (now - self.lastSent[skillLine]) or 0
+				-- only a holder with more than the asker answers; within the cooldown it answers
+				-- when the cooldown ends (unless somebody else sends the list first)
+				if self:Count(skillLine) > theirs then
+					if wait <= 0 then
+						self.replies[skillLine] = true
+						any = true
+					elseif not self.deferred[skillLine] then
+						self.deferred[skillLine] = true
+						self.a.after(wait, function()
+							if not self.deferred[skillLine] then return end
+							self.deferred[skillLine] = nil
+							self.replies[skillLine] = true
+							self:_ScheduleReplies()
+						end)
+					end
 				end
 			end
 		end
@@ -341,7 +368,7 @@ function CatalogMT:OnMessage(msg)
 		self.stats.recvL = self.stats.recvL + 1
 		-- somebody answers with at least what we have: our own answer adds nothing
 		if validID(msg.c, Catalog.MAX_PER_PROFESSION) and msg.c >= self:Count(skillLine) then
-			cancelReply(self, skillLine)
+			cancelReply(self, skillLine, type(msg.s) == "string" and msg.s < tostring(self.a.myGuid()))
 			self.lastSent[skillLine] = now -- the guild just got this list
 		end
 		local askedAt = self.mine[skillLine]

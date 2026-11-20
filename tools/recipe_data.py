@@ -23,6 +23,7 @@ PREFIX = r'^(Recipe|Formula|Pattern|Plans|Schematic|Manual|Design|Technique)\s*:
 
 cache = json.load(open(CACHE, encoding='utf-8')) if os.path.exists(CACHE) else {}
 RECHECK = False
+RECHECK_IDS = set()
 
 
 class Blocked(Exception):
@@ -109,6 +110,8 @@ def lookup(recipe_id):
     if not name:
         return None
     url = 'https://www.wowhead.com/forever/search/suggestions-template?q=' + urllib.parse.quote(name)
+    if RECHECK and recipe_id in RECHECK_IDS:
+        cache.pop(url, None)  # --recheck: ask the search again, not the cached answer
     answer = get(url)
     if 'results' not in answer:
         cache.pop(url, None)  # no usable answer: not kept, looked up again next time
@@ -157,7 +160,8 @@ def main(paths):
     # keep their value until a lookup gives a real answer
     todo = sorted(i for i in ids if i not in data)
     if RECHECK:
-        todo += sorted(r for r, v in data.items() if v is False)
+        RECHECK_IDS.update(r for r, v in data.items() if v is False)
+        todo += sorted(RECHECK_IDS)
     print('recipes %d, already in Data.lua %d, to look up %d' % (len(ids), len(ids) - len(todo), len(todo)))
     for n, rid in enumerate(todo, 1):
         try:

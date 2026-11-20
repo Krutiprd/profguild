@@ -1025,12 +1025,19 @@ local function readTrainer()
 	if n == 0 or not ns.catalog then return end
 	if trainerRevision ~= ns.catalog.revision then
 		trainerRevision, trainerNames = ns.catalog.revision, {}
+		local missing = false
 		for _, list in pairs(ns.catalog:All()) do
 			for recipeID in pairs(list) do
 				local name = Scanner.RecipeName(recipeID)
-				if name then trainerNames[name] = trainerNames[name] or {}; table.insert(trainerNames[name], recipeID) end
+				if name then
+					trainerNames[name] = trainerNames[name] or {}
+					table.insert(trainerNames[name], recipeID)
+				else
+					missing = true
+				end
 			end
 		end
+		if missing then trainerRevision = nil end -- some names were not known yet: build it again
 	end
 	local byName = trainerNames
 	local found = 0

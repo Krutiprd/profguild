@@ -126,23 +126,23 @@ H.test("catalog: only answers to an own question are stored, and only recipes th
 	local victim = g.add("V")
 	g.add("X") -- a silent guildmate
 	-- an unrequested list is ignored
-	victim.k:OnMessage({ t = "KL", pv = 1, s = "X", l = 197, c = 2, r = { 1001, 1002 } })
+	victim.k:OnMessage({ t = "KL", pv = 2, s = "X", l = 197, c = 2, r = { 1001, 1002 } })
 	H.eq(victim.k:Count(197), 0, "unrequested list ignored")
 	-- asked for: made-up IDs and recipes of another profession are dropped
 	H.ok(victim.k:Want(197))
 	g.run(5)
-	victim.k:OnMessage({ t = "KL", pv = 1, s = "X", l = 197, c = 4, r = { 1001, 999999, 3001, "x" } })
+	victim.k:OnMessage({ t = "KL", pv = 2, s = "X", l = 197, c = 4, r = { 1001, 999999, 3001, "x" } })
 	H.eq(victim.k:Count(197), 1, "only the real Tailoring recipe")
 	H.eq(victim.k:Get(197)[1001], 5001)
 	-- too late: the answer window has closed
 	g.run(Catalog.ANSWER_WINDOW + 1)
-	victim.k:OnMessage({ t = "KL", pv = 1, s = "X", l = 197, c = 1, r = { 1002 } })
+	victim.k:OnMessage({ t = "KL", pv = 2, s = "X", l = 197, c = 1, r = { 1002 } })
 	H.eq(victim.k:Count(197), 1, "late list ignored")
 	-- wrong protocol, own echo and junk do not break anything
-	victim.k:OnMessage({ t = "KD", pv = 2, s = "X", d = { [197] = 5 } })
-	victim.k:OnMessage({ t = "KD", pv = 1, s = "V", d = { [197] = 5 } })
-	victim.k:OnMessage({ t = "KD", pv = 1, s = "X", d = "junk" })
-	victim.k:OnMessage({ t = "KR", pv = 1, s = "X", l = { "a", 197 } })
+	victim.k:OnMessage({ t = "KD", pv = 3, s = "X", d = { [197] = 5 } })
+	victim.k:OnMessage({ t = "KD", pv = 2, s = "V", d = { [197] = 5 } })
+	victim.k:OnMessage({ t = "KD", pv = 2, s = "X", d = "junk" })
+	victim.k:OnMessage({ t = "KR", pv = 2, s = "X", l = { "a", 197 } })
 	victim.k:OnMessage("junk")
 	g.run(10)
 end)
@@ -189,6 +189,8 @@ H.test("catalog: only a holder with more answers, not twice in a row, and a refu
 	g.run(10)
 	H.eq(big.k.stats.sentL, 3, "not again within the cooldown")
 	H.ok(small.k:Count(197) < 450)
+	g.run(Catalog.REPLY_COOLDOWN + 10)
+	H.eq(small.k:Count(197), 450, "answered when the cooldown ended")
 
 	-- the game refuses some IDs: the digest count is never reached, and the same count is not
 	-- asked for again on every digest
@@ -204,6 +206,14 @@ H.test("catalog: only a holder with more answers, not twice in a row, and a refu
 	holder.k:Announce()
 	g2.run(30)
 	H.eq(g2.sent.KR, requests, "not asked again at the same count")
+	-- a request nobody answers is forgotten after the answer window: the next digest asks again
+	local g3 = newGuild()
+	local lonely = g3.add("L")
+	g3.add("Q") -- holds nothing, never answers
+	lonely.k:OnMessage({ t = "KD", pv = 2, s = "Z", d = { [197] = 450 } })
+	g3.run(Catalog.ANSWER_WINDOW + 5)
+	H.eq(lonely.k.tried[197], nil, "no answer: not marked")
+	H.ok(lonely.k:Want(197, 450), "asks again")
 	-- a failed request may be asked again at once
 	picky.k:OnSendFailed({ t = "KR", l = { 197 } })
 	H.eq(picky.k.tried[197], nil)

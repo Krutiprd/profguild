@@ -558,10 +558,10 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	-- profession (the fake game puts every recipe into Cooking)
 	H.ok(ns.catalog:Want(185), "asked for Cooking")
 	H.ok(ns.catalog:Want(333), "asked for Enchanting")
-	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "KL", pv = 1, s = "Player-1-00000002", l = 185, c = 1,
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "KL", pv = 2, s = "Player-1-00000002", l = 185, c = 1,
 		r = { 7828 } }), "GUILD", "Ana Brightwood")
 	H.eq(ProfguildDB.catalog[185][7828], 14342, "Cooking recipe taken, item from the game")
-	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "KL", pv = 1, s = "Player-1-00000002", l = 333, c = 1,
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "KL", pv = 2, s = "Player-1-00000002", l = 333, c = 1,
 		r = { 7829 } }), "GUILD", "Ana Brightwood")
 	H.eq(ProfguildDB.catalog[333], nil, "a recipe of another profession is dropped")
 	-- the digest goes out after a hello

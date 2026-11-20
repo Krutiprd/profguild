@@ -241,30 +241,57 @@ end
 
 -- Walks the auction database in steps when the catalog changed, the last walk is older than
 -- REINDEX seconds, or force (the auction house just closed: a scan may have added items).
+local indexAgain = false
 function Prices.StartRecipeIndex(force)
 	local adb = auctionDB()
-	if not adb or indexing then return false end
+	if not adb then return false end
+	if indexing then
+		-- the auction house closed during a walk: walk again when this one ends
+		if force then indexAgain = true end
+		return false
+	end
 	local now = GetTime()
 	if not force and indexedRevision == ns.catalog.revision and indexedAt and now - indexedAt < Prices.REINDEX then
 		return false
 	end
+	local ok, keys = pcall(function()
+		buildNames()
+		local list = {}
+		for key in pairs(adb) do list[#list + 1] = key end
+		return list
+	end)
+	if not ok then
+		if ns.Log then ns.Log("ERROR recipe index: %s", tostring(keys)) end
+		return false
+	end
 	indexing = true
 	indexedRevision, indexedAt = ns.catalog.revision, now
-	buildNames()
-	local keys = {}
-	for key in pairs(adb) do keys[#keys + 1] = key end
 	local known, newPending, i = knownItems(), {}, 1
+	local function finish()
+		indexing = false
+		if indexAgain then
+			indexAgain = false
+			Prices.StartRecipeIndex(true)
+		end
+	end
 	local function step()
-		local last = math.min(#keys, i + Prices.INDEX_STEP - 1)
-		local saved = pending
-		pending = newPending
-		for k = i, last do consider(keys[k], known) end
-		newPending, pending = pending, saved
-		i = last + 1
+		local okStep, err = pcall(function()
+			local last = math.min(#keys, i + Prices.INDEX_STEP - 1)
+			local saved = pending
+			pending = newPending
+			for k = i, last do consider(keys[k], known) end
+			newPending, pending = pending, saved
+			i = last + 1
+		end)
+		if not okStep then
+			if ns.Log then ns.Log("ERROR recipe index: %s", tostring(err)) end
+			return finish()
+		end
 		if i <= #keys then
 			C_Timer.After(0, step)
 		else
-			pending, indexing = newPending, false
+			pending = newPending
+			finish()
 			Prices.ResolveRecipeItems()
 		end
 	end
