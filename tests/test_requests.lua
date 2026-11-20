@@ -637,8 +637,22 @@ H.test("requests: hidden finished requests make room when the guild is full (rev
 	H.eq(#b.r:All(), RQ.MAX_RECORDS)
 	-- three days later they are hidden; a new request still fits
 	b.clock = CLOCK0 + 3 * 86400
+	local oldest
+	for _, r in ipairs(b.r:All()) do
+		if not oldest or r.u < oldest.u or (r.u == oldest.u and r.id < oldest.id) then oldest = r end
+	end
 	H.ok(b.r:Create(3865, 4305, 1), "room made")
+	H.eq(b.r:Get(oldest.id), nil, "the oldest change went first")
 	local x = client(C, b.clock)
 	H.ok(b.r:Merge(copy(x.r:Create(3865, 4305, 1))), "a guildmate's new request fits too")
 	H.eq(#b.r:All(), RQ.MAX_RECORDS)
+	-- 200 requests that are all shown: no room
+	local full = client(D)
+	local makers = {}
+	for i = 1, 10 do makers[i] = client(string.format("Player-1-%08X", 500 + i)) end
+	for _, m in ipairs(makers) do
+		for _ = 1, RQ.MAX_OPEN do full.r:Merge(copy(m.r:Create(3865, 4305, 1))) end
+	end
+	H.eq(#full.r:All(), RQ.MAX_RECORDS)
+	H.eq(select(2, full.r:Create(3865, 4305, 1)), "full")
 end)
