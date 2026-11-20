@@ -230,3 +230,168 @@ H.test("requests: expiry after 7 days open, 2 days finished; the guild limit", f
 	local all = b.r:All()
 	H.ok(all[1].c >= all[#all].c)
 end)
+
+-- A guild where every message reaches every online client after the serializer round trip.
+local LS, LD = LibStub("LibSerialize"), LibStub("LibDeflate")
+local function newGuild()
+	local g = { t = 0, timers = {}, clients = {}, sent = { TU = 0, TD = 0, TR = 0 }, bytes = 0 }
+	function g.add(guid)
+		local c = { guid = guid, online = true, blocked = false, saved = {}, changes = {} }
+		c.r = RQ.New({
+			send = function(msg)
+				g.sent[msg.t] = g.sent[msg.t] + 1
+				local text = LD:EncodeForWoWAddonChannel(LD:CompressDeflate(LS:Serialize(msg)))
+				assert(#text < 24000)
+				g.bytes = g.bytes + #text
+				for _, o in ipairs(g.clients) do
+					if o.online then
+						local ok, m = LS:Deserialize(LD:DecompressDeflate(LD:DecodeForWoWAddonChannel(text)))
+						assert(ok)
+						o.r:OnMessage(m)
+					end
+				end
+			end,
+			canSend = function() return c.online and not c.blocked end,
+			now = function() return g.t end,
+			clock = function() return CLOCK0 + math.floor(g.t) end,
+			after = function(delay, fn) g.timers[#g.timers + 1] = { at = g.t + delay, fn = fn, owner = c } end,
+			random = function() return 0.5 end,
+			myGuid = function() return guid end,
+			onChanged = function(id, what) c.changes[#c.changes + 1] = { id = id, what = what } end,
+		}, c.saved)
+		g.clients[#g.clients + 1] = c
+		return c
+	end
+	function g.run(seconds)
+		local target = g.t + seconds
+		while true do
+			table.sort(g.timers, function(a, b) return a.at < b.at end)
+			local nt = g.timers[1]
+			if not nt or nt.at > target then break end
+			table.remove(g.timers, 1)
+			g.t = nt.at
+			if nt.owner.online then nt.fn() end
+		end
+		g.t = target
+	end
+	function g.hellos()
+		for _, c in ipairs(g.clients) do if c.online then c.r:Announce() end end
+		g.run(120)
+	end
+	function g.same(a, b)
+		local x, y = a.r:All(), b.r:All()
+		if #x ~= #y then return false end
+		for i = 1, #x do
+			if x[i].id ~= y[i].id or x[i].u ~= y[i].u or x[i].st ~= y[i].st or x[i].cr ~= y[i].cr then return false end
+		end
+		return true
+	end
+	return g
+end
+
+H.test("requests sync: a new request reaches everybody, also a player who logs in later", function()
+	local g = newGuild()
+	local a, b = g.add(A), g.add(B)
+	local rec = a.r:Create(3865, 4305, 2, "pls")
+	g.run(5)
+	H.eq(g.sent.TU, 1, "sent at once")
+	H.ok(b.r:Get(rec.id), "B has it"); H.eq(b.r:Get(rec.id).note, "pls")
+	H.eq(b.changes[#b.changes].what, "new")
+	-- C logs in later and says hello: gets it from an answering digest and a request
+	local c = g.add(C)
+	c.r:Announce()
+	g.run(60)
+	H.ok(c.r:Get(rec.id), "C has it without waiting for another hello")
+	H.ok(g.same(a, c))
+	-- a guild in step: digests only
+	local tu, tr = g.sent.TU, g.sent.TR
+	g.hellos(); g.hellos()
+	H.eq(g.sent.TU, tu); H.eq(g.sent.TR, tr)
+end)
+
+H.test("requests sync: a take raced by two crafters settles on the earlier one everywhere", function()
+	local g = newGuild()
+	local a, b, c, d = g.add(A), g.add(B), g.add(C), g.add(D)
+	local rec = a.r:Create(3865, 4305, 1)
+	g.run(5)
+	-- B and C take while cut off from each other
+	c.online = false
+	g.run(1)
+	H.ok(b.r:Take(rec.id))
+	g.run(3)
+	c.online, b.online = true, false
+	g.run(2)
+	H.ok(c.r:Take(rec.id))
+	g.run(3)
+	b.online = true
+	g.hellos(); g.hellos()
+	for _, x in ipairs({ a, c, d }) do
+		H.eq(x.r:Get(rec.id).cr, B, "the earlier take everywhere")
+	end
+	H.ok(g.same(a, b) and g.same(b, c) and g.same(c, d))
+end)
+
+H.test("requests sync: a blocked send arrives through the next digest", function()
+	local g = newGuild()
+	local a, b = g.add(A), g.add(B)
+	a.blocked = true
+	local rec = a.r:Create(3865, 4305, 1)
+	g.run(5)
+	H.eq(b.r:Get(rec.id), nil)
+	a.blocked = false
+	g.hellos()
+	H.ok(b.r:Get(rec.id))
+	-- B takes, A was offline; A learns it at its next hello
+	a.online = false
+	b.r:Take(rec.id)
+	g.run(5)
+	a.online = true
+	a.r:Announce()
+	g.run(60)
+	H.eq(a.r:Get(rec.id).st, "taken")
+	H.eq(a.changes[#a.changes].what, "taken")
+end)
+
+H.test("requests sync: bad messages are ignored", function()
+	local g = newGuild()
+	local a = g.add(A)
+	local b = g.add(B)
+	local rec = b.r:Create(3865, 4305, 1)
+	g.run(5)
+	local n = #a.r:All()
+	a.r:OnMessage({ t = "TU", pv = 99, s = B, q = { rec } })
+	a.r:OnMessage({ t = "TU", pv = RQ.PROTOCOL, s = "x", q = { rec } })
+	a.r:OnMessage({ t = "TU", pv = RQ.PROTOCOL, s = B, q = "x" })
+	local many = {}
+	for i = 1, RQ.MAX_PER_MESSAGE + 5 do
+		many[i] = { id = C .. "-" .. CLOCK0 .. "-" .. (100 + i), by = C, r = 3865, i = 4305, n = 1, note = "",
+			c = CLOCK0, st = "open", u = CLOCK0, ub = C }
+	end
+	a.r:OnMessage({ t = "TU", pv = RQ.PROTOCOL, s = B, q = many })
+	H.eq(#a.r:All(), n + RQ.MAX_PER_MESSAGE, "the rest of an oversized update is not read")
+	a.r:OnMessage({ t = "TD", pv = RQ.PROTOCOL, s = B, x = { 1, 2, 3 } })
+	a.r:OnMessage({ t = "TR", pv = RQ.PROTOCOL, s = B, to = A, ids = "x" })
+	a.r:OnMessage({ t = "TR", pv = RQ.PROTOCOL, s = A, to = A, ids = { rec.id } }) -- own echo
+	g.run(60)
+end)
+
+H.test("requests sync: 15 clients settle, then only digests", function()
+	local g = newGuild()
+	local cs = {}
+	for i = 1, 15 do cs[i] = g.add(string.format("Player-1-%08X", 200 + i)) end
+	-- each creates requests while alone
+	for i, c in ipairs(cs) do
+		for _, o in ipairs(cs) do o.online = (o == c) end
+		for _ = 1, 3 do c.r:Create(3865, 4305, i) end
+		g.run(10)
+	end
+	for _, c in ipairs(cs) do c.online = true end
+	g.bytes = 0
+	g.hellos(); g.hellos(); g.hellos()
+	for i = 2, 15 do H.ok(g.same(cs[1], cs[i]), "client " .. i .. " in step") end
+	H.eq(#cs[1].r:All(), 45)
+	H.ok(g.bytes < 120000, "traffic " .. g.bytes)
+	local tu, tr = g.sent.TU, g.sent.TR
+	g.hellos()
+	H.eq(g.sent.TU, tu); H.eq(g.sent.TR, tr)
+end)

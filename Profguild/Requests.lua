@@ -22,6 +22,15 @@
 -- The sender of a message is not proven (as everywhere in Profguild): only the shape of a record
 -- and its history are checked.
 --
+-- Messages (GUILD channel):
+--   TU update  { t="TU", pv, s, q = { record, ... } }          our changes, and answers
+--   TD digest  { t="TD", pv, s, x = { id, version, ... } }      after every hello
+--   TR request { t="TR", pv, s, to = holderGuid, ids = { ... } }
+-- A client that sees a digest listing a request it lacks or holds in another version asks the
+-- sender for it; everybody who hears the answer merges it. A client that holds a request the
+-- digest lacks, or another version, answers with its own digest (at most every DIGEST_GAP), so
+-- the exchange runs both ways and a newcomer does not wait for the next hello.
+--
 -- Adapter: send(msg), canSend() -> bool, now() (seconds, monotonic), clock() (server time),
 --          after(seconds, fn), random() -> [0,1), myGuid(), onChanged(id, what) (optional;
 --          what = "new" | "taken" | "open" | "done" | "cancelled" | "gone")
@@ -42,6 +51,16 @@ Requests.KEEP_OPEN = 7 * 86400   -- open and taken requests disappear this long 
 Requests.KEEP_FINAL = 2 * 86400  -- done and cancelled ones this long after their last change
 Requests.MAX_AHEAD = 120         -- times may be this far ahead of our clock
 Requests.MAX_ID = 2147483647
+Requests.MAX_PER_MESSAGE = 20    -- records in one update
+Requests.MAX_DIGEST = 250        -- entries read from one digest
+Requests.MAX_ASK = 50            -- ids in one request
+Requests.SEND_DELAY = 0.5        -- own changes right after each other leave together
+Requests.SEND_PACE = 1.0         -- seconds between two parts of an update
+Requests.REQUEST_DELAY = { 1.0, 4.0 }
+Requests.DIGEST_DELAY = { 2.0, 6.0 }
+Requests.DIGEST_GAP = 60         -- an answering digest at most this often
+Requests.ANSWER_COOLDOWN = 30    -- seconds between the end of an answer and the next one
+Requests.ASK_AGAIN = 60          -- the same request is asked for again (by anybody) only after this
 
 local STATES = { open = true, taken = true, done = true, cancelled = true }
 local FINAL = { done = true, cancelled = true }
@@ -86,6 +105,21 @@ function Requests.New(adapter, saved)
 		list = saved.requests,
 		revision = 0,
 		dead = false,
+		outgoing = {},       -- id -> true, own changes waiting to be sent
+		sendTimer = false,
+		sendQueue = {},      -- updates being sent: { ids, next, answer }
+		pumping = false,
+		answerIds = nil,     -- id -> true, asked for while the answer waits
+		answerTimer = false,
+		answering = false,
+		lastAnswer = -1e9,
+		requests = {},       -- holder guid -> { ids = { id -> true }, token }
+		requestSeq = 0,
+		asked = {},          -- id -> time it was asked for (by us or a guildmate we heard)
+		digestTimer = false,
+		digestCovered = false,
+		lastDigest = -1e9,
+		stats = { sentU = 0, sentD = 0, sentR = 0, recvU = 0, recvD = 0, recvR = 0 },
 	}, RequestsMT)
 	for id, rec in pairs(self.list) do
 		if not self:_Valid(rec) or rec.id ~= id then self.list[id] = nil end -- broken saved data
@@ -348,9 +382,245 @@ function RequestsMT:Cancel(id)
 	return self:_Apply(new)
 end
 
+---------------------------------------------------------------------------
+-- Keeping the guild in step
+---------------------------------------------------------------------------
+
+local function between(self, range)
+	return range[1] + (range[2] - range[1]) * self.a.random()
+end
+
+local function canSend(self)
+	return not self.dead and self.a.canSend()
+end
+
+local function send(self, msg)
+	msg.pv = Requests.PROTOCOL
+	msg.s = self.a.myGuid()
+	self.a.send(msg)
+end
+
+-- What tells two versions of a request apart in a digest.
+local function version(rec)
+	return rec.u .. ":" .. rec.st .. ":" .. (rec.cr or "") .. ":" .. #(rec.g or {})
+end
+Requests.Version = version
+
+function RequestsMT:_Send(rec)
+	self.outgoing[rec.id] = true
+	if self.sendTimer then return end
+	self.sendTimer = true
+	self.a.after(Requests.SEND_DELAY, function()
+		self.sendTimer = false
+		local ids = {}
+		for id in pairs(self.outgoing) do ids[#ids + 1] = id end
+		self.outgoing = {}
+		if #ids == 0 or not canSend(self) then return end -- the next digest brings it
+		table.sort(ids)
+		self.sendQueue[#self.sendQueue + 1] = { ids = ids, next = 1 }
+		self:_Pump()
+	end)
+end
+
+function RequestsMT:_AnswerSent()
+	self.answering = false
+	self.lastAnswer = self.a.now()
+	self:_ScheduleAnswer()
+end
+
+function RequestsMT:_Pump()
+	if self.pumping then return end
+	local job = self.sendQueue[1]
+	if not job then return end
+	if not canSend(self) then
+		local was = self.answering
+		self.sendQueue = {}
+		if was then self:_AnswerSent() end
+		return
+	end
+	local q = {}
+	while job.next <= #job.ids and #q < Requests.MAX_PER_MESSAGE do
+		local rec = self.list[job.ids[job.next]]
+		if rec then q[#q + 1] = rec end
+		job.next = job.next + 1
+	end
+	local last = job.next > #job.ids
+	if last then table.remove(self.sendQueue, 1) end
+	if #q > 0 then
+		self.stats.sentU = self.stats.sentU + 1
+		send(self, { t = "TU", q = q })
+	end
+	if last and job.answer then self:_AnswerSent() end
+	if #self.sendQueue > 0 then
+		self.pumping = true
+		self.a.after(Requests.SEND_PACE, function()
+			self.pumping = false
+			self:_Pump()
+		end)
+	end
+end
+
+-- Sends our digest. Called after every hello of Sync (also with no requests: a newcomer's empty
+-- digest makes the holders answer at once).
+function RequestsMT:Announce()
+	if not canSend(self) then return false end
+	local x, clock = {}, self.a.clock()
+	for _, rec in ipairs(self:All()) do
+		if not self:_Expired(rec, clock) and #x < 2 * Requests.MAX_DIGEST then
+			x[#x + 1] = rec.id
+			x[#x + 1] = version(rec)
+		end
+	end
+	self.lastDigest = self.a.now()
+	self.stats.sentD = self.stats.sentD + 1
+	send(self, { t = "TD", x = x })
+	return true
+end
+
+local function scheduleDigest(self)
+	if self.digestTimer or self.a.now() - self.lastDigest < Requests.DIGEST_GAP then return end
+	self.digestTimer = true
+	self.digestCovered = false
+	self.a.after(between(self, Requests.DIGEST_DELAY), function()
+		self.digestTimer = false
+		if self.digestCovered then return end
+		if self.a.now() - self.lastDigest >= Requests.DIGEST_GAP then self:Announce() end
+	end)
+end
+
+-- The asked requests: one answer at a time, ANSWER_COOLDOWN after the previous one ended.
+function RequestsMT:_Answer(ids)
+	self.answerIds = self.answerIds or {}
+	for id in pairs(ids) do self.answerIds[id] = true end
+	self:_ScheduleAnswer()
+end
+
+function RequestsMT:_ScheduleAnswer()
+	if self.answerTimer or self.answering or not self.answerIds then return end
+	local wait = math.max(0, Requests.ANSWER_COOLDOWN - (self.a.now() - self.lastAnswer))
+	self.answerTimer = true
+	self.a.after(wait, function()
+		self.answerTimer = false
+		local asked = self.answerIds
+		self.answerIds = nil
+		if not asked or not canSend(self) then return end
+		local ids = {}
+		for id in pairs(asked) do
+			if self.list[id] then ids[#ids + 1] = id end
+		end
+		if #ids == 0 then return end
+		table.sort(ids)
+		self.answering = true
+		self.sendQueue[#self.sendQueue + 1] = { ids = ids, next = 1, answer = true }
+		self:_Pump()
+	end)
+end
+
+-- Asks a holder for these requests (merged with others wanted from it meanwhile).
+function RequestsMT:_Request(holder, ids)
+	local now = self.a.now()
+	local fresh = {}
+	for id in pairs(ids) do
+		if not self.asked[id] or now - self.asked[id] >= Requests.ASK_AGAIN then fresh[id] = true end
+	end
+	if not next(fresh) then return false end
+	for id in pairs(fresh) do self.asked[id] = now end
+	local r = self.requests[holder]
+	if r then
+		for id in pairs(fresh) do r.ids[id] = true end
+		return true
+	end
+	self.requestSeq = self.requestSeq + 1
+	local token = self.requestSeq
+	r = { ids = fresh, token = token }
+	self.requests[holder] = r
+	self.a.after(between(self, Requests.REQUEST_DELAY), function()
+		local req = self.requests[holder]
+		if not req or req.token ~= token then return end
+		self.requests[holder] = nil
+		if not canSend(self) then
+			for id in pairs(req.ids) do self.asked[id] = nil end
+			return
+		end
+		local list = {}
+		for id in pairs(req.ids) do
+			if #list < Requests.MAX_ASK then list[#list + 1] = id end
+		end
+		if #list == 0 then return end -- covered by a guildmate's request
+		table.sort(list)
+		self.stats.sentR = self.stats.sentR + 1
+		send(self, { t = "TR", to = holder, ids = list })
+	end)
+	return true
+end
+
+function RequestsMT:OnMessage(msg)
+	if type(msg) ~= "table" or msg.pv ~= Requests.PROTOCOL then return end
+	local me = self.a.myGuid()
+	if msg.s == me or not validGuid(msg.s) then return end -- GUILD addon messages are echoed
+	if msg.t == "TU" then
+		if type(msg.q) ~= "table" then return end
+		self.stats.recvU = self.stats.recvU + 1
+		local stored = 0
+		for i = 1, math.min(#msg.q, Requests.MAX_PER_MESSAGE) do
+			if self:Merge(msg.q[i]) then stored = stored + 1 end
+		end
+		return stored
+	elseif msg.t == "TD" then
+		if type(msg.x) ~= "table" or #msg.x > 2 * Requests.MAX_DIGEST or #msg.x % 2 ~= 0 then return end
+		self.stats.recvD = self.stats.recvD + 1
+		local theirs, want = {}, {}
+		for i = 1, #msg.x, 2 do
+			local id, v = msg.x[i], msg.x[i + 1]
+			if type(id) ~= "string" or #id > 80 or type(v) ~= "string" or #v > 80 then return end
+			theirs[id] = v
+			local held = self.list[id]
+			if not held or version(held) ~= v then want[id] = true end
+		end
+		local differs, clock = false, self.a.clock()
+		for id, rec in pairs(self.list) do
+			if not self:_Expired(rec, clock) and theirs[id] ~= version(rec) then
+				differs = true
+				break
+			end
+		end
+		if self.digestTimer and not differs and not next(want) then self.digestCovered = true end
+		if next(want) then self:_Request(msg.s, want) end
+		if differs then scheduleDigest(self) end
+		return next(want) ~= nil
+	elseif msg.t == "TR" then
+		if not validGuid(msg.to) or type(msg.ids) ~= "table" or #msg.ids > Requests.MAX_ASK then return end
+		self.stats.recvR = self.stats.recvR + 1
+		local ids = {}
+		for _, id in ipairs(msg.ids) do
+			if type(id) == "string" and #id <= 80 then ids[id] = true end
+		end
+		if msg.to == me then
+			if next(ids) then self:_Answer(ids) end
+		else
+			-- a guildmate asks for requests we want too: that answer reaches us as well
+			local now = self.a.now()
+			for id in pairs(ids) do self.asked[id] = now end
+			for _, r in pairs(self.requests) do
+				for id in pairs(ids) do r.ids[id] = nil end
+			end
+		end
+	end
+end
+
+function RequestsMT:OnSendFailed(msg)
+	if type(msg) == "table" and msg.t == "TR" and type(msg.ids) == "table" then
+		for _, id in ipairs(msg.ids) do self.asked[id] = nil end
+	end
+end
+
 -- The guild changed: this object stops sending (its timers may still run).
 function RequestsMT:Stop()
 	self.dead = true
+	self.sendQueue = {}
+	self.outgoing = {}
+	self.requests = {}
+	self.answering = false
 end
 
 return Requests
