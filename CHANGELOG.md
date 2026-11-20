@@ -11,9 +11,10 @@
   its version, missing or other versions are asked for, answers serve the whole guild (messages
   `TU`, `TD`, `TR`). When two guildmates take a request at the same time, the earlier take wins
   everywhere. 20 open requests per player, 200 in the guild; open and taken requests disappear
-  after 7 days, done and cancelled ones after 2 days.
-- A request changes only while the guild can hear it: in an instance or in combat the buttons
-  say why and wait.
+  after 7 days, done and cancelled ones are shown for 2 days.
+- A request changes only while the guild can hear it: in an instance or in combat a button says
+  why and does nothing; a change made just before combat goes out as soon as sending works.
+  When a take does not count (somebody took it earlier), the chat says so.
 - Chat notices: a new request for a recipe you know, and your request taken by somebody.
   `/pg status` shows the requests and their messages.
 

@@ -238,3 +238,19 @@ H.test("addon requests window: actions wait while sending is blocked (review 1, 
 	UI.detail.linkButton._scripts.OnClick(UI.detail.linkButton)
 	H.eq(ns.requests:Get(rec.id).st, "taken")
 end)
+
+
+H.test("addon requests: a take that did not count is told (review 2, N2)", function()
+	local ns = login()
+	local rec = anaRequest(ns, 3865, 1)
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } })
+	M.advance(3)
+	ns.requests:Take(rec.id)
+	-- Bob took it a second earlier
+	local bob = {}
+	for k, v in pairs(rec) do bob[k] = v end
+	bob.st, bob.cr, bob.tk, bob.u, bob.ub = "taken", "Player-1-00000003", rec.c + 1, rec.c + 1, "Player-1-00000003"
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { bob } })
+	H.eq(ns.requests:Get(rec.id).cr, "Player-1-00000003")
+	H.ok(chatHas(ns.T("REQ_LOST_NOTICE", "Item 4305")), "told that our take did not count")
+end)

@@ -565,7 +565,7 @@ function UI:BuildRequestRows(query, category)
 		for recipeID in pairs(list) do skillOf[recipeID] = skillLine end
 	end
 	for _, rec in ipairs(requests:All()) do
-		if not requests:_Expired(rec) then
+		if not requests:_Hidden(rec) then
 			local entry = index[rec.r]
 			local skillLine = (entry and entry.skillLine) or skillOf[rec.r] or 0
 			local crafters = entry and craftersOf(entry, false, now, staleDays) or {}

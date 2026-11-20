@@ -208,10 +208,11 @@ H.test("requests: expiry after 7 days open, 2 days finished; the guild limit", f
 	a.clock = CLOCK0 + 10
 	a.r:Cancel(fin.id)
 	a.clock = CLOCK0 + 2 * 86400 + 20
-	H.eq(a.r:Prune(), 1, "the cancelled one after 2 days")
-	H.ok(a.r:Get(open.id))
+	H.eq(a.r:Prune(), 0, "the cancelled one is kept (hidden) while open versions may exist")
+	H.ok(a.r:_Hidden(a.r:Get(fin.id)), "but not shown after 2 days")
+	H.ok(not a.r:_Hidden(a.r:Get(open.id)))
 	a.clock = CLOCK0 + 7 * 86400 + 1
-	H.eq(a.r:Prune(), 1, "the open one after 7 days")
+	H.eq(a.r:Prune(), 2, "both after 7 days")
 	-- an expired record from a client that has not pruned yet is not taken again
 	b.clock = CLOCK0 + 7 * 86400 + 1
 	H.ok(not b.r:Merge(copy(open)), "expired")
@@ -521,4 +522,97 @@ H.test("requests: random histories delivered in random orders settle on one vers
 		end
 	end
 	H.ok(true)
+end)
+
+
+H.test("requests: the version order is a strict total order (brute force)", function()
+	local c = client(A)
+	local versions = {}
+	local base = { id = A .. "-" .. CLOCK0 .. "-1", by = A, r = 3865, i = 4305, n = 1, note = "", c = CLOCK0 }
+	for _, st in ipairs({ "open", "taken", "done", "cancelled" }) do
+		for _, gn in ipairs({ 0, 1, 2 }) do
+			for _, cr in ipairs({ false, B, C }) do
+				for _, tk in ipairs({ false, CLOCK0 + 1, CLOCK0 + 2 }) do
+					for _, u in ipairs({ CLOCK0 + 2, CLOCK0 + 3 }) do
+						for _, ub in ipairs({ A, B, C }) do
+							local v = copy(base)
+							v.st, v.gn, v.u, v.ub = st, gn, u, ub
+							if cr then v.cr = cr end
+							if tk then v.tk = tk end
+							if c.r:_Valid(v) then versions[#versions + 1] = v end
+						end
+					end
+				end
+			end
+		end
+	end
+	H.ok(#versions > 50, "versions: " .. #versions)
+	local beats = RQ.Beats
+	local wins = {}
+	for i, a in ipairs(versions) do
+		H.ok(not beats(a, a), "irreflexive")
+		wins[i] = 0
+		for j, b in ipairs(versions) do
+			if i ~= j then
+				local ab, ba = beats(a, b), beats(b, a)
+				if ab == ba then return H.ok(false, "not total/antisymmetric: " .. RQ.Version(a) .. " vs " .. RQ.Version(b)) end
+				if ab then wins[i] = wins[i] + 1 end
+			end
+		end
+	end
+	-- transitive: a total, antisymmetric relation is transitive when the win counts are all different
+	local seen = {}
+	for _, w in ipairs(wins) do
+		H.ok(not seen[w], "transitive")
+		seen[w] = true
+	end
+end)
+
+H.test("requests: a finished request does not come back from a player who was away (review 2, I1)", function()
+	local a, b, z = client(A), client(B), client(C)
+	local rec = a.r:Create(3865, 4305, 1)
+	b.r:Merge(copy(rec)); z.r:Merge(copy(rec)) -- Z keeps the open version and goes away
+	b.clock = CLOCK0 + 10; b.r:Take(rec.id); a.r:Merge(copy(b.r:Get(rec.id)))
+	a.clock = CLOCK0 + 20; a.r:Done(rec.id)
+	-- three days later
+	a.clock = CLOCK0 + 3 * 86400
+	H.eq(a.r:Prune(), 0, "the done request is kept while an open version may still be around")
+	H.ok(not a.r:Merge(copy(z.r:Get(rec.id))), "Z's open version loses")
+	H.eq(a.r:Get(rec.id).st, "done")
+	H.ok(a.r:_Hidden(a.r:Get(rec.id)), "but it is not shown any more")
+	a.clock = CLOCK0 + 7 * 86400 + 1
+	H.eq(a.r:Prune(), 1, "gone with the last open version")
+end)
+
+H.test("requests: unknown fields are not stored or sent again (review 2, I2)", function()
+	local a, b = client(A), client(B)
+	local rec = a.r:Create(3865, 4305, 1)
+	local f = copy(rec)
+	f.junk = string.rep("x", 5000)
+	f.g = { { 1, B } }
+	H.ok(b.r:Merge(f))
+	local held = b.r:Get(rec.id)
+	H.eq(held.junk, nil); H.eq(held.g, nil)
+	local keys = 0
+	for _ in pairs(held) do keys = keys + 1 end
+	H.ok(keys <= 13, "only known fields: " .. keys)
+	-- saved data with extra fields is cleaned on load
+	local saved = { requests = { [rec.id] = f } }
+	local c = RQ.New(b.r.a, saved)
+	H.eq(c:Get(rec.id).junk, nil)
+end)
+
+
+H.test("requests sync: a change made just before sending was blocked goes out once it is free (review 2, N1)", function()
+	local g = newGuild()
+	local a, b = g.add(A), g.add(B)
+	local rec = a.r:Create(3865, 4305, 1)
+	g.run(5)
+	b.r:Take(rec.id)
+	b.blocked = true -- combat starts right after the click
+	g.run(10)
+	H.eq(a.r:Get(rec.id).st, "open", "not out yet")
+	b.blocked = false
+	g.run(10)
+	H.eq(a.r:Get(rec.id).st, "taken", "sent when free, without waiting for a digest")
 end)

@@ -378,10 +378,14 @@ end
 -- Chat notices about requests: a new one for a recipe we know, ours taken by somebody. Each
 -- request and kind at most once per session.
 local noticed = {}
-local function requestNotice(id, what)
+local function requestNotice(id, what, before)
 	local rec = ns.requests and ns.requests:Get(id)
 	if not rec then return end
 	local me = UnitGUID("player")
+	-- our take was beaten by an earlier one, or lost to a give-back we had not heard
+	if before and before.st == "taken" and before.cr == me and rec.cr ~= me and not (rec.st == "open" and rec.ub == me) then
+		ns.Say("REQ_LOST_NOTICE", ns.RequestItemName(rec))
+	end
 	local key = id .. "\1" .. tostring(what)
 	if noticed[key] then return end
 	if what == "new" and rec.st == "open" and rec.by ~= me and knowsRecipe(rec.r) then
@@ -403,8 +407,8 @@ local requestsAdapter = {
 	after = function(delay, fn) C_Timer.After(delay, fn) end,
 	random = function() return math.random() end,
 	myGuid = function() return UnitGUID("player") end,
-	onChanged = function(id, what)
-		requestNotice(id, what)
+	onChanged = function(id, what, before)
+		requestNotice(id, what, before)
 		ns.OnDataChanged()
 	end,
 }
@@ -674,7 +678,7 @@ function ns.Status()
 	if ns.requests then
 		local open, taken = 0, 0
 		for _, rec in ipairs(ns.requests:All()) do
-			if not ns.requests:_Expired(rec) then
+			if not ns.requests:_Hidden(rec) then
 				if rec.st == "open" then open = open + 1 elseif rec.st == "taken" then taken = taken + 1 end
 			end
 		end

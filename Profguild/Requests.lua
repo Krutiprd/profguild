@@ -52,7 +52,9 @@ Requests.MAX_COUNT = 1000
 Requests.MAX_NOTE = 80           -- letters
 Requests.MAX_GEN = 1000         -- give-backs of one request
 Requests.KEEP_OPEN = 7 * 86400   -- open and taken requests disappear this long after creation
-Requests.KEEP_FINAL = 2 * 86400  -- done and cancelled ones this long after their last change
+Requests.KEEP_FINAL = 2 * 86400  -- done and cancelled ones are shown this long after their last change;
+                                 -- they are kept (not shown) until KEEP_OPEN after creation, so an
+                                 -- open version from a player who was away cannot bring them back
 Requests.MAX_AHEAD = 120         -- times may be this far ahead of our clock
 Requests.MAX_ID = 2147483647
 Requests.MAX_PER_MESSAGE = 20    -- records in one update
@@ -91,6 +93,14 @@ local function cut(text, max)
 	return text:sub(1, max)
 end
 
+-- Only the known fields of a record: anything else a guildmate put in is neither kept nor sent on.
+local FIELDS = { "id", "by", "r", "i", "n", "note", "c", "st", "cr", "tk", "gn", "u", "ub" }
+local function clean(rec)
+	local out = {}
+	for _, k in ipairs(FIELDS) do out[k] = rec[k] end
+	return out
+end
+
 local RequestsMT = {}
 RequestsMT.__index = RequestsMT
 
@@ -120,15 +130,21 @@ function Requests.New(adapter, saved)
 		stats = { sentU = 0, sentD = 0, sentR = 0, recvU = 0, recvD = 0, recvR = 0 },
 	}, RequestsMT)
 	for id, rec in pairs(self.list) do
-		if not self:_Valid(rec) or rec.id ~= id then self.list[id] = nil end -- broken saved data
+		if not self:_Valid(rec) or rec.id ~= id then
+			self.list[id] = nil -- broken saved data
+		else
+			self.list[id] = clean(rec)
+		end
 	end
 	return self
 end
 
-local function changed(self, id, what)
+-- before: the version held until now (a merge), for the notices
+local function changed(self, id, what, before)
 	self.revision = self.revision + 1
-	if self.a.onChanged then self.a.onChanged(id, what) end
+	if self.a.onChanged then self.a.onChanged(id, what, before) end
 end
+
 
 -- Ranks two versions of the same request (see the top of the file): true when a beats b.
 -- Every field that can change takes part, so two different versions never tie.
@@ -163,11 +179,18 @@ function Requests.Beats(a, b)
 	return false -- the same version
 end
 
--- True when the record is past its time.
+-- True when the record is past its time and can be forgotten.
 function RequestsMT:_Expired(rec, clock)
 	clock = clock or self.a.clock()
-	if FINAL[rec.st] then return rec.u < clock - Requests.KEEP_FINAL end
-	return rec.c < clock - Requests.KEEP_OPEN
+	if rec.c >= clock - Requests.KEEP_OPEN then return false end
+	return not FINAL[rec.st] or rec.u < clock - Requests.KEEP_FINAL
+end
+
+-- True for a request that is not shown any more: expired, or finished more than KEEP_FINAL ago.
+function RequestsMT:_Hidden(rec, clock)
+	clock = clock or self.a.clock()
+	if self:_Expired(rec, clock) then return true end
+	return FINAL[rec.st] and rec.u < clock - Requests.KEEP_FINAL or false
 end
 
 -- Checks the shape of a record and who made its last change.
@@ -243,11 +266,7 @@ function RequestsMT:Prune()
 	return dropped
 end
 
-local function shallow(rec)
-	local out = {}
-	for k, v in pairs(rec) do out[k] = v end
-	return out
-end
+local shallow = clean
 
 -- Takes a version of a request heard from the guild. Returns true when it was stored.
 function RequestsMT:Merge(rec)
@@ -259,7 +278,7 @@ function RequestsMT:Merge(rec)
 			self:Prune()
 			if count(self) >= Requests.MAX_RECORDS then return false end
 		end
-		self.list[rec.id] = shallow(rec)
+		self.list[rec.id] = clean(rec)
 		changed(self, rec.id, "new")
 		return true
 	end
@@ -269,9 +288,9 @@ function RequestsMT:Merge(rec)
 	end
 	if not Requests.Beats(rec, held) then return false end
 	local before = held
-	self.list[rec.id] = shallow(rec)
+	self.list[rec.id] = clean(rec)
 	local what = rec.st ~= before.st and rec.st or (rec.cr ~= before.cr and "taken") or nil
-	changed(self, rec.id, what)
+	changed(self, rec.id, what, before)
 	return true
 end
 
@@ -388,16 +407,25 @@ local function version(rec)
 end
 Requests.Version = version
 
+Requests.RETRY = 5 -- seconds: own changes wait this long while sending is blocked, then try again
+
 function RequestsMT:_Send(rec)
 	self.outgoing[rec.id] = true
-	if self.sendTimer then return end
+	self:_ScheduleSend(Requests.SEND_DELAY)
+end
+
+-- Own changes leave together; while sending is blocked (combat started right after the click)
+-- they wait and go out as soon as it is free, not only with a later digest.
+function RequestsMT:_ScheduleSend(delay)
+	if self.sendTimer or self.dead then return end
 	self.sendTimer = true
-	self.a.after(Requests.SEND_DELAY, function()
+	self.a.after(delay, function()
 		self.sendTimer = false
+		if self.dead or not next(self.outgoing) then return end
+		if not canSend(self) then return self:_ScheduleSend(Requests.RETRY) end
 		local ids = {}
 		for id in pairs(self.outgoing) do ids[#ids + 1] = id end
 		self.outgoing = {}
-		if #ids == 0 or not canSend(self) then return end -- the next digest brings it
 		table.sort(ids)
 		self.sendQueue[#self.sendQueue + 1] = { ids = ids, next = 1 }
 		self:_Pump()
@@ -554,10 +582,11 @@ function RequestsMT:OnMessage(msg)
 		local theirs, want = {}, {}
 		for i = 1, #msg.x, 2 do
 			local id, v = msg.x[i], msg.x[i + 1]
-			if type(id) ~= "string" or #id > 80 or type(v) ~= "string" or #v > 80 then return end
-			theirs[id] = v
-			local held = self.list[id]
-			if not held or version(held) ~= v then want[id] = true end
+			if type(id) == "string" and #id <= 80 and type(v) == "string" and #v <= 160 then
+				theirs[id] = v
+				local held = self.list[id]
+				if not held or version(held) ~= v then want[id] = true end
+			end
 		end
 		local differs, clock = false, self.a.clock()
 		for id, rec in pairs(self.list) do
@@ -591,8 +620,17 @@ function RequestsMT:OnMessage(msg)
 end
 
 function RequestsMT:OnSendFailed(msg)
-	if type(msg) == "table" and msg.t == "TR" and type(msg.ids) == "table" then
+	if type(msg) ~= "table" then return end
+	if msg.t == "TR" and type(msg.ids) == "table" then
 		for _, id in ipairs(msg.ids) do self.asked[id] = nil end
+	elseif msg.t == "TU" and type(msg.q) == "table" then
+		-- our own changes in it go out again when sending works
+		local me = self.a.myGuid()
+		for _, rec in ipairs(msg.q) do
+			local held = type(rec) == "table" and self.list[rec.id]
+			if held and held.ub == me then self.outgoing[held.id] = true end
+		end
+		self:_ScheduleSend(Requests.RETRY)
 	end
 end
 
