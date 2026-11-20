@@ -254,3 +254,27 @@ H.test("addon requests: a take that did not count is told (review 2, N2)", funct
 	H.eq(ns.requests:Get(rec.id).cr, "Player-1-00000003")
 	H.ok(chatHas(ns.T("REQ_LOST_NOTICE", "Item 4305")), "told that our take did not count")
 end)
+
+
+H.test("addon requests: no lost-take notice when the requester finishes or cancels our take, or we give it back", function()
+	local ns = login()
+	local lost = ns.T("REQ_LOST_NOTICE", "Item 4305")
+	local base = count(lost) -- the chat of earlier tests
+	for k, change in ipairs({ "done", "cancelled", "giveback" }) do
+		local rec = anaRequest(ns, 3865, 1)
+		rec.id = ANA .. "-" .. rec.c .. "-" .. (10 + k)
+		receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } })
+		M.advance(2)
+		ns.requests:Take(rec.id)
+		M.advance(2)
+		if change == "giveback" then
+			ns.requests:GiveBack(rec.id)
+		else
+			local v = {}
+			for key, val in pairs(ns.requests:Get(rec.id)) do v[key] = val end
+			v.st, v.u, v.ub = change, v.u + 1, ANA
+			receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { v } })
+		end
+		H.eq(count(lost) - base, 0, "no notice after " .. change)
+	end
+end)

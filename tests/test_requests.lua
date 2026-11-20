@@ -616,3 +616,29 @@ H.test("requests sync: a change made just before sending was blocked goes out on
 	g.run(10)
 	H.eq(a.r:Get(rec.id).st, "taken", "sent when free, without waiting for a digest")
 end)
+
+
+H.test("requests: hidden finished requests make room when the guild is full (review 3)", function()
+	local b = client(B)
+	local cs = {}
+	for i = 1, 11 do cs[i] = client(string.format("Player-1-%08X", 400 + i)) end
+	-- 200 requests, all cancelled at once
+	local n = 0
+	for _, x in ipairs(cs) do
+		for _ = 1, RQ.MAX_OPEN do
+			if n < RQ.MAX_RECORDS then
+				local r = x.r:Create(3865, 4305, 1)
+				x.clock = x.clock + 1
+				x.r:Cancel(r.id)
+				if b.r:Merge(copy(x.r:Get(r.id))) then n = n + 1 end
+			end
+		end
+	end
+	H.eq(#b.r:All(), RQ.MAX_RECORDS)
+	-- three days later they are hidden; a new request still fits
+	b.clock = CLOCK0 + 3 * 86400
+	H.ok(b.r:Create(3865, 4305, 1), "room made")
+	local x = client(C, b.clock)
+	H.ok(b.r:Merge(copy(x.r:Create(3865, 4305, 1))), "a guildmate's new request fits too")
+	H.eq(#b.r:All(), RQ.MAX_RECORDS)
+end)

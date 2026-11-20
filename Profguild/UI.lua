@@ -2084,7 +2084,8 @@ function UI:Draw()
 		tostring(ns.db.settings.recipeFilter), ns.catalog and ns.catalog.revision or 0,
 		tostring(self.memberFilter), tostring(store), store and store.revision or 0, store and store.rosterRevision or 0,
 		tostring(ns.lang), self.nameEpoch or 0, ns.recipeInfoRevision or 0,
-		tostring(ns.requests), ns.requests and ns.requests.revision or 0 }, "\1")
+		tostring(ns.requests), ns.requests and ns.requests.revision or 0,
+		math.floor(GetServerTime() / 3600) }, "\1") -- requests leave the list as hours pass
 	local cache = self.listCache
 	if not cache or cache.key ~= key then
 		local build = members and self.BuildMemberRows or (leveling and self.BuildLevelingRows)

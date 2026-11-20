@@ -10,7 +10,8 @@
 - Everybody gets the same list, also players who were offline: digests list every request with
   its version, missing or other versions are asked for, answers serve the whole guild (messages
   `TU`, `TD`, `TR`). When two guildmates take a request at the same time, the earlier take wins
-  everywhere. 20 open requests per player, 200 in the guild; open and taken requests disappear
+  everywhere. 20 open requests per player, 200 in the guild (finished ones that are no longer
+  shown make room first); open and taken requests disappear
   after 7 days, done and cancelled ones are shown for 2 days.
 - A request changes only while the guild can hear it: in an instance or in combat a button says
   why and does nothing; a change made just before combat goes out as soon as sending works.

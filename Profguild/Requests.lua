@@ -253,6 +253,26 @@ local function count(self)
 	return n
 end
 
+-- The guild holds MAX_RECORDS requests: expired ones go, then finished ones no longer shown,
+-- the oldest change first. Returns true when there is room for one more.
+function RequestsMT:_MakeRoom()
+	if count(self) < Requests.MAX_RECORDS then return true end
+	self:Prune()
+	local clock = self.a.clock()
+	while count(self) >= Requests.MAX_RECORDS do
+		local oldID, oldU
+		for id, rec in pairs(self.list) do
+			if FINAL[rec.st] and self:_Hidden(rec, clock) and (not oldU or rec.u < oldU or (rec.u == oldU and id < oldID)) then
+				oldID, oldU = id, rec.u
+			end
+		end
+		if not oldID then return false end
+		self.list[oldID] = nil
+		changed(self, oldID, "gone")
+	end
+	return true
+end
+
 -- Drops requests past their time. Returns how many.
 function RequestsMT:Prune()
 	local clock, dropped = self.a.clock(), 0
@@ -274,10 +294,7 @@ function RequestsMT:Merge(rec)
 	local held = self.list[rec.id]
 	if not held then
 		if not FINAL[rec.st] and openCount(self, rec.by) >= Requests.MAX_OPEN then return false end
-		if count(self) >= Requests.MAX_RECORDS then
-			self:Prune()
-			if count(self) >= Requests.MAX_RECORDS then return false end
-		end
+		if not self:_MakeRoom() then return false end
 		self.list[rec.id] = clean(rec)
 		changed(self, rec.id, "new")
 		return true
@@ -316,10 +333,7 @@ function RequestsMT:Create(recipeID, itemID, n, note)
 	if not validID(recipeID) or not (itemID == 0 or validID(itemID)) then return nil, "invalid" end
 	if type(n) ~= "number" or n < 1 or n > Requests.MAX_COUNT or n ~= math.floor(n) then return nil, "invalid" end
 	if openCount(self, me) >= Requests.MAX_OPEN then return nil, "limit" end
-	if count(self) >= Requests.MAX_RECORDS then
-		self:Prune()
-		if count(self) >= Requests.MAX_RECORDS then return nil, "full" end
-	end
+	if not self:_MakeRoom() then return nil, "full" end
 	local clock = math.floor(self.a.clock())
 	self.saved.requestSeq = (tonumber(self.saved.requestSeq) or 0) + 1
 	local rec = {
