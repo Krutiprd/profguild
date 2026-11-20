@@ -313,7 +313,28 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	local reagentText = UI.detail.reagentRows[1].right:GetText()
 	H.ok(reagentText:find(ns.Prices.Format(400), 1, true) and reagentText:find(ns.Prices.Format(300), 1, true),
 		"reagent row shows vendor 400 and auction 300: " .. reagentText)
+	local reagentRow = UI.detail.reagentRows[1]
+	H.ok(reagentRow.left._width < 302 - 26 - 4 - reagentRow.right:GetStringWidth() - 7,
+		"the name gives way to the longer price text: " .. reagentRow.left._width)
+	-- a crafted item with no auction price: a vendor pays its sell price, not what a merchant asks
+	local realAuction = Auctionator.API.v1.GetAuctionPriceByItemID
+	local realInfo = C_Item.GetItemInfo
+	Auctionator.API.v1.GetAuctionPriceByItemID = function(_, id) if id == 2589 then return 150 end end
+	Auctionator.API.v1.GetVendorPriceByItemID = function(_, id) if id == 4305 then return 5000 end end
+	C_Item.GetItemInfo = function(id)
+		if id == 4305 then return "Item 4305", "link", 1, 10, 5, nil, nil, 20, nil, nil, 600 end
+		return realInfo(id)
+	end
+	H.eq(select(2, ns.Prices.Get(4305)), "vendor", "Auctionator knows only what a merchant asks")
+	H.eq(ns.Prices.SaleValue(4305), 600, "the sell price, not the merchant's 5000")
+	UI:Refresh()
+	H.eq(UI.detail.profitValue:GetText(), ns.Prices.Format(300), "600 from a vendor, no cut, - 300")
+	H.ok(UI.detail.value:GetText():find(ns.T("ITEM_VALUE_VENDOR", ns.Prices.Format(600)), 1, true),
+		"the value says a vendor pays it: " .. UI.detail.value:GetText())
+	Auctionator.API.v1.GetAuctionPriceByItemID = realAuction
+	C_Item.GetItemInfo = realInfo
 	Auctionator.API.v1.GetVendorPriceByItemID = realVendor
+	UI:Refresh()
 	H.eq(ns.Prices.Short(-123456), "-12g")
 	H.eq(ns.Prices.Short(250), "+2s")
 	H.eq(ns.Prices.Short(7), "+7c")

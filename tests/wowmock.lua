@@ -42,6 +42,8 @@ function Widget:Hide() self._shown = false end
 function Widget:IsShown() return self._shown end
 function Widget:SetText(t) self._text = t or ""; if self._scripts.OnTextChanged then self._scripts.OnTextChanged(self) end end
 function Widget:GetText() return self._text end
+-- about 5 pixels per visible character of a small font; colour codes take no room
+function Widget:GetStringWidth() return #((self._text or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")) * 5 end
 function Widget:SetChecked(c) self._checked = c and true or false end
 function Widget:GetChecked() return self._checked end
 function Widget:SetPoint(...) self._points = (rawget(self, "_points") or 0) + 1 end

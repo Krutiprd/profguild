@@ -318,8 +318,8 @@ local function recipeItemText(recipeID, ask)
 end
 
 -- Profit of one craft: item price minus the auction house cut and the reagents, or nil when a
--- price is missing. Reagents
--- come from the catalog of guildmates or straight from the game (asked once per session).
+-- price is missing. Reagents come from the catalog of guildmates or straight from the game
+-- (asked once per session).
 local gameReagents = {}
 local function craftProfit(d)
 	if not d.itemID or d.itemID == 0 or not ns.Prices.Source() then return nil end
@@ -331,7 +331,7 @@ local function craftProfit(d)
 	if not reagents then return nil end
 	-- an item that binds on pickup cannot be sold: one craft costs the reagents
 	local value, source
-	if ns.Scanner.ItemBoP(d.itemID) then value = 0 else value, source = ns.Prices.Get(d.itemID) end
+	if ns.Scanner.ItemBoP(d.itemID) then value = 0 else value, source = ns.Prices.SaleValue(d.itemID) end
 	if not value then return nil end
 	local total, missing = ns.Prices.Cost(reagents)
 	if missing > 0 then return nil end
@@ -759,6 +759,8 @@ local function createReagentRow(parent, index)
 	row.left = label(row, "GameFontHighlightSmall", C.text)
 	row.left:SetPoint("LEFT", 26, 0)
 	row.left:SetWidth(DETAIL_W - 140)
+	-- a long price text (pieces, vendor price) shortens the name instead of covering it
+	row.fitSpec = { width = DETAIL_W - 28, left = 26, right = 4, max = DETAIL_W - 140 }
 	row.right = label(row, "GameFontHighlightSmall", C.muted)
 	row.right:SetPoint("RIGHT", -4, 0)
 	row.right:SetJustifyH("RIGHT")
@@ -1467,6 +1469,11 @@ local function fillRows(rows, lines, offset)
 			if row.icon and line.icon then setIcon(row.icon, line.icon) end
 			row.left:SetText(line.left)
 			row.right:SetText(line.right or "")
+			local fit = rawget(row, "fitSpec")
+			if fit and row.right.GetStringWidth then
+				local free = fit.width - fit.left - fit.right - (row.right:GetStringWidth() or 0) - 8
+				row.left:SetWidth(math.max(40, math.min(fit.max, free)))
+			end
 			row:Show()
 		else
 			row:Hide()
@@ -1530,11 +1537,12 @@ function UI:DrawReagents(s)
 	local bop = ns.Scanner.ItemBoP(s.itemID)
 	local value, valueSource
 	if s.itemID and s.itemID > 0 then
-		if bop then value = 0 else value, valueSource = ns.Prices.Get(s.itemID) end
+		if bop then value = 0 else value, valueSource = ns.Prices.SaleValue(s.itemID) end
 	end
 	local skill = recipeSkillText(s.recipeID)
-	local valueText = bop and (HEX_LOSS .. ns.T("ITEM_BOP") .. "|r") or (value and ns.T("ITEM_VALUE", ns.Prices.Format(value))) or ""
-	local onMarket = value and not bop and ns.Prices.Available(s.itemID)
+	local valueText = bop and (HEX_LOSS .. ns.T("ITEM_BOP") .. "|r")
+		or (value and ns.T(valueSource == "vendor" and "ITEM_VALUE_VENDOR" or "ITEM_VALUE", ns.Prices.Format(value))) or ""
+	local onMarket = value and not bop and valueSource ~= "vendor" and ns.Prices.Available(s.itemID)
 	if onMarket then valueText = valueText .. " " .. HEX_MUTED .. "(" .. ns.T("PCS", onMarket) .. ")|r" end
 	if skill then valueText = valueText ~= "" and (valueText .. "  ·  " .. skill) or skill end
 	d.value:SetText(valueText)

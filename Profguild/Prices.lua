@@ -59,10 +59,29 @@ end
 Prices.AH_CUT = 0.05
 
 -- What a sale of `price` copper brings in: an auction price minus the auction house cut, a
--- vendor price as it is (a vendor takes no cut).
+-- sale to a vendor as it is (a vendor takes no cut).
 function Prices.AfterCut(price, source)
 	if source == "vendor" then return price end
 	return math.floor(price * (1 - Prices.AH_CUT))
+end
+
+-- What a crafted item sells for and where: the auction price ("ah"), else what a vendor pays
+-- for it ("vendor", the sell price from the game). Not Auctionator's vendor price: that is what
+-- a merchant asks, not what one pays.
+function Prices.SaleValue(itemID)
+	local price, kind, age = Prices.Get(itemID)
+	if price and kind ~= "vendor" then return price, kind, age end
+	-- Auctionator knew only a merchant price: TSM may still have an auction value
+	local t = tsm()
+	if t and type(itemID) == "number" then
+		price = call(t.GetCustomPriceValue, "DBMarket", "i:" .. itemID)
+		if price then return price, "ah" end
+	end
+	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+	if type(itemID) ~= "number" or type(getInfo) ~= "function" then return nil end
+	local ok, name, _, _, _, _, _, _, _, _, _, sellPrice = pcall(getInfo, itemID)
+	if ok and name and type(sellPrice) == "number" and sellPrice > 0 then return sellPrice, "vendor" end
+	return nil
 end
 
 -- What a vendor asks for the item (seen at a merchant by Auctionator), or nil. Shown beside the

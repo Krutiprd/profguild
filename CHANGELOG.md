@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 – 2026-11-20
+
+- Profit of a craft subtracts the 5 % auction house cut from the sale (a vendor price takes
+  no cut), the same as Auctionator.
+- Reagents keep costing their auction price; when a vendor also sells one, the reagent row in
+  the details shows the vendor price beside it, e.g. "(vendor 18s)  22s 40c".
+- A crafted item with no auction price is valued at what a vendor pays for it (shown as
+  "Vendor pays: ..."), not at what a merchant asks for it. So an item that has not been
+  scanned yet now shows its profit against the vendor price, often a loss.
+- A long reagent name shortens instead of running into its price.
+
 ## 0.2.0 – 2026-11-19
 
 - Recipe catalog: every recipe of a profession, also the ones nobody in the guild has learned.
