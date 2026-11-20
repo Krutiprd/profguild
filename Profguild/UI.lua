@@ -317,7 +317,8 @@ local function recipeItemText(recipeID, ask)
 	return text .. " · " .. ns.T("RECIPE_NO_AH"), ""
 end
 
--- Profit of one craft: item price minus the reagents, or nil when a price is missing. Reagents
+-- Profit of one craft: item price minus the auction house cut and the reagents, or nil when a
+-- price is missing. Reagents
 -- come from the catalog of guildmates or straight from the game (asked once per session).
 local gameReagents = {}
 local function craftProfit(d)
@@ -329,11 +330,12 @@ local function craftProfit(d)
 	end
 	if not reagents then return nil end
 	-- an item that binds on pickup cannot be sold: one craft costs the reagents
-	local value = ns.Scanner.ItemBoP(d.itemID) and 0 or ns.Prices.Get(d.itemID)
+	local value, source
+	if ns.Scanner.ItemBoP(d.itemID) then value = 0 else value, source = ns.Prices.Get(d.itemID) end
 	if not value then return nil end
 	local total, missing = ns.Prices.Cost(reagents)
 	if missing > 0 then return nil end
-	return value * ns.Scanner.RecipeOutputCount(d.recipeID) - total
+	return ns.Prices.AfterCut(value * ns.Scanner.RecipeOutputCount(d.recipeID), source) - total
 end
 UI.CraftProfit = craftProfit
 
@@ -1492,6 +1494,11 @@ function UI:DrawReagents(s)
 			local name = ns.Scanner.ItemName(itemID) or ("#" .. itemID)
 			local price, kind = ns.Prices.Get(itemID)
 			local right = price and ns.Prices.Format(price * count) or (HEX_MUTED .. "?|r")
+			-- an auction price counts; a vendor that also sells it is shown beside it
+			local vendor = kind == "ah" and ns.Prices.VendorPrice(itemID)
+			if vendor then
+				right = HEX_MUTED .. "(" .. ns.T("PRICE_VENDOR") .. " " .. ns.Prices.Format(vendor * count) .. ")|r  " .. right
+			end
 			local onMarket = kind == "ah" and ns.Prices.Available(itemID)
 			if onMarket then right = HEX_MUTED .. ns.T("PCS", onMarket) .. "|r  " .. right end
 			if kind == "vendor" then right = HEX_MUTED .. ns.T("PRICE_VENDOR") .. "|r " .. right end
@@ -1521,7 +1528,10 @@ function UI:DrawReagents(s)
 	-- cost of one craft and what the item sells for
 	local source = ns.Prices.Source()
 	local bop = ns.Scanner.ItemBoP(s.itemID)
-	local value = s.itemID and s.itemID > 0 and (bop and 0 or ns.Prices.Get(s.itemID))
+	local value, valueSource
+	if s.itemID and s.itemID > 0 then
+		if bop then value = 0 else value, valueSource = ns.Prices.Get(s.itemID) end
+	end
 	local skill = recipeSkillText(s.recipeID)
 	local valueText = bop and (HEX_LOSS .. ns.T("ITEM_BOP") .. "|r") or (value and ns.T("ITEM_VALUE", ns.Prices.Format(value))) or ""
 	local onMarket = value and not bop and ns.Prices.Available(s.itemID)
@@ -1540,7 +1550,7 @@ function UI:DrawReagents(s)
 		local total, missing = ns.Prices.Cost(reagents)
 		d.costValue:SetText(ns.Prices.Format(total) .. (missing > 0 and (HEX_MUTED .. " " .. ns.T("COST_MISSING", missing) .. "|r") or ""))
 		if value and missing == 0 then
-			local profit = value * ns.Scanner.RecipeOutputCount(s.recipeID) - total
+			local profit = ns.Prices.AfterCut(value * ns.Scanner.RecipeOutputCount(s.recipeID), valueSource) - total
 			d.profitValue:SetText((profit < 0 and (HEX_LOSS .. "-|r") or "") .. ns.Prices.Format(math.abs(profit)))
 		else
 			d.profitValue:SetText("-")

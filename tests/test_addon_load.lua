@@ -291,16 +291,29 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 		H.ok(not (msg and msg.t == "Q"), "no question to the guild")
 	end
 	H.eq(UI.detail.costValue:GetText(), ns.Prices.Format(300), "2 x 150 copper")
-	H.eq(UI.detail.profitValue:GetText(), ns.Prices.Format(700), "sells for 1000")
+	H.eq(UI.detail.profitValue:GetText(), ns.Prices.Format(650), "sells for 1000, the auction house keeps 50")
 	H.ok(UI.detail.value:GetText():find(ns.Prices.Format(1000), 1, true), "item value shown")
 	H.ok(not UI.detail.shopButton.disabled, "shopping list available")
-	-- the list shows the profit next to the name: 1000 - 2 x 150 copper
+	-- the list shows the profit next to the name: 1000 - 5 % cut - 2 x 150 copper
 	local profitRow
 	for _, r in ipairs(UI.rows) do
 		local d = rawget(r, "data")
 		if d and d.recipeID == 3865 then profitRow = r end
 	end
-	H.ok(profitRow.profit:GetText():find("+7s", 1, true), "profit in the list: " .. profitRow.profit:GetText())
+	H.ok(profitRow.profit:GetText():find("+6s", 1, true), "profit in the list: " .. profitRow.profit:GetText())
+	H.eq(ns.Prices.AfterCut(1000, "ah"), 950, "auction sale minus 5 %")
+	H.eq(ns.Prices.AfterCut(1001, "ah"), 950, "the cut rounds down to copper")
+	H.eq(ns.Prices.AfterCut(1000, "vendor"), 1000, "a vendor takes no cut")
+	-- a reagent a vendor also sells: the auction price counts, the vendor price is shown beside it
+	local realVendor = Auctionator.API.v1.GetVendorPriceByItemID
+	Auctionator.API.v1.GetVendorPriceByItemID = function(_, id) if id == 2589 then return 200 end end
+	H.eq(ns.Prices.Cost({ [2589] = 2 }), 300, "2 x auction 150, not 2 x vendor 200")
+	H.eq(ns.Prices.VendorPrice(2589), 200)
+	UI:Refresh()
+	local reagentText = UI.detail.reagentRows[1].right:GetText()
+	H.ok(reagentText:find(ns.Prices.Format(400), 1, true) and reagentText:find(ns.Prices.Format(300), 1, true),
+		"reagent row shows vendor 400 and auction 300: " .. reagentText)
+	Auctionator.API.v1.GetVendorPriceByItemID = realVendor
 	H.eq(ns.Prices.Short(-123456), "-12g")
 	H.eq(ns.Prices.Short(250), "+2s")
 	H.eq(ns.Prices.Short(7), "+7c")

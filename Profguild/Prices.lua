@@ -55,6 +55,24 @@ function Prices.Get(itemID)
 	return nil
 end
 
+-- The auction house keeps this share of every sale (5 % on Classic).
+Prices.AH_CUT = 0.05
+
+-- What a sale of `price` copper brings in: an auction price minus the auction house cut, a
+-- vendor price as it is (a vendor takes no cut).
+function Prices.AfterCut(price, source)
+	if source == "vendor" then return price end
+	return math.floor(price * (1 - Prices.AH_CUT))
+end
+
+-- What a vendor asks for the item (seen at a merchant by Auctionator), or nil. Shown beside the
+-- auction price of a reagent; the cost of a craft counts the auction price first (Prices.Get).
+function Prices.VendorPrice(itemID)
+	if type(itemID) ~= "number" then return nil end
+	local api = auctionator()
+	if api then return call(api.GetVendorPriceByItemID, Prices.CALLER, itemID) end
+end
+
 -- Cost of one craft: total copper of the reagents that have a price, and how many have none.
 function Prices.Cost(reagents)
 	local total, missing = 0, 0
