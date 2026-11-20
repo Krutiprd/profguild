@@ -2,7 +2,9 @@
 -- Main window in three panels: professions on the left, recipes or members in the middle,
 -- details on the right (reagents with prices and who can craft the recipe, or the member's
 -- professions).
--- Flat dark panels with thin brass borders; only the game's own textures and fonts are used.
+-- The game's own look: the main window and the boxes over it are dialogs (dark background, gold
+-- dialog border), the panels inside have the tooltip border in gold, buttons are the game's red
+-- panel buttons. Only textures and fonts of the game are used. List rows stay flat.
 
 local _, ns = ...
 
@@ -86,15 +88,43 @@ local function showIf(region, cond)
 	if cond then region:Show() else region:Hide() end
 end
 
--- Flat background with a 1 px border. Falls back to a plain texture without backdrops.
+local BACKDROPS = {
+	flat = { bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 },
+	dialog = {
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border",
+		tile = true, tileSize = 32, edgeSize = 32,
+		insets = { left = 11, right = 12, top = 12, bottom = 11 },
+	},
+	inset = {
+		bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true, tileSize = 16, edgeSize = 14,
+		insets = { left = 3, right = 3, top = 3, bottom = 3 },
+	},
+}
+local GOLD_EDGE = { 1, 0.82, 0, 0.95 }         -- a focused or open inset
+local BRONZE_EDGE = { 0.75, 0.6, 0.35, 0.9 }   -- the other insets
+
+-- A frame's background and border in its style (frame._style: "flat", "dialog", "inset").
+-- Falls back to a plain texture without backdrops.
 local function paint(frame, bg, border)
 	if frame.SetBackdrop then
-		if not frame._backdrop then
-			frame:SetBackdrop({ bgFile = WHITE8, edgeFile = WHITE8, edgeSize = 1 })
-			frame._backdrop = true
+		local style = frame._style or "flat"
+		if frame._backdrop ~= style then
+			frame:SetBackdrop(BACKDROPS[style])
+			frame._backdrop = style
 		end
-		frame:SetBackdropColor(unpack(bg))
-		frame:SetBackdropBorderColor(unpack(border or C.line))
+		if style == "dialog" then
+			frame:SetBackdropColor(1, 1, 1, 1)
+			frame:SetBackdropBorderColor(1, 1, 1, 1)
+		elseif style == "inset" then
+			frame:SetBackdropColor(bg[1] * 0.6, bg[2] * 0.6, bg[3] * 0.6, 0.92)
+			frame:SetBackdropBorderColor(unpack(border == C.border and GOLD_EDGE or BRONZE_EDGE))
+		else
+			frame:SetBackdropColor(unpack(bg))
+			frame:SetBackdropBorderColor(unpack(border or C.line))
+		end
 	else
 		if not frame._bgTex then
 			frame._bgTex = frame:CreateTexture(nil, "BACKGROUND")
@@ -104,8 +134,10 @@ local function paint(frame, bg, border)
 	end
 end
 
-local function panel(parent, bg, border, kind)
+-- style: "dialog", "inset" (the default of frames) or "flat" (the default of buttons)
+local function panel(parent, bg, border, kind, style)
 	local f = CreateFrame(kind or "Frame", nil, parent, BACKDROP_TEMPLATE)
+	f._style = style or (kind == "Button" and "flat") or "inset"
 	paint(f, bg or C.panel, border or C.line)
 	return f
 end
@@ -126,16 +158,49 @@ local function hline(parent, x, y, width)
 	return t
 end
 
--- Flat button with centred text; active pills keep the selected colour and a brass border.
+-- The game's red panel button in three slices (the ends keep their shape at any width): up,
+-- pressed for an active tab or filter, grey when disabled; the game's highlight on hover.
+local BUTTON_TEX = {
+	up = "Interface\\Buttons\\UI-Panel-Button-Up",
+	down = "Interface\\Buttons\\UI-Panel-Button-Down",
+	disabled = "Interface\\Buttons\\UI-Panel-Button-Disabled",
+	highlight = "Interface\\Buttons\\UI-Panel-Button-Highlight",
+}
+local SLICES = { { 0, 0.09375 }, { 0.09375, 0.53125 }, { 0.53125, 0.625 } }
+local CAP = 12
+
+local function slices(b, layer, blend)
+	local parts = {}
+	for i, tc in ipairs(SLICES) do
+		local t = b:CreateTexture(nil, layer)
+		t:SetTexCoord(tc[1], tc[2], 0, 0.6875)
+		if blend then t:SetBlendMode(blend) end
+		parts[i] = t
+	end
+	parts[1]:SetPoint("TOPLEFT"); parts[1]:SetPoint("BOTTOMLEFT"); parts[1]:SetWidth(CAP)
+	parts[3]:SetPoint("TOPRIGHT"); parts[3]:SetPoint("BOTTOMRIGHT"); parts[3]:SetWidth(CAP)
+	parts[2]:SetPoint("TOPLEFT", parts[1], "TOPRIGHT"); parts[2]:SetPoint("BOTTOMRIGHT", parts[3], "BOTTOMLEFT")
+	return parts
+end
+
+local function setSlices(parts, path)
+	for _, t in ipairs(parts) do t:SetTexture(path) end
+end
+
 local function pill(parent, width, height)
-	local b = panel(parent, C.row, C.line, "Button")
+	local b = CreateFrame("Button", nil, parent)
 	b:SetSize(width, height)
-	b.text = label(b, "GameFontHighlightSmall", C.text)
-	b.text:SetPoint("CENTER")
+	b.face = slices(b, "BACKGROUND")
+	setSlices(b.face, BUTTON_TEX.up)
+	b.glow = slices(b, "HIGHLIGHT", "ADD")
+	setSlices(b.glow, BUTTON_TEX.highlight)
+	b.text = label(b, "GameFontNormalSmall", C.gold)
+	b.text:SetPoint("CENTER", 0, 1)
 	b.text:SetJustifyH("CENTER")
-	b.text:SetWidth(width - 8) -- a long text (a player's name) is cut, not drawn over the neighbour
-	b:SetScript("OnEnter", function(self) paint(self, C.hover, self.active and C.border or C.line) end)
-	b:SetScript("OnLeave", function(self) paint(self, self.active and C.selected or C.row, self.active and C.border or C.line) end)
+	b.text:SetWidth(width - 10) -- a long text (a player's name) is cut, not drawn over the neighbour
+	-- kept so that callers can HookScript tooltips onto them
+	b:SetScript("OnEnter", function() end)
+	b:SetScript("OnLeave", function() end)
 	return b
 end
 
@@ -143,8 +208,17 @@ local function setPill(b, text, active, disabled)
 	b.text:SetText(text)
 	b.active = active and true or false
 	b.disabled = disabled and true or false
-	b.text:SetTextColor(unpack(b.disabled and C.muted or C.text))
-	paint(b, b.active and C.selected or C.row, b.active and C.border or C.line)
+	setSlices(b.face, b.disabled and BUTTON_TEX.disabled or (b.active and BUTTON_TEX.down) or BUTTON_TEX.up)
+	for _, t in ipairs(b.glow) do
+		if b.disabled then t:Hide() else t:Show() end
+	end
+	if b.disabled then
+		b.text:SetTextColor(0.5, 0.5, 0.5)
+	elseif b.active then
+		b.text:SetTextColor(1, 1, 1)
+	else
+		b.text:SetTextColor(1, 0.82, 0)
+	end
 end
 
 ---------------------------------------------------------------------------
@@ -878,7 +952,7 @@ end
 
 function UI:Create()
 	if self.frame then return end
-	local f = panel(UIParent, C.bg, C.border)
+	local f = panel(UIParent, C.bg, C.border, nil, "dialog")
 	_G.ProfguildFrame = f
 	f:SetSize(WIDTH, HEIGHT)
 	f:SetPoint("CENTER", 0, 20)
@@ -895,11 +969,6 @@ function UI:Create()
 	self.frame = f
 
 	-- header
-	local accent = f:CreateTexture(nil, "OVERLAY")
-	accent:SetColorTexture(unpack(C.gold))
-	accent:SetHeight(2)
-	accent:SetPoint("TOPLEFT", 1, -1)
-	accent:SetPoint("TOPRIGHT", -1, -1)
 	local logo = f:CreateTexture(nil, "ARTWORK")
 	logo:SetSize(34, 34)
 	logo:SetPoint("TOPLEFT", 16, -16)
@@ -975,7 +1044,7 @@ function UI:Create()
 	end)
 	self.search, self.searchHint = search, hint
 
-	self.onlineButton = pill(mid, 74, 20)
+	self.onlineButton = pill(mid, 84, 20)
 	self.onlineButton:SetPoint("TOPLEFT", 12, -66)
 	self.onlineButton:SetScript("OnClick", function()
 		ns.db.settings.onlineOnly = not ns.db.settings.onlineOnly
@@ -983,7 +1052,7 @@ function UI:Create()
 		UI:Refresh()
 	end)
 	-- recipe filter: known by somebody, known by nobody, all (click switches to the next)
-	self.recipeButton = pill(mid, 140, 20)
+	self.recipeButton = pill(mid, 130, 20)
 	self.recipeButton:SetPoint("LEFT", self.onlineButton, "RIGHT", 4, 0)
 	self.recipeButton:SetScript("OnClick", function(self)
 		if self.disabled then return end
@@ -1261,7 +1330,7 @@ function UI:Create()
 
 	-- bug report: a box over the window for the player's text; what the window shows is
 	-- taken when it opens (Bugs.Context)
-	local bug = panel(f, C.bg, C.border)
+	local bug = panel(f, C.bg, C.border, nil, "dialog")
 	bug:SetFrameLevel((f:GetFrameLevel() or 1) + 60)
 	bug:SetSize(440, 270)
 	bug:SetPoint("CENTER", 0, 10)
@@ -1322,7 +1391,7 @@ function UI:Create()
 	self.bugDialog = bug
 
 	-- a new item request: count and a short note for the selected recipe
-	local rq = panel(f, C.bg, C.border)
+	local rq = panel(f, C.bg, C.border, nil, "dialog")
 	rq:SetFrameLevel((f:GetFrameLevel() or 1) + 60)
 	rq:SetSize(360, 190)
 	rq:SetPoint("CENTER", 0, 10)
@@ -2074,6 +2143,7 @@ function UI:Draw()
 	setPill(self.recipeButton, ns.T(RECIPE_FILTER_TEXT[recipeFilter] or "RECIPES_KNOWN"), recipeFilter ~= "known",
 		self.memberFilter ~= nil) -- a player filter lists that player's known recipes
 	showIf(self.recipeButton, not members and not requestsView)
+	showIf(self.onlineButton, not requestsView) -- requests are not filtered by who is online
 	setPill(self.syncButton, ns.T("BTN_SYNC"), false)
 	setPill(self.bugButton, ns.T("BUG_BUTTON"), false)
 
