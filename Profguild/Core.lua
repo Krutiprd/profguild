@@ -450,7 +450,7 @@ function ns.ReceiverInGuild()
 	return value
 end
 
-ns.INBOX_MAX = 100
+ns.INBOX_MAX = 150 -- at least Reports.MAX_MARKS: a report coming back is still recognised
 
 -- The receiver's inbox (account-wide, so every receiver character sees it).
 local function deliverReport(rec)
@@ -501,13 +501,15 @@ local reportsAdapter = {
 -- (a report saved earlier, shared now).
 function ns.OnBugReport(report, quiet)
 	if not ns.reports or type(report) ~= "table" or report.shared then return end
+	-- only into a guild with the author: otherwise it waits (CheckReports when one appears)
+	if not ns.IsReportReceiver() and not ns.ReceiverInGuild() then return end
 	local rec = ns.reports:Share(report)
 	if not rec then return end
 	report.shared = rec.id
 	if rec.st == "d" then
 		report.delivered = GetServerTime()
 		if not quiet then ns.Say("BUG_INBOX_OWN") end
-	elseif ns.ReceiverInGuild() and not quiet then
+	elseif not quiet then
 		ns.Say("BUG_SHARED")
 	end
 end
@@ -563,7 +565,7 @@ function ns.SetupGuild()
 	if ns.guildPrices then ns.guildPrices:Stop() end
 	if ns.requests then ns.requests:Stop() end
 	if ns.reports then ns.reports:Stop() end
-	receiverSeen.at = -1e9
+	receiverSeen.at, receiverSeen.value = -1e9, false
 	if not key then
 		ns.store, ns.sync, ns.guildDB, ns.guildPrices, ns.requests, ns.reports = nil, nil, nil, nil, nil, nil
 		ns.OnDataChanged()
@@ -608,12 +610,14 @@ function ns.SetupGuild()
 end
 
 function ns.OnRosterUpdate()
-	-- the author may be in a roster that was not read yet at login
+	-- the author may be in a roster that was not read yet at login (read again at most every 5 s)
 	local knew = receiverSeen.value
-	receiverSeen.at = -1e9
-	if not knew and ns.reports and ns.ReceiverInGuild() then
-		ns.reports:Announce()
-		ns.CheckReports()
+	if not knew and GetTime() - receiverSeen.at >= 5 then
+		receiverSeen.at = -1e9
+		if ns.reports and ns.ReceiverInGuild() then
+			ns.CheckReports()
+			ns.reports:AnnounceSoon()
+		end
 	end
 	if not ns.store then return end
 	local entries, complete, namesComplete = Scanner.ReadRoster()

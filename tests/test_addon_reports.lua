@@ -68,7 +68,8 @@ H.test("addon reports: without the author in the guild a report stays at home", 
 	ns.Bugs.Slash("the window is too wide")
 	local r = ns.Bugs.All()[1]
 	H.ok(r, "saved")
-	H.eq(r.shared, ME .. ":" .. r.t .. ":" .. r.n, "kept for later")
+	H.eq(r.shared, nil, "waits for a guild with the author")
+	H.eq(ns.reports:HeldCount(), 0, "not held in this guild")
 	H.eq(ns.reports.stats.sentU, before, "nothing sent")
 	H.eq(count(ns.T("BUG_SHARED")), 0)
 end)
@@ -176,6 +177,29 @@ H.test("addon reports: a guildmate's text cannot colour the receiver's chat", fu
 	rec.text = "click |Hitem:1|h[here]|h or |Kq1|k"
 	receive(ns, { t = "BU", pv = ns.Reports.PROTOCOL, s = ANA, q = { rec } })
 	local line = M.chat[#M.chat]
-	H.ok(not line:find("|c", 1, true) or line:find("^|cff33bbffProfguild|r"), "no colour from the guildmate")
+	local prefix = "|cff33bbffProfguild|r: "
+	H.eq(line:sub(1, #prefix), prefix)
+	local rest = line:sub(#prefix + 1):gsub("||", "")
+	H.ok(not rest:find("|", 1, true), "no working escape from the guildmate: " .. line)
 	H.ok(line:find("||Kq1||k", 1, true), "escapes shown as text: " .. line)
+end)
+
+H.test("addon reports: a report waits for a guild with the author, and goes when one appears", function()
+	local ns = login()
+	ns.Bugs.Slash("before the author joined")
+	local r = ns.Bugs.All()[1]
+	H.eq(r.shared, nil)
+	-- the author shows up in the roster
+	local roster = _G.GetGuildRosterInfo
+	_G.GetNumGuildMembers = function() return 3, 2 end
+	_G.GetGuildRosterInfo = function(i)
+		if i == 3 then return "Zlatan Whychuck", "Member", 3, 60, "Rogue", "Zone", "", "", true, 0, "ROGUE", 0, 0, false, false, 0, "Player-1-000000FE" end
+		return roster(i)
+	end
+	M.advance(6)
+	ns.OnRosterUpdate()
+	H.ok(r.shared, "shared now")
+	H.eq(ns.reports.stats.sentU, 1, "sent")
+	M.advance(10)
+	H.ok(ns.reports.stats.sentD >= 1, "a digest followed")
 end)

@@ -39,7 +39,7 @@ Reports.RECEIVERS = { -- the author's characters: name-realm, compared without c
 	"Fiona-Vajcak", "Bubli-Prd",
 }
 Reports.KEEP = 14 * 86400
-Reports.MAX_AHEAD = 120
+Reports.MAX_AHEAD = 10           -- server time on every client: a report is never from the future
 Reports.MAX_HELD = 60            -- held reports in the guild
 Reports.MAX_PER_REPORTER = 10    -- held reports of one reporter
 Reports.MAX_MARKS = 140          -- delivery marks (held + marks fit one digest)
@@ -120,7 +120,7 @@ local function clean(rec)
 		id = rec.id, by = rec.by, t = rec.t, st = "h",
 		who = line(rec.who, 60) or "?",
 		v = line(rec.v, 20),
-		text = type(rec.text) == "string" and cutText(rec.text, Reports.MAX_TEXT) or rec.text,
+		text = type(rec.text) == "string" and cutText(rec.text, Reports.MAX_TEXT):sub(1, 4 * Reports.MAX_TEXT) or rec.text,
 		ctx = lines(rec.ctx, Reports.MAX_LINES),
 		errors = errors,
 		log = lines(rec.log, Reports.MAX_LOG),
@@ -174,6 +174,7 @@ function Reports.New(adapter, saved)
 		answering = false,
 		lastAnswer = -1e9,
 		requests = {},       -- holder guid -> { ids = { id -> true }, token }
+		more = {},           -- holder guid -> { id -> true } wanted beyond MAX_ASK, asked after its answer
 		requestSeq = 0,
 		asked = {},
 		digestTimer = false,
@@ -245,11 +246,13 @@ local function newer(x, y)
 end
 
 -- Would a record of this kind be kept, with the limits as they are now? The same answer on every
--- client that holds the same records, so a report one client drops is not asked for again.
+-- client that holds the same records, so a report one client drops is not asked for again. Our
+-- own held reports do not count: we keep them whatever the guild holds (often the only copy).
 function ReportsMT:_WouldKeep(cand)
 	local total, mine, limitTotal = 0, 0, cand.st == "d" and Reports.MAX_MARKS or Reports.MAX_HELD
+	local me = self.a.myGuid()
 	for _, rec in pairs(self.list) do
-		if rec.st == cand.st and rec.id ~= cand.id and newer(rec, cand) then
+		if rec.st == cand.st and rec.id ~= cand.id and newer(rec, cand) and not (rec.st == "h" and rec.by == me) then
 			total = total + 1
 			if cand.st == "h" and rec.by == cand.by then mine = mine + 1 end
 		end
@@ -266,10 +269,16 @@ function ReportsMT:_Trim()
 	end
 	table.sort(held, newer)
 	table.sort(marks, newer)
-	local per, kept = {}, 0
+	local per, kept, me = {}, 0, self.a.myGuid()
 	for _, rec in ipairs(held) do
 		per[rec.by] = (per[rec.by] or 0) + 1
-		if per[rec.by] > Reports.MAX_PER_REPORTER or kept >= Reports.MAX_HELD then
+		if rec.by == me then
+			-- ours: kept until delivered or old (MAX_PER_REPORTER still holds for us)
+			if per[rec.by] > Reports.MAX_PER_REPORTER then
+				self.list[rec.id] = nil
+				changed(self, rec.id, "gone")
+			end
+		elseif per[rec.by] > Reports.MAX_PER_REPORTER or kept >= Reports.MAX_HELD then
 			self.list[rec.id] = nil
 			changed(self, rec.id, "gone")
 		else
@@ -515,9 +524,11 @@ function ReportsMT:_Request(holder, ids)
 		end
 		if #list == 0 then return end
 		table.sort(list)
-		-- the rest is asked for after the next digest, by us or a guildmate
+		-- the rest is asked for when this answer came (or after the next digest)
 		for i = #list, Reports.MAX_ASK + 1, -1 do
 			self.asked[list[i]] = nil
+			self.more[holder] = self.more[holder] or {}
+			self.more[holder][list[i]] = true
 			list[i] = nil
 		end
 		self.stats.sentR = self.stats.sentR + 1
@@ -537,6 +548,15 @@ function ReportsMT:OnMessage(msg)
 		for i = 1, math.min(#msg.q, Reports.MAX_PER_MESSAGE) do
 			if self:Merge(msg.q[i]) then stored = stored + 1 end
 		end
+		local more = self.more[msg.s]
+		if more then
+			self.more[msg.s] = nil
+			local still = {}
+			for id in pairs(more) do
+				if not self.list[id] then still[id] = true end
+			end
+			if next(still) then self:_Request(msg.s, still) end
+		end
 		return stored
 	elseif msg.t == "BD" then
 		if type(msg.x) ~= "table" or #msg.x > 3 * Reports.MAX_DIGEST or #msg.x % 3 ~= 0 then return end
@@ -553,9 +573,9 @@ function ReportsMT:OnMessage(msg)
 				if st == "d" then
 					if self:MarkDelivered(id, t, true) then marked[#marked + 1] = id end
 				elseif not held then
-					local cand = { id = id, by = by, t = t, st = "h" }
-					if self:_Valid({ id = id, by = by, t = t, st = "d" })
-						and (receiver or self:_WouldKeep(cand)) then
+					local mark = { id = id, by = by, t = t, st = "d" }
+					local cand = receiver and mark or { id = id, by = by, t = t, st = "h" }
+					if self:_Valid(mark) and self:_WouldKeep(cand) then
 						want[id] = true
 					end
 				end
@@ -614,7 +634,14 @@ function ReportsMT:Stop()
 	self.dead = true
 	self.sendQueue = {}
 	self.requests = {}
+	self.more = {}
 	self.answering = false
+end
+
+-- Our digest soon (a receiver just appeared in the roster): with the usual random delay, so the
+-- guild does not answer in the same second.
+function ReportsMT:AnnounceSoon()
+	scheduleDigest(self, true)
 end
 
 -- Name and realm folded for comparing: no case, no spaces or apostrophes.

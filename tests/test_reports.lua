@@ -330,3 +330,40 @@ H.test("reports: a receiver takes the held reports already saved", function()
 	H.eq(r:Get(rec.id).st, "d")
 	H.eq(r:TakeHeld(), 0, "once")
 end)
+
+H.test("reports: a text of junk bytes is cut to its byte limit", function()
+	local a = client(A)
+	local r = report(1, string.rep("a" .. string.rep("\128", 100), 1000))
+	local rec = a.r:Share(r)
+	H.ok(rec)
+	H.ok(#rec.text <= 4 * RP.MAX_TEXT, "bytes " .. #rec.text)
+end)
+
+H.test("reports: our own report is not pushed out by the guild's newer ones", function()
+	local x = client(C)
+	local mine = x.r:Share(report(1))
+	mine = x.r:Get(mine.id)
+	for i = 1, RP.MAX_HELD + 5 do
+		local guid = string.format("Player-1-%08X", 400 + i)
+		local r = report(1); r.t = CLOCK0 + 1 + (i % 5)
+		x.r:Merge(copy(client(guid).r:Share(r)))
+	end
+	H.ok(x.r:Get(mine.id), "ours is still there")
+	local others = x.r:HeldCount() - 1
+	H.eq(others, RP.MAX_HELD, "the guild's limit counts the others")
+end)
+
+H.test("reports: the rest of a holder's reports is asked for right after its answer", function()
+	local h, w = client(A), client(B)
+	for n = 1, 9 do
+		local r = report(n); r.t = CLOCK0 - 100 + n
+		h.r:Share(r)
+	end
+	h.sent = {}
+	w.r:Announce()
+	h.r:Announce()
+	for _ = 1, 8 do run({ h, w }, 10) end -- the holder answers every ANSWER_COOLDOWN
+	H.eq(w.r:HeldCount(), 9, "all nine")
+	H.eq(w.r.stats.sentD + h.r.stats.sentD, 2, "without another digest")
+	H.eq(w.r.stats.sentR, 2, "two requests: 6, then the other 3")
+end)
