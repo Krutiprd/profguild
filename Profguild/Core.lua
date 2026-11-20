@@ -452,7 +452,6 @@ end
 
 -- Reads the open profession window: own recipes, reagents and the recipe catalog.
 function ns.ScanNow()
-	ns.Log("scan: profession window event")
 	do
 		local skillLine, recipes, count, reagents, listInfo = Scanner.ScanOpenProfession()
 		if not skillLine then
@@ -1018,17 +1017,22 @@ function events.NEW_RECIPE_LEARNED(recipeID) onRecipeLearned(recipeID) end
 
 -- A profession trainer says which skill every recipe needs: kept as the skill the recipe is
 -- learnable from (ProfguildDB.recipeInfo[recipeID].m), matched to the catalog by name.
+local trainerNames, trainerRevision
 local function readTrainer()
 	if type(GetNumTrainerServices) ~= "function" or type(GetTrainerServiceSkillReq) ~= "function" then return end
+	if type(IsTradeskillTrainer) == "function" and not IsTradeskillTrainer() then return end -- a class trainer
 	local n = GetNumTrainerServices() or 0
 	if n == 0 or not ns.catalog then return end
-	local byName = {}
-	for _, list in pairs(ns.catalog:All()) do
-		for recipeID in pairs(list) do
-			local name = Scanner.RecipeName(recipeID)
-			if name then byName[name] = byName[name] or {}; table.insert(byName[name], recipeID) end
+	if trainerRevision ~= ns.catalog.revision then
+		trainerRevision, trainerNames = ns.catalog.revision, {}
+		for _, list in pairs(ns.catalog:All()) do
+			for recipeID in pairs(list) do
+				local name = Scanner.RecipeName(recipeID)
+				if name then trainerNames[name] = trainerNames[name] or {}; table.insert(trainerNames[name], recipeID) end
+			end
 		end
 	end
+	local byName = trainerNames
 	local found = 0
 	for i = 1, n do
 		local name, _, category = GetTrainerServiceInfo(i)

@@ -166,3 +166,45 @@ H.test("catalog: blocked sending asks later, a request seen first is not repeate
 	H.eq(c.k:Count(197), 450, "both got it")
 	H.eq(g.sent.KR, 1, "the second client did not ask again")
 end)
+
+H.test("catalog: only a holder with more answers, not twice in a row, and a refused list is not asked again", function()
+	local g = newGuild()
+	local big = g.add("BIG")
+	local small = g.add("SMALL")
+	local asker = g.add("ASK")
+	big.k:Add(197, profession(197))
+	local part = {}
+	for id, item in pairs(profession(197)) do if id <= 1100 then part[id] = item end end
+	small.k:Add(197, part)
+	asker.k:Add(197, part)
+	-- the asker holds as much as SMALL: only BIG answers
+	asker.k:Want(197, 450)
+	g.run(30)
+	H.eq(asker.k:Count(197), 450)
+	H.eq(small.k.stats.sentL, 0, "SMALL did not answer")
+	H.eq(big.k.stats.sentL, 3, "BIG sent its 450 recipes in 3 parts")
+	-- another request right after: BIG does not send the same list again within the cooldown
+	small.k.mine[197], small.k.asked[197], small.k.tried[197] = nil, nil, nil
+	small.k:Want(197, 450)
+	g.run(10)
+	H.eq(big.k.stats.sentL, 3, "not again within the cooldown")
+	H.ok(small.k:Count(197) < 450)
+
+	-- the game refuses some IDs: the digest count is never reached, and the same count is not
+	-- asked for again on every digest
+	local g2 = newGuild()
+	local holder = g2.add("H")
+	local picky = g2.add("P", {}, function(id, sl) if id % 2 == 0 then return gameVerify(id, sl) end end)
+	holder.k:Add(197, profession(197))
+	holder.k:Announce()
+	g2.run(30)
+	H.eq(picky.k:Count(197), 225, "half the IDs accepted")
+	local requests = g2.sent.KR
+	g2.run(Catalog.ASK_AGAIN + Catalog.REPLY_COOLDOWN + 1)
+	holder.k:Announce()
+	g2.run(30)
+	H.eq(g2.sent.KR, requests, "not asked again at the same count")
+	-- a failed request may be asked again at once
+	picky.k:OnSendFailed({ t = "KR", l = { 197 } })
+	H.eq(picky.k.tried[197], nil)
+end)

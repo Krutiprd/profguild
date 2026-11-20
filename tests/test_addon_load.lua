@@ -460,6 +460,8 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 		return "|cffffd200Vendor: |rBena|n|cffffd200Zone: |rThunder Bluff|T icon|t"
 	end
 	ProfguildDB.sources[3866] = nil
+	H.eq(ProfguildDB.sources[3866], nil, "an empty answer was not saved")
+	M.advance(61) -- asked again a minute after the empty answer
 	UI:Refresh()
 	UI:Refresh()
 	H.eq(asked, 1, "asked once")

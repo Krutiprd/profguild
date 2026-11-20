@@ -145,58 +145,74 @@ end
 
 -- Recipe items Auctionator has seen at the auction house, matched to the recipe catalog by
 -- name ("Pattern: Big Voodoo Robe" teaches "Big Voodoo Robe"). The item class tells recipes
--- apart without asking the server; the names are loaded through the item queue, and every
--- call matches the names that have arrived. Found items go to ProfguildDB.recipeItems.
+-- apart without asking the server. The auction database can hold tens of thousands of items,
+-- so StartRecipeIndex walks it a few hundred keys per frame, never inside a redraw. The names
+-- are loaded through the item queue; ResolveRecipeItems matches the ones that have arrived.
+-- Found items go to ProfguildDB.recipeItems.
 local RECIPE_CLASS = 9
 local SUBCLASS_SKILL = { [1] = 165, [2] = 197, [3] = 202, [4] = 164, [5] = 185, [6] = 171, [7] = 129, [8] = 333, [9] = 356 }
-local REINDEX = 300 -- seconds: newer scans add items to the auction database
-local pending, byName, indexedAt, indexedRevision = {}, {}, nil, nil
+Prices.REINDEX = 300      -- seconds before the auction database is walked again
+Prices.INDEX_STEP = 400   -- auction database keys per frame
+local pending, byName, indexedAt, indexedRevision, indexing = {}, {}, nil, nil, false
 
 local function norm(s)
 	return (s:lower():gsub("[^%w]", ""))
 end
 
-function Prices.IndexRecipeItems()
+local function auctionDB()
 	local adb = Auctionator and Auctionator.Database and Auctionator.Database.db
-	if type(adb) ~= "table" or not ns.catalog or not ns.db then return 0 end
+	if type(adb) ~= "table" or not ns.catalog or not ns.db then return nil end
 	ns.db.recipeItems = ns.db.recipeItems or {}
-	local now = GetTime()
-	if indexedRevision ~= ns.catalog.revision or not indexedAt or now - indexedAt > REINDEX then
-		indexedRevision, indexedAt = ns.catalog.revision, now
-		byName = {}
-		for skillLine, list in pairs(ns.catalog:All()) do
-			local names = {}
-			for recipeID in pairs(list) do
-				local name = ns.Scanner.RecipeName(recipeID)
-				if name then
-					local key = norm(name)
-					names[key] = names[key] or {}
-					table.insert(names[key], recipeID)
-				end
-			end
-			byName[skillLine] = names
-		end
-		pending = {}
-		local getInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
-		local known = {}
-		for _, itemID in pairs(ns.db.recipeItems) do known[itemID] = true end
-		for key in pairs(adb) do
-			local itemID = tonumber(key)
-			if itemID and not known[itemID] and type(getInstant) == "function" then
-				local ok, id, _, _, _, _, classID, subclassID = pcall(getInstant, itemID)
-				if ok and id and classID == RECIPE_CLASS and SUBCLASS_SKILL[subclassID] and byName[SUBCLASS_SKILL[subclassID]] then
-					pending[itemID] = SUBCLASS_SKILL[subclassID]
-				end
+	return adb
+end
+
+local function buildNames()
+	byName = {}
+	for skillLine, list in pairs(ns.catalog:All()) do
+		local names = {}
+		for recipeID in pairs(list) do
+			local name = ns.Scanner.RecipeName(recipeID)
+			if name then
+				local key = norm(name)
+				names[key] = names[key] or {}
+				table.insert(names[key], recipeID)
 			end
 		end
+		byName[skillLine] = names
 	end
+end
+
+local getInstant = function(...)
+	local fn = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+	if type(fn) ~= "function" then return false end
+	return pcall(fn, ...)
+end
+
+-- One auction database key: a recipe item of a profession in the catalog becomes pending.
+local function consider(key, known)
+	local itemID = tonumber(key)
+	if not itemID or known[itemID] then return end
+	local ok, id, _, _, _, _, classID, subclassID = getInstant(itemID)
+	local skillLine = ok and id and classID == RECIPE_CLASS and SUBCLASS_SKILL[subclassID]
+	if skillLine and byName[skillLine] then pending[itemID] = skillLine end
+end
+
+local function knownItems()
+	local known = {}
+	for _, itemID in pairs(ns.db.recipeItems) do known[itemID] = true end
+	return known
+end
+
+-- Matches the pending recipe items whose names have arrived. Returns the number of new matches.
+function Prices.ResolveRecipeItems()
+	if not ns.db or not ns.db.recipeItems then return 0 end
 	local found = 0
 	for itemID, skillLine in pairs(pending) do
 		local name = ns.Scanner.ItemName(itemID) -- not loaded yet: queued, matched on a later call
 		if name then
 			pending[itemID] = nil
 			local base = name:match("^[^:]+:%s*(.+)$")
-			for _, recipeID in ipairs(base and byName[skillLine][norm(base)] or {}) do
+			for _, recipeID in ipairs(base and byName[skillLine] and byName[skillLine][norm(base)] or {}) do
 				if ns.db.recipeItems[recipeID] ~= itemID then
 					ns.db.recipeItems[recipeID] = itemID
 					found = found + 1
@@ -204,7 +220,56 @@ function Prices.IndexRecipeItems()
 			end
 		end
 	end
+	if found > 0 then
+		ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+		if ns.OnDataChanged then ns.OnDataChanged() end
+	end
 	return found
+end
+
+-- Walks the whole auction database at once (tests, small databases). Returns new matches.
+function Prices.IndexRecipeItems()
+	local adb = auctionDB()
+	if not adb then return 0 end
+	indexedRevision, indexedAt = ns.catalog.revision, GetTime()
+	buildNames()
+	pending = {}
+	local known = knownItems()
+	for key in pairs(adb) do consider(key, known) end
+	return Prices.ResolveRecipeItems()
+end
+
+-- Walks the auction database in steps when the catalog changed, the last walk is older than
+-- REINDEX seconds, or force (the auction house just closed: a scan may have added items).
+function Prices.StartRecipeIndex(force)
+	local adb = auctionDB()
+	if not adb or indexing then return false end
+	local now = GetTime()
+	if not force and indexedRevision == ns.catalog.revision and indexedAt and now - indexedAt < Prices.REINDEX then
+		return false
+	end
+	indexing = true
+	indexedRevision, indexedAt = ns.catalog.revision, now
+	buildNames()
+	local keys = {}
+	for key in pairs(adb) do keys[#keys + 1] = key end
+	local known, newPending, i = knownItems(), {}, 1
+	local function step()
+		local last = math.min(#keys, i + Prices.INDEX_STEP - 1)
+		local saved = pending
+		pending = newPending
+		for k = i, last do consider(keys[k], known) end
+		newPending, pending = pending, saved
+		i = last + 1
+		if i <= #keys then
+			C_Timer.After(0, step)
+		else
+			pending, indexing = newPending, false
+			Prices.ResolveRecipeItems()
+		end
+	end
+	C_Timer.After(0, step)
+	return true
 end
 
 -- "12g 3s 40c" with the usual coin colours.

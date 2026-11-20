@@ -116,12 +116,14 @@ function Scanner.WantItem(itemID, urgent)
 	end
 end
 
-function Scanner.ItemName(itemID)
+-- noRequest: only what the client has; used while building lists of thousands of recipes,
+-- where only the rows on screen ask the server (through the item queue).
+function Scanner.ItemName(itemID, noRequest)
 	if not itemID or itemID == 0 then return nil end
 	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 	local ok, name = call(getInfo, itemID)
 	if ok and name then return name end
-	Scanner.WantItem(itemID)
+	if not noRequest then Scanner.WantItem(itemID) end
 	return nil
 end
 
@@ -152,7 +154,7 @@ end
 -- server through the item queue, and GET_ITEM_INFO_RECEIVED then rebuilds the list.
 local itemLevelCache = {}
 
-function Scanner.ItemLevel(itemID)
+function Scanner.ItemLevel(itemID, noRequest)
 	if not itemID or itemID == 0 then return nil end
 	local cached = itemLevelCache[itemID]
 	if cached then return cached.ilvl, cached.req end
@@ -163,7 +165,7 @@ function Scanner.ItemLevel(itemID)
 		itemLevelCache[itemID] = cached
 		return cached.ilvl, cached.req
 	end
-	Scanner.WantItem(itemID)
+	if not noRequest then Scanner.WantItem(itemID) end
 	return nil
 end
 
@@ -333,6 +335,24 @@ function Scanner.RecipeItemSkill(itemID)
 		if skill then return tonumber(skill) end
 	end
 	return nil
+end
+
+-- How many items one craft makes on average (smelting, ammunition and explosives make several).
+local outputCount = {}
+function Scanner.RecipeOutputCount(recipeID)
+	if outputCount[recipeID] then return outputCount[recipeID] end
+	local n = 1
+	if C_TradeSkillUI then
+		local ok, schematic = call(C_TradeSkillUI.GetRecipeSchematic, recipeID, false)
+		if ok and type(schematic) == "table" then
+			local lo, hi = schematic.quantityMin, schematic.quantityMax
+			if type(lo) == "number" and lo > 0 then
+				n = (type(hi) == "number" and hi >= lo) and (lo + hi) / 2 or lo
+			end
+		end
+	end
+	outputCount[recipeID] = n
+	return n
 end
 
 -- Whether the game knows a recipe (any recipe, learned or not), and the item it makes (0 when

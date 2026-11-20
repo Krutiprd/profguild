@@ -61,7 +61,11 @@ function Comm.Send(msg)
 	Comm:SendCommMessage(Comm.PREFIX, text, "GUILD", nil, "BULK", function(_, _, _, didSend)
 		if didSend == false and not failed then
 			failed = true
-			if ns.sync then ns.sync:OnSendFailed(msg) end
+			if msg.t == "KD" or msg.t == "KR" or msg.t == "KL" then
+				if ns.catalog then ns.catalog:OnSendFailed(msg) end
+			elseif ns.sync then
+				ns.sync:OnSendFailed(msg)
+			end
 		end
 	end)
 	ns.Debug("sent %s (%d bytes)", tostring(msg.t), #text)

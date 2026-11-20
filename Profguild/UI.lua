@@ -69,7 +69,8 @@ local PROF_ICONS = {
 }
 local ALL_ICON = "Interface\\Icons\\INV_Misc_Book_11"
 
-UI.view = "recipes"     -- or "members"
+UI.view = "recipes"     -- or "leveling", "members"
+UI.ITEM_REBUILD = 2     -- seconds: the list is rebuilt at most this often while items load
 UI.memberFilter = nil   -- guid whose recipes are shown
 UI.category = nil       -- skill line shown, nil = all professions
 UI.selected = nil       -- data of the selected list row
@@ -155,7 +156,7 @@ local function recipeName(recipeID, itemID)
 	local name = recipeNameCache[recipeID]
 	if name then return name end
 	name = ns.Scanner.RecipeName(recipeID)
-	if not name and itemID and itemID > 0 then name = ns.Scanner.ItemName(itemID) end
+	if not name and itemID and itemID > 0 then name = ns.Scanner.ItemName(itemID, true) end
 	if name then recipeNameCache[recipeID] = name end
 	return name or ("#" .. recipeID)
 end
@@ -284,11 +285,14 @@ end
 -- short price text for the list ("" when the item is not on the auction house), or nil.
 local SOURCE_KEYS = { d = "SRC_DROP", v = "SRC_VENDOR", q = "SRC_QUEST", c = "SRC_CRAFT" }
 -- The game's own text is asked for only when a recipe is opened (ask = true), once, and kept in
--- ProfguildDB.sources; the list uses what is already known.
+-- ProfguildDB.sources; the list uses what is already known. "No text" is not saved: the game is
+-- asked again a minute later (it may not have had the data yet).
+local noSource = {}
 local function recipeItemText(recipeID, ask)
 	local sources = ns.db.sources
-	if ask and sources and sources[recipeID] == nil then
-		sources[recipeID] = ns.Scanner.RecipeSource(recipeID) or false
+	if ask and sources and sources[recipeID] == nil and GetTime() - (noSource[recipeID] or -1e9) >= 60 then
+		local text = ns.Scanner.RecipeSource(recipeID)
+		if text then sources[recipeID] = text else noSource[recipeID] = GetTime() end
 	end
 	local gameText = sources and sources[recipeID] or nil
 	local itemID, src = ns.Prices.RecipeItem(recipeID)
@@ -329,7 +333,7 @@ local function craftProfit(d)
 	if not value then return nil end
 	local total, missing = ns.Prices.Cost(reagents)
 	if missing > 0 then return nil end
-	return value - total
+	return value * ns.Scanner.RecipeOutputCount(d.recipeID) - total
 end
 UI.CraftProfit = craftProfit
 
@@ -341,12 +345,15 @@ local function recipeSkill(recipeID, ask)
 	local info = all[recipeID]
 	if ask then
 		info = info or {}
+		local g, m = info.g, info.m
 		if info.g == nil then info.g = ns.Scanner.RecipeTrivial(recipeID) end
 		if info.m == nil then
 			local itemID = ns.Prices.RecipeItem(recipeID)
 			if itemID then info.m = ns.Scanner.RecipeItemSkill(itemID) end
 		end
 		if next(info) then all[recipeID] = info end
+		-- a new number changes the order of the Leveling list (rebuilt on the next refresh)
+		if info.g ~= g or info.m ~= m then ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1 end
 	end
 	return info
 end
@@ -483,10 +490,10 @@ function UI:BuildRecipeRows(query, category)
 				if c.name:lower():find(query, 1, true) then hit = true break end
 			end
 		end
-		if not hit then hit = matches(query, ns.Scanner.ItemName(itemID)) end
+		if not hit then hit = matches(query, ns.Scanner.ItemName(itemID, true)) end
 		if not hit then return end
 		local groupRank, group, slotRank = recipeGroup(itemID)
-		local ilvl, req = ns.Scanner.ItemLevel(itemID)
+		local ilvl, req = ns.Scanner.ItemLevel(itemID, true)
 		rows[#rows + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = itemID,
 			skillLine = skillLine, name = name, prof = prof, crafters = crafters, nobody = nobody,
 			groupRank = groupRank, group = group, slotRank = slotRank, ilvl = ilvl or -1, req = req or -1 }
@@ -596,8 +603,9 @@ end
 -- A tooltip of an item the client has not loaded says "Retrieving item information" and does
 -- not update by itself: the shown tooltip is drawn again when the item arrives.
 local tooltipShown -- { owner =, draw = function } while one of our tooltips is shown
-local function showTooltip(owner, draw)
-	tooltipShown = { owner = owner, draw = draw }
+-- items: the item IDs the tooltip shows; it is drawn again only when one of them arrives
+local function showTooltip(owner, draw, items)
+	tooltipShown = { owner = owner, draw = draw, items = items }
 	draw()
 end
 local function hideTooltip()
@@ -606,7 +614,7 @@ local function hideTooltip()
 end
 function UI:OnItemInfo(itemID)
 	local t = tooltipShown
-	if t and GameTooltip:IsShown() and GameTooltip:GetOwner() == t.owner then t.draw() end
+	if t and GameTooltip:IsShown() and GameTooltip:GetOwner() == t.owner and (not t.items or t.items[itemID]) then t.draw() end
 end
 
 local function recipeTooltip(owner, d)
@@ -668,7 +676,7 @@ local function createListRow(parent, index)
 		paint(self, C.hover, C.border)
 		if self.data and self.data.kind == "recipe" then
 			local d = self.data
-			showTooltip(self, function() recipeTooltip(self, d) end)
+			showTooltip(self, function() recipeTooltip(self, d) end, { [d.itemID or 0] = true })
 		end
 	end)
 	row:SetScript("OnLeave", function(self)
@@ -756,7 +764,7 @@ local function createReagentRow(parent, index)
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			pcall(GameTooltip.SetItemByID, GameTooltip, d.itemID)
 			GameTooltip:Show()
-		end)
+		end, { [d.itemID] = true })
 	end)
 	row:SetScript("OnLeave", function(self)
 		self.bg:SetColorTexture(unpack(C.clear))
@@ -890,7 +898,7 @@ function UI:Create()
 	end)
 	self.search, self.searchHint = search, hint
 
-	self.onlineButton = pill(mid, 78, 20)
+	self.onlineButton = pill(mid, 74, 20)
 	self.onlineButton:SetPoint("TOPLEFT", 12, -66)
 	self.onlineButton:SetScript("OnClick", function()
 		ns.db.settings.onlineOnly = not ns.db.settings.onlineOnly
@@ -898,7 +906,7 @@ function UI:Create()
 		UI:Refresh()
 	end)
 	-- recipe filter: known by somebody, known by nobody, all (click switches to the next)
-	self.recipeButton = pill(mid, 128, 20)
+	self.recipeButton = pill(mid, 140, 20)
 	self.recipeButton:SetPoint("LEFT", self.onlineButton, "RIGHT", 4, 0)
 	self.recipeButton:SetScript("OnClick", function(self)
 		if self.disabled then return end
@@ -914,7 +922,7 @@ function UI:Create()
 	end)
 	self.recipeButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
 	-- player filter: a button that opens a menu of everyone who has recipes
-	self.playerButton = pill(mid, 92, 20)
+	self.playerButton = pill(mid, 84, 20)
 	self.playerButton:SetPoint("TOPRIGHT", -12, -66)
 	self.playerButton:SetScript("OnClick", function()
 		if UI.playerMenu:IsShown() then
@@ -1041,7 +1049,7 @@ function UI:Create()
 	hover:EnableMouse(true)
 	hover:SetScript("OnEnter", function(self)
 		local s = UI.selected
-		if s and s.kind == "recipe" then showTooltip(self, function() recipeTooltip(self, s) end) end
+		if s and s.kind == "recipe" then showTooltip(self, function() recipeTooltip(self, s) end, { [s.itemID or 0] = true }) end
 	end)
 	hover:SetScript("OnLeave", hideTooltip)
 	hover:SetScript("OnMouseUp", function()
@@ -1160,7 +1168,10 @@ function UI:Create()
 	local saved = ns.db.settings.category
 	self.category = type(saved) == "number" and saved or nil
 
-	f:SetScript("OnShow", function() UI:Refresh() end)
+	f:SetScript("OnShow", function()
+		ns.Prices.StartRecipeIndex()
+		UI:Refresh()
+	end)
 	f:SetScript("OnHide", function()
 		search:ClearFocus()
 		menu:Hide()
@@ -1170,14 +1181,25 @@ function UI:Create()
 	-- the refresh button is shown only while the auction house is open
 	pcall(events.RegisterEvent, events, "AUCTION_HOUSE_SHOW")
 	pcall(events.RegisterEvent, events, "AUCTION_HOUSE_CLOSED")
+	-- Items arrive by the dozen while the queue loads: the list is rebuilt (and the recipe items
+	-- of the auction house matched) at most once per ITEM_REBUILD seconds, not for every item.
+	local rebuildPending = false
 	events:SetScript("OnEvent", function(_, event, itemID)
 		if event ~= "GET_ITEM_INFO_RECEIVED" then
+			-- a scan may have added recipe items to the auction database
+			if event == "AUCTION_HOUSE_CLOSED" then ns.Prices.StartRecipeIndex(true) end
 			if f:IsShown() then UI:ScheduleRefresh(0.3) end
 			return
 		end
 		UI:OnItemInfo(itemID)
-		UI.nameEpoch = (UI.nameEpoch or 0) + 1 -- item names may have arrived: rebuild the list
-		if f:IsShown() then UI:ScheduleRefresh(0.5) end
+		if rebuildPending then return end
+		rebuildPending = true
+		C_Timer.After(UI.ITEM_REBUILD, function()
+			rebuildPending = false
+			ns.Prices.ResolveRecipeItems()
+			UI.nameEpoch = (UI.nameEpoch or 0) + 1 -- item names arrived: rebuild the list
+			if f:IsShown() then UI:ScheduleRefresh(0.1) end
+		end)
 	end)
 end
 
@@ -1506,7 +1528,7 @@ function UI:DrawReagents(s)
 		local total, missing = ns.Prices.Cost(reagents)
 		d.costValue:SetText(ns.Prices.Format(total) .. (missing > 0 and (HEX_MUTED .. " " .. ns.T("COST_MISSING", missing) .. "|r") or ""))
 		if value and missing == 0 then
-			local profit = value - total
+			local profit = value * ns.Scanner.RecipeOutputCount(s.recipeID) - total
 			d.profitValue:SetText((profit < 0 and (HEX_LOSS .. "-|r") or "") .. ns.Prices.Format(math.abs(profit)))
 		else
 			d.profitValue:SetText("-")
@@ -1621,10 +1643,6 @@ function UI:DrawDetail()
 end
 
 function UI:Draw()
-	-- recipe items from the auction house database: a new match redraws the list
-	if ns.Prices.IndexRecipeItems() > 0 then
-		ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
-	end
 	local query = (self.search:GetText() or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 	local members = self.view == "members"
 	local leveling = self.view == "leveling"

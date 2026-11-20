@@ -1,6 +1,8 @@
 """Builds Profguild/Data.lua: for every recipe the item that teaches it and where that item comes from.
 
-    python -I tools/recipe_data.py <path to SavedVariables/Profguild.lua> [more Profguild.lua files]
+    python -I tools/recipe_data.py [--recheck] <path to SavedVariables/Profguild.lua> [more files]
+
+--recheck also looks up again the recipes Data.lua lists without a recipe item.
 
 Recipe IDs come from the recipe catalog and from every guild member's record in the saved
 files. For each recipe the spell name is read from Wowhead's tooltip API (WoW Forever is
@@ -20,15 +22,21 @@ PACE = 2.0  # seconds between two requests; faster runs get the IP blocked by Wo
 PREFIX = r'^(Recipe|Formula|Pattern|Plans|Schematic|Manual|Design|Technique)\s*:'
 
 cache = json.load(open(CACHE, encoding='utf-8')) if os.path.exists(CACHE) else {}
+RECHECK = False
 
 
 class Blocked(Exception):
     """Wowhead refuses requests (403/429): stop at once, keep what is done, try again later."""
 
 
+class Transient(Exception):
+    """No usable answer this time (5xx, timeout, not JSON): not cached, asked again next run."""
+
+
 def get(url):
+    """JSON answer of a URL. Only real answers are cached: 200 with JSON, and 404 (unknown id)."""
     if url in cache:
-        return cache[url]
+        return json.loads(cache[url])
     time.sleep(PACE)
     req = urllib.request.Request(url, headers={'User-Agent': UA})
     try:
@@ -37,9 +45,17 @@ def get(url):
     except urllib.error.HTTPError as e:
         if e.code in (403, 429):
             raise Blocked('HTTP %d' % e.code)
-        body = json.dumps({'error': 'HTTP %d' % e.code})  # 404: unknown id, a real answer
+        if e.code != 404:
+            raise Transient('HTTP %d' % e.code)
+        body = json.dumps({'error': 'HTTP 404'})
+    except (urllib.error.URLError, OSError) as e:  # timeouts, refused connections
+        raise Transient(str(e))
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        raise Transient('not JSON')  # e.g. a firewall challenge page
     cache[url] = body
-    return body
+    return answer
 
 
 def block(text, start):
@@ -88,14 +104,15 @@ def norm(t):
 
 
 def lookup(recipe_id):
-    tip = json.loads(get('https://nether.wowhead.com/tooltip/spell/%d?dataEnv=16' % recipe_id))
+    tip = get('https://nether.wowhead.com/tooltip/spell/%d?dataEnv=16' % recipe_id)
     name = tip.get('name')
     if not name:
         return None
     url = 'https://www.wowhead.com/forever/search/suggestions-template?q=' + urllib.parse.quote(name)
-    answer = json.loads(get(url))
+    answer = get(url)
     if 'results' not in answer:
-        return None  # no usable answer: not written, looked up again next time
+        cache.pop(url, None)  # no usable answer: not kept, looked up again next time
+        return None
     for r in answer['results']:
         if r.get('type') == 3 and re.match(PREFIX, r.get('name', '')) and norm(r['name'].split(':', 1)[1]) == norm(name):
             return r['id'], source_code(r.get('pinDescription', ''))
@@ -136,13 +153,11 @@ def main(paths):
     for p in paths:
         ids |= recipe_ids(p)
     data = read_data()
-    # "no recipe item" written by an older run from a refused request: look those up again
-    for rid in [r for r, v in data.items() if v is False]:
-        tip = cache.get('https://nether.wowhead.com/tooltip/spell/%d?dataEnv=16' % rid)
-        name = tip and json.loads(tip).get('name')
-        if not name or ('https://www.wowhead.com/forever/search/suggestions-template?q=' + urllib.parse.quote(name)) not in cache:
-            del data[rid]
+    # new recipes first; "no recipe item" entries are checked again only with --recheck, and
+    # keep their value until a lookup gives a real answer
     todo = sorted(i for i in ids if i not in data)
+    if RECHECK:
+        todo += sorted(r for r, v in data.items() if v is False)
     print('recipes %d, already in Data.lua %d, to look up %d' % (len(ids), len(ids) - len(todo), len(todo)))
     for n, rid in enumerate(todo, 1):
         try:
@@ -150,6 +165,9 @@ def main(paths):
         except Blocked as e:
             print('Wowhead refused a request (%s) after %d of %d. Stopped; run again later.' % (e, n - 1, len(todo)))
             break
+        except Transient as e:
+            print('  recipe %d: no answer (%s), skipped' % (rid, e))
+            continue
         if found is not None:
             data[rid] = found
         if n % 25 == 0:
@@ -162,6 +180,8 @@ def main(paths):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
+    args = [a for a in sys.argv[1:] if a != '--recheck']
+    RECHECK = '--recheck' in sys.argv[1:]
+    if not args:
         sys.exit(__doc__)
-    main(sys.argv[1:])
+    main(args)
