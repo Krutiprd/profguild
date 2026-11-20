@@ -97,7 +97,9 @@ function M.install()
 	_G.tinsert = table.insert
 	_G.unpack = unpack
 	_G.SlashCmdList = {}
-	_G.geterrorhandler = function() return function(e) error(e) end end
+	M.errorHandler = function(e) error(e) end
+	_G.geterrorhandler = function() return M.errorHandler end
+	_G.seterrorhandler = function(fn) M.errorHandler = fn end
 	_G.securecallfunction = function(fn, ...) return fn(...) end
 	_G.hooksecurefunc = function() end
 	_G.issecretvalue = function() return false end

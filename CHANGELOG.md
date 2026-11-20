@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2 – 2026-11-20
+
+- Bug reports: "Report a bug" in the footer (or `/pg bug`) opens a box for the player's text.
+  The report keeps what the window showed when the box opened (view, profession, search,
+  filters, the selected recipe with its reagent prices, cost and profit), the price source,
+  the version, the last Profguild Lua errors and the last log lines. `/pg bug <text>` saves a
+  short note directly, `/pg bug list` prints the newest, `/pg bug clear confirm` deletes them. Reports
+  are kept in SavedVariables (`bugs`, the newest 30) and written on /reload or logout.
+- Lua errors of Profguild are remembered (`errors`, 20 distinct, counted): the ones Profguild
+  catches itself (events, timers, drawing the window) and the ones that reach the game's error
+  handler or BugSack, which still see those as before.
+
 ## 0.2.1 – 2026-11-20
 
 - Profit of a craft subtracts the 5 % auction house cut from the sale (a vendor price takes

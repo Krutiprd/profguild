@@ -1170,12 +1170,77 @@ function UI:Create()
 	foot:SetPoint("BOTTOMRIGHT", -12, 10)
 	self.status = label(foot, "GameFontHighlightSmall", C.muted)
 	self.status:SetPoint("LEFT", 10, 0)
-	self.status:SetWidth(WIDTH - 180)
+	self.status:SetWidth(WIDTH - 310)
 	self.syncButton = pill(foot, 120, 22)
 	self.syncButton:SetPoint("RIGHT", -4, 0)
 	self.syncButton:SetScript("OnClick", function()
 		ns.SyncNow()
 	end)
+	self.bugButton = pill(foot, 120, 22)
+	self.bugButton:SetPoint("RIGHT", self.syncButton, "LEFT", -6, 0)
+	self.bugButton:SetScript("OnClick", function() UI:OpenBugReport() end)
+
+	-- bug report: a box over the window for the player's text; what the window shows is
+	-- taken when it opens (Bugs.Context)
+	local bug = panel(f, C.bg, C.border)
+	bug:SetFrameLevel((f:GetFrameLevel() or 1) + 60)
+	bug:SetSize(440, 270)
+	bug:SetPoint("CENTER", 0, 10)
+	bug:EnableMouse(true)
+	-- the wheel over the box must not scroll the list under it
+	bug:EnableMouseWheel(true)
+	bug:SetScript("OnMouseWheel", function() end)
+	bug:Hide()
+	bug.title = label(bug, "GameFontNormal", C.gold)
+	bug.title:SetPoint("TOPLEFT", 14, -12)
+	bug.hint = label(bug, "GameFontHighlightSmall", C.muted)
+	bug.hint:SetPoint("TOPLEFT", 14, -32)
+	bug.hint:SetWidth(412)
+	bug.hint:SetWordWrap(true)
+	local textBox = panel(bug, C.panel, C.line)
+	textBox:SetSize(412, 112)
+	-- under the hint, however many lines it wraps to
+	textBox:SetPoint("TOPLEFT", bug.hint, "BOTTOMLEFT", 0, -8)
+	textBox:EnableMouse(true)
+	local scroll = CreateFrame("ScrollFrame", nil, textBox, "UIPanelScrollFrameTemplate")
+	scroll:SetPoint("TOPLEFT", 6, -6)
+	scroll:SetPoint("BOTTOMRIGHT", -26, 6)
+	local edit = CreateFrame("EditBox", nil, scroll)
+	edit:SetMultiLine(true)
+	edit:SetFontObject(ChatFontNormal or GameFontHighlightSmall)
+	edit:SetWidth(378)
+	edit:SetAutoFocus(false)
+	edit:EnableMouse(true)
+	edit:SetMaxLetters(ns.Bugs.MAX_TEXT)
+	scroll:SetScrollChild(edit)
+	textBox:SetScript("OnMouseDown", function() edit:SetFocus() end)
+	if ScrollingEdit_OnCursorChanged and ScrollingEdit_OnUpdate then
+		edit:SetScript("OnCursorChanged", ScrollingEdit_OnCursorChanged)
+		edit:SetScript("OnUpdate", function(self, elapsed) ScrollingEdit_OnUpdate(self, elapsed, scroll) end)
+	end
+	-- Esc only leaves the text box: a habitual Esc must not throw away what was typed
+	edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+	edit:SetScript("OnTextChanged", function(self)
+		local text = self:GetText() or ""
+		bug.count:SetText(string.format("%d / %d", ns.Bugs.Length(text), ns.Bugs.MAX_TEXT))
+		setPill(bug.saveButton, ns.T("BUG_SAVE"), false, not text:find("%S"))
+	end)
+	bug.edit = edit
+	bug.count = label(bug, "GameFontHighlightSmall", C.muted)
+	bug.count:SetPoint("TOPRIGHT", textBox, "BOTTOMRIGHT", 0, -6)
+	bug.count:SetJustifyH("RIGHT")
+	bug.errors = label(bug, "GameFontHighlightSmall", C.muted)
+	bug.errors:SetPoint("TOPLEFT", textBox, "BOTTOMLEFT", 0, -6)
+	bug.saveButton = pill(bug, 120, 24)
+	bug.saveButton:SetPoint("BOTTOMRIGHT", -14, 12)
+	bug.saveButton:SetScript("OnClick", function(self)
+		if self.disabled then return end
+		UI:SaveBugReport()
+	end)
+	bug.cancelButton = pill(bug, 120, 24)
+	bug.cancelButton:SetPoint("RIGHT", bug.saveButton, "LEFT", -6, 0)
+	bug.cancelButton:SetScript("OnClick", function() UI:CloseBugReport(true) end)
+	self.bugDialog = bug
 
 	local saved = ns.db.settings.category
 	self.category = type(saved) == "number" and saved or nil
@@ -1187,6 +1252,7 @@ function UI:Create()
 	f:SetScript("OnHide", function()
 		search:ClearFocus()
 		menu:Hide()
+		UI:CloseBugReport() -- the typed text stays for the next time
 	end)
 	local events = CreateFrame("Frame", nil, f)
 	events:RegisterEvent("GET_ITEM_INFO_RECEIVED")
@@ -1226,6 +1292,89 @@ end
 function UI:Toggle()
 	self:Create()
 	if self.frame:IsShown() then self.frame:Hide() else self.frame:Show() end
+end
+
+-- Texts of the bug report box (also after a change of language).
+function UI:DrawBugDialog()
+	local bug = self.bugDialog
+	if not bug then return end
+	bug.title:SetText(ns.T("BUG_TITLE"))
+	bug.hint:SetText(ns.T("BUG_HINT"))
+	bug.errors:SetText(ns.T("BUG_ERRORS", ns.Bugs.ErrorCount()))
+	setPill(bug.cancelButton, ns.T("BUG_CANCEL"), false, false)
+	local text = bug.edit:GetText() or ""
+	bug.count:SetText(string.format("%d / %d", ns.Bugs.Length(text), ns.Bugs.MAX_TEXT))
+	setPill(bug.saveButton, ns.T("BUG_SAVE"), false, not text:find("%S"))
+end
+
+-- Opens the bug report box over the window and takes what the window shows right now. A text
+-- typed before and not saved (the window was closed) is still there.
+function UI:OpenBugReport()
+	self:Create()
+	if not self.frame:IsShown() then self.frame:Show() end
+	if self.playerMenu then self.playerMenu:Hide() end
+	local bug = self.bugDialog
+	self.bugContext = ns.Bugs.Context()
+	self:DrawBugDialog()
+	bug:Show()
+	bug.edit:SetFocus()
+end
+
+-- discard: also forget the typed text (Cancel, Save)
+function UI:CloseBugReport(discard)
+	local bug = self.bugDialog
+	if not bug then return end
+	bug.edit:ClearFocus()
+	if discard then bug.edit:SetText("") end
+	bug:Hide()
+	self.bugContext = nil
+end
+
+function UI:SaveBugReport()
+	local bug = self.bugDialog
+	local report = ns.Bugs.Add(bug.edit:GetText(), self.bugContext)
+	if not report then return end
+	ns.Say("BUG_SAVED", report.n)
+	self:CloseBugReport(true)
+end
+
+-- What the window shows, as text lines for a bug report (Bugs.Context strips the colours).
+function UI:BugContext()
+	local f = self.frame
+	if not f then return { "window: not opened" } end
+	local lines = {}
+	local settings = ns.db and ns.db.settings or {}
+	local category = self.category and (ns.Scanner.ProfessionName(self.category) or "?") .. " (" .. self.category .. ")" or "all"
+	lines[#lines + 1] = string.format("window: %s, view %s, profession %s, search \"%s\"",
+		f:IsShown() and "shown" or "hidden", tostring(self.view), category, self.search and self.search:GetText() or "")
+	lines[#lines + 1] = string.format("filters: recipes %s, online only %s, member %s, list %s",
+		tostring(settings.recipeFilter), tostring(settings.onlineOnly), tostring(self.memberFilter),
+		self.listCount and self.listCount:GetText() or "")
+	local s = self.selected
+	if not s then
+		lines[#lines + 1] = "selected: nothing"
+		return lines
+	end
+	local d = self.detail
+	lines[#lines + 1] = string.format("selected: %s \"%s\", recipe %s, item %s, member %s, profession %s",
+		tostring(s.kind), d and d.name:GetText() or "", tostring(s.recipeID), tostring(s.itemID),
+		tostring(s.guid), tostring(s.skillLine))
+	if not d then return lines end
+	for _, key in ipairs({ "sub", "value", "recipeInfo" }) do
+		local text = d[key] and d[key]:GetText()
+		if text and text ~= "" then lines[#lines + 1] = key .. ": " .. text end
+	end
+	if s.kind == "recipe" then
+		for _, row in ipairs(d.reagentRows or {}) do
+			if row:IsShown() then
+				lines[#lines + 1] = "reagent: " .. (row.left:GetText() or "") .. " | " .. (row.right:GetText() or "")
+			end
+		end
+		lines[#lines + 1] = string.format("%s %s; %s %s", d.costLabel:GetText() or "", d.costValue:GetText() or "",
+			d.profitLabel:GetText() or "", d.profitValue:GetText() or "")
+		lines[#lines + 1] = "crafters: " .. (d.crafterCount:GetText() or "")
+	end
+	return lines
 end
 
 function UI:SetView(view)
@@ -1322,6 +1471,7 @@ end
 
 function UI:OnLanguageChanged()
 	if self.frame and self.frame:IsShown() then self:Refresh() end
+	if self.bugDialog and self.bugDialog:IsShown() then self:DrawBugDialog() end
 end
 
 local refreshToken = 0
@@ -1342,7 +1492,7 @@ end
 local reportedError = false
 function UI:Refresh()
 	if not self.frame then return end
-	local ok, err = pcall(self.Draw, self)
+	local ok, err = ns.Bugs.Call(self.Draw, self)
 	if not ok then
 		ns.lastError = "UI: " .. tostring(err)
 		ns.Log("ERROR %s", ns.lastError)
@@ -1692,6 +1842,7 @@ function UI:Draw()
 		self.memberFilter ~= nil) -- a player filter lists that player's known recipes
 	showIf(self.recipeButton, not members)
 	setPill(self.syncButton, ns.T("BTN_SYNC"), false)
+	setPill(self.bugButton, ns.T("BUG_BUTTON"), false)
 
 	-- The list is built once and kept while nothing it depends on changed, so scrolling and
 	-- selecting do not walk the whole database again.

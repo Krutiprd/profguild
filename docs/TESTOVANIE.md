@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.2.1.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.2.2.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -58,8 +58,23 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 | Reštart hry | Dáta ostanú (`/pg status` ukazuje rovnaký počet postáv) |
 | Zahoď profesiu (na testovacej postave) | Do ~2 minút zmizne u ostatných |
 
-## 4. Čo poslať späť
+## 4. Hlásenie chyby
+
+Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
+
+1. Nechaj otvorený recept alebo hráča, ktorého sa chyba týka.
+2. Klikni na „Nahlásiť chybu“ dole v okne (alebo napíš `/pg bug`), napíš čo sa stalo
+   a čo si čakal, a daj „Uložiť“. Krátka poznámka ide aj priamo: `/pg bug zisk nesedí`.
+3. K hláseniu sa samo uloží: verzia, čo ukazuje okno (recept, ceny surovín, zisk),
+   zdroj cien, posledné Lua chyby Profguildu a posledné riadky logu.
+4. Do súboru sa hlásenia zapíšu pri `/reload` alebo odhlásení:
+   `WTF\Account\<účet>\SavedVariables\Profguild.lua`, časť `bugs`.
+
+`/pg bug list` vypíše posledné hlásenia, `/pg bug clear confirm` ich zmaže aj so zapamätanými chybami.
+
+## 5. Čo poslať späť
 
 - Výstup `/pg debug` a `/pg status` od každého testera.
-- Každú Lua chybu (screenshot alebo text z BugSack).
+- Každú Lua chybu (screenshot alebo text z BugSack); Profguild si ich pamätá aj sám (`errors`).
+- Súbor `SavedVariables\Profguild.lua` s hláseniami (`bugs`).
 - Čo nefungovalo podľa tabuľky vyššie.

@@ -93,6 +93,8 @@ local function initDB()
 	end
 	ns.db = db
 	ns.SetLanguage(db.settings.lang)
+	-- bug reports and the last Lua errors of Profguild (see Bugs.lua)
+	if ns.Bugs then ns.Bugs.Init() end
 end
 
 function ns.StaleDays()
@@ -441,7 +443,7 @@ local function scheduleScan()
 	C_Timer.After(1, function()
 		if token ~= scanToken then return end
 		-- timer callbacks are not protected like event handlers: an error is logged, not lost
-		local ok, err = pcall(ns.ScanNow)
+		local ok, err = ns.Bugs.Call(ns.ScanNow)
 		if not ok then
 			ns.lastError = "scan: " .. tostring(err)
 			ns.Log("ERROR %s", ns.lastError)
@@ -892,7 +894,7 @@ local function slash(input)
 	elseif cmd == "scan" then
 		-- reads the open profession window now, without waiting for an event of the game
 		Scanner.lastListInfo = nil
-		local ok, err = pcall(ns.ScanNow)
+		local ok, err = ns.Bugs.Call(ns.ScanNow)
 		if not ok then ns.Print("scan: %s", tostring(err)) end
 		local li = Scanner.lastListInfo
 		if li then ns.Say("SCAN_RESULT", li.total, li.unlearned) else ns.Say("SCAN_NONE") end
@@ -910,6 +912,8 @@ local function slash(input)
 		else
 			ns.Say("LANG_USAGE")
 		end
+	elseif cmd == "bug" then
+		ns.Bugs.Slash(rest)
 	elseif cmd == "minimap" then
 		if ns.Minimap:Toggle() then ns.Say("MINIMAP_SHOWN") else ns.Say("MINIMAP_HIDDEN") end
 	elseif cmd == "reset" then
@@ -964,6 +968,8 @@ function events.ADDON_LOADED(name)
 end
 
 function events.PLAYER_LOGIN()
+	-- BugGrabber may only offer its callbacks once the addons are loaded
+	if not ns.Bugs.hooked then ns.Bugs.InstallErrorHook() end
 	ns.Say("ADDON_LOADED", ns.version)
 	ns.Minimap:Init()
 	C_Timer.After(5, function()
@@ -998,7 +1004,7 @@ function events.GUILD_ROSTER_UPDATE()
 	rosterPending = true
 	C_Timer.After(1, function()
 		rosterPending = false
-		local ok, err = pcall(ns.OnRosterUpdate)
+		local ok, err = ns.Bugs.Call(ns.OnRosterUpdate)
 		if not ok then
 			ns.lastError = "roster: " .. tostring(err)
 			ns.Log("ERROR %s", ns.lastError)
@@ -1067,7 +1073,7 @@ local function scheduleTrainer()
 	trainerPending = true
 	C_Timer.After(0.5, function()
 		trainerPending = false
-		local ok, err = pcall(readTrainer)
+		local ok, err = ns.Bugs.Call(readTrainer)
 		if not ok then ns.Log("ERROR trainer: %s", tostring(err)) end
 	end)
 end
@@ -1081,7 +1087,7 @@ function events.ZONE_CHANGED_NEW_AREA() flushSoon() end
 frame:SetScript("OnEvent", function(_, event, ...)
 	local handler = events[event]
 	if handler then
-		local ok, err = pcall(handler, ...)
+		local ok, err = ns.Bugs.Call(handler, ...)
 		if not ok then
 			ns.lastError = event .. ": " .. tostring(err)
 			ns.Log("ERROR %s", ns.lastError)
