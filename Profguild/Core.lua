@@ -1017,14 +1017,15 @@ function events.NEW_RECIPE_LEARNED(recipeID) onRecipeLearned(recipeID) end
 
 -- A profession trainer says which skill every recipe needs: kept as the skill the recipe is
 -- learnable from (ProfguildDB.recipeInfo[recipeID].m), matched to the catalog by name.
-local trainerNames, trainerRevision
+local trainerNames, trainerRevision, trainerBuiltAt
 local function readTrainer()
 	if type(GetNumTrainerServices) ~= "function" or type(GetTrainerServiceSkillReq) ~= "function" then return end
 	if type(IsTradeskillTrainer) == "function" and not IsTradeskillTrainer() then return end -- a class trainer
 	local n = GetNumTrainerServices() or 0
 	if n == 0 or not ns.catalog then return end
-	if trainerRevision ~= ns.catalog.revision then
-		trainerRevision, trainerNames = ns.catalog.revision, {}
+	local stale = trainerRevision == false and GetTime() - (trainerBuiltAt or 0) >= 60
+	if trainerRevision ~= ns.catalog.revision and (trainerRevision ~= false or stale) then
+		trainerRevision, trainerNames, trainerBuiltAt = ns.catalog.revision, {}, GetTime()
 		local missing = false
 		for _, list in pairs(ns.catalog:All()) do
 			for recipeID in pairs(list) do
@@ -1037,7 +1038,7 @@ local function readTrainer()
 				end
 			end
 		end
-		if missing then trainerRevision = nil end -- some names were not known yet: build it again
+		if missing then trainerRevision = false end -- names not known yet: built again a minute later
 	end
 	local byName = trainerNames
 	local found = 0

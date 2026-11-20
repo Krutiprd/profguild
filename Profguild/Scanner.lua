@@ -103,6 +103,11 @@ function Scanner.WasAsked(itemID)
 	return itemID ~= nil and (itemAsked[itemID] ~= nil or itemQueued[itemID] ~= nil)
 end
 
+-- The item arrived: forget the request (keeps the table small over a long session).
+function Scanner.Arrived(itemID)
+	if itemID and not itemQueued[itemID] then itemAsked[itemID] = nil end
+end
+
 function Scanner.WantItem(itemID, urgent)
 	if not itemID or itemID == 0 or not (C_Item and C_Item.RequestLoadItemDataByID) then return end
 	local asked = itemAsked[itemID]

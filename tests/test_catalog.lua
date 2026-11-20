@@ -214,6 +214,23 @@ H.test("catalog: only a holder with more answers, not twice in a row, and a refu
 	g3.run(Catalog.ANSWER_WINDOW + 5)
 	H.eq(lonely.k.tried[197], nil, "no answer: not marked")
 	H.ok(lonely.k:Want(197, 450), "asks again")
+	-- the game refuses every new ID of a list: parts arrived, so the count is not asked again
+	local g4 = newGuild()
+	local h4 = g4.add("H")
+	local refuser = g4.add("R", {}, function(id, sl) if id <= 1300 then return gameVerify(id, sl) end end)
+	local base = {}
+	for id, item in pairs(profession(197)) do if id <= 1300 then base[id] = item end end
+	refuser.k:Add(197, base)
+	h4.k:Add(197, profession(197))
+	h4.k:Announce()
+	g4.run(Catalog.ANSWER_WINDOW + 5)
+	H.eq(refuser.k:Count(197), 300, "nothing new accepted")
+	H.eq(refuser.k.tried[197], 450, "marked: parts arrived")
+	local kr = g4.sent.KR
+	g4.run(Catalog.ASK_AGAIN + Catalog.REPLY_COOLDOWN)
+	h4.k:Announce()
+	g4.run(30)
+	H.eq(g4.sent.KR, kr, "not asked again")
 	-- a failed request may be asked again at once
 	picky.k:OnSendFailed({ t = "KR", l = { 197 } })
 	H.eq(picky.k.tried[197], nil)

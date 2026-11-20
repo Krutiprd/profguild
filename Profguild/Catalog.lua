@@ -66,7 +66,9 @@ function Catalog.New(adapter, saved)
 		lastSent = {},         -- skillLine -> time the guild last got a list of it
 		sendQueue = {},        -- lists being sent: { skillLine, ids, next }
 		pumping = false,
-		deferred = {},         -- skillLine -> true: answer when the cooldown ends
+		deferred = {},         -- skillLine -> token of the timer that answers when the cooldown ends
+		deferSeq = 0,
+		got = {},              -- skillLine -> time the last part of an asked-for list arrived
 		digestTimer = false,
 		lastDigest = -1e9,
 		stats = { sentD = 0, sentR = 0, sentL = 0, recvD = 0, recvR = 0, recvL = 0, added = 0 },
@@ -183,6 +185,20 @@ local function scheduleDigest(self)
 	end)
 end
 
+-- After the answer window of a request: parts arrived but the count is still below the one that
+-- was announced (the game refused IDs, the sets differ): that count is not asked for again.
+-- Nothing arrived: the request is forgotten, the next digest asks again.
+local function checkAnswer(self, skillLine, theirCount, stamp)
+	self.a.after(Catalog.ANSWER_WINDOW + 1, function()
+		if self.mine[skillLine] ~= stamp then return end -- a newer request took over
+		if self.got[skillLine] and self.got[skillLine] >= stamp then
+			if theirCount and self:Count(skillLine) < theirCount then self.tried[skillLine] = theirCount end
+		else
+			self.mine[skillLine], self.asked[skillLine] = nil, nil
+		end
+	end)
+end
+
 -- Asks the guild for the recipes of a profession (together with others wanted meanwhile).
 -- theirCount: how many recipes the guildmate announced. A profession is not asked for again at
 -- the same announced count: when the game refused some of the IDs (or the sets differ), our
@@ -195,23 +211,13 @@ function CatalogMT:Want(skillLine, theirCount)
 	-- somebody asked for it a moment ago: wait for that answer instead of asking again
 	if self.asked[skillLine] and now - self.asked[skillLine] < Catalog.OTHER_WAIT then
 		self.mine[skillLine] = now
+		checkAnswer(self, skillLine, theirCount, now)
 		return true
 	end
 	if not self.a.canSend() then return false end
 	self.asked[skillLine] = now
 	self.mine[skillLine] = now
-	local before = self:Count(skillLine)
-	-- after the answer window: some parts came but the count stayed below the announced one
-	-- (the game refused IDs, the sets differ): do not ask again at that count. Nothing came:
-	-- forget the request, the next digest asks again.
-	self.a.after(Catalog.ANSWER_WINDOW + 1, function()
-		if self.mine[skillLine] ~= now then return end
-		if self:Count(skillLine) > before then
-			if theirCount and self:Count(skillLine) < theirCount then self.tried[skillLine] = theirCount end
-		else
-			self.mine[skillLine], self.asked[skillLine] = nil, nil
-		end
-	end)
+	checkAnswer(self, skillLine, theirCount, now)
 	self.askList[#self.askList + 1] = skillLine
 	if not self.askTimer then
 		self.askTimer = true
@@ -350,9 +356,11 @@ function CatalogMT:OnMessage(msg)
 						self.replies[skillLine] = true
 						any = true
 					elseif not self.deferred[skillLine] then
-						self.deferred[skillLine] = true
+						self.deferSeq = self.deferSeq + 1
+						local token = self.deferSeq
+						self.deferred[skillLine] = token
 						self.a.after(wait, function()
-							if not self.deferred[skillLine] then return end
+							if self.deferred[skillLine] ~= token then return end
 							self.deferred[skillLine] = nil
 							self.replies[skillLine] = true
 							self:_ScheduleReplies()
@@ -373,6 +381,7 @@ function CatalogMT:OnMessage(msg)
 		end
 		local askedAt = self.mine[skillLine]
 		if not askedAt or now - askedAt > Catalog.ANSWER_WINDOW then return end
+		self.got[skillLine] = now -- an answer came, whatever the game accepts of it
 		local list, n = {}, 0
 		local prof = self.saved[skillLine] or {}
 		for _, recipeID in ipairs(msg.r) do

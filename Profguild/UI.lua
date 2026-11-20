@@ -622,7 +622,7 @@ local function hideTooltip()
 end
 function UI:OnItemInfo(itemID)
 	local t = tooltipShown
-	if t and GameTooltip:IsShown() and GameTooltip:GetOwner() == t.owner and (not t.items or t.items[itemID]) then t.draw() end
+	if t and GameTooltip:IsShown() and GameTooltip:GetOwner() == t.owner and t.items and t.items[itemID] then t.draw() end
 end
 
 local function recipeTooltip(owner, d)
@@ -1201,7 +1201,9 @@ function UI:Create()
 		end
 		UI:OnItemInfo(itemID)
 		-- items loaded for other reasons (bags, chat, Auctionator) change nothing in the list
-		if rebuildPending or not ns.Scanner.WasAsked(itemID) then return end
+		local asked = ns.Scanner.WasAsked(itemID)
+		ns.Scanner.Arrived(itemID)
+		if rebuildPending or not asked then return end
 		rebuildPending = true
 		C_Timer.After(UI.ITEM_REBUILD, function()
 			rebuildPending = false
