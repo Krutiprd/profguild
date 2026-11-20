@@ -69,7 +69,7 @@ local PROF_ICONS = {
 }
 local ALL_ICON = "Interface\\Icons\\INV_Misc_Book_11"
 
-UI.view = "recipes"     -- or "leveling", "members"
+UI.view = "recipes"     -- or "leveling", "members", "requests"
 UI.ITEM_REBUILD = 2     -- seconds: the list is rebuilt at most this often while items load
 UI.memberFilter = nil   -- guid whose recipes are shown
 UI.category = nil       -- skill line shown, nil = all professions
@@ -550,6 +550,64 @@ function UI:BuildRecipeRows(query, category)
 	return out, counts, total
 end
 
+-- Item requests of the guild (Requests.lua), not final first, then the newest. Each row is a
+-- recipe row (so the details show reagents, cost and who knows the recipe) with the request in
+-- `request`. Returns the rows, the number per profession before the search and profession
+-- filters, and their sum.
+function UI:BuildRequestRows(query, category)
+	local rows, counts, total = {}, {}, 0
+	local store, requests = ns.store, ns.requests
+	if not store or not requests then return rows, counts, total end
+	local now, staleDays = GetServerTime(), ns.StaleDays()
+	local index = store:Index().recipes
+	local skillOf = {}
+	for skillLine, list in pairs(ns.catalog and ns.catalog:All() or {}) do
+		for recipeID in pairs(list) do skillOf[recipeID] = skillLine end
+	end
+	for _, rec in ipairs(requests:All()) do
+		if not requests:_Expired(rec) then
+			local entry = index[rec.r]
+			local skillLine = (entry and entry.skillLine) or skillOf[rec.r] or 0
+			local crafters = entry and craftersOf(entry, false, now, staleDays) or {}
+			local name = recipeName(rec.r, rec.i)
+			local prof = skillLine > 0 and ns.Scanner.ProfessionName(skillLine) or "?"
+			local who = ns.MemberName(rec.by)
+			local maker = rec.cr and ns.MemberName(rec.cr) or nil
+			counts[skillLine] = (counts[skillLine] or 0) + 1
+			total = total + 1
+			if (not category or category == skillLine) and matches(query, name, prof, who, maker, rec.note) then
+				rows[#rows + 1] = { kind = "recipe", key = "q" .. rec.id, request = rec, recipeID = rec.r,
+					itemID = rec.i, skillLine = skillLine, name = name, prof = prof, crafters = crafters,
+					nobody = #crafters == 0 and not (entry and anyCrafter(entry, now, staleDays)),
+					requester = who, maker = maker, req = -1 }
+			end
+		end
+	end
+	return rows, counts, total
+end
+
+local REQ_STATE_HEX = { open = HEX_GOLD, taken = HEX_ONLINE, done = HEX_MUTED, cancelled = HEX_MUTED }
+
+-- "taken by Ana" and the like, coloured.
+local function requestState(rec)
+	local key = "REQ_STATE_" .. rec.st:upper()
+	local text = (rec.st == "taken" or rec.st == "done") and ns.T(key, rec.cr and ns.MemberName(rec.cr) or "?") or ns.T(key)
+	return (REQ_STATE_HEX[rec.st] or "") .. text .. "|r"
+end
+
+-- What the viewer may do with a request: the two buttons as { key, action } or nil.
+local function requestActions(rec)
+	local me = UnitGUID("player")
+	if rec.st == "open" then
+		if rec.by == me then return nil, { "BTN_REQ_CANCEL", "cancel" } end
+		return { "BTN_REQ_TAKE", "take" }, nil
+	elseif rec.st == "taken" then
+		if rec.cr == me then return { "BTN_REQ_DONE", "done" }, { "BTN_REQ_GIVEBACK", "giveback" } end
+		if rec.by == me then return { "BTN_REQ_DONE", "done" }, { "BTN_REQ_CANCEL", "cancel" } end
+	end
+	return nil, nil
+end
+
 -- Leveling: the recipes of the recipe filter without group headers, sorted by the skill from
 -- which they turn grey (the game knows it for every recipe of an opened profession window),
 -- then by the skill they are learned at. Recipes without skill data come last.
@@ -867,6 +925,9 @@ function UI:Create()
 	self.recipesTab = pill(f, 110, 24)
 	self.recipesTab:SetPoint("RIGHT", self.levelingTab, "LEFT", -6, 0)
 	self.recipesTab:SetScript("OnClick", function() UI:SetView("recipes") end)
+	self.requestsTab = pill(f, 110, 24)
+	self.requestsTab:SetPoint("RIGHT", self.recipesTab, "LEFT", -6, 0)
+	self.requestsTab:SetScript("OnClick", function() UI:SetView("requests") end)
 	hline(f, 14, -64, WIDTH - 28)
 
 	-- left: professions
@@ -1033,6 +1094,15 @@ function UI:Create()
 	end)
 	d.refreshButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
 	d.refreshButton:Hide()
+	-- ask the guild to craft the selected recipe (Requests.lua)
+	d.requestButton = pill(det, 120, 18)
+	d.requestButton:SetPoint("RIGHT", d.refreshButton, "LEFT", -6, 0)
+	d.requestButton:SetFrameLevel((det:GetFrameLevel() or 1) + 10)
+	d.requestButton:SetScript("OnClick", function()
+		local s = UI.selected
+		if s and s.kind == "recipe" and not s.request then UI:OpenRequestBox(s) end
+	end)
+	d.requestButton:Hide()
 	hline(det, 10, -32, DETAIL_W - 20)
 	d.empty = label(det, "GameFontHighlight", C.muted)
 	d.empty:SetPoint("CENTER", 0, 20)
@@ -1115,15 +1185,20 @@ function UI:Create()
 	local half = (DETAIL_W - 34) / 2
 	d.linkButton = pill(rb, half, 24)
 	d.linkButton:SetPoint("BOTTOMLEFT", 14, 12)
-	d.linkButton:SetScript("OnClick", function()
+	d.linkButton:SetScript("OnClick", function(self)
 		local s = UI.selected
-		if s and s.kind == "recipe" then insertLink(s.recipeID, s.itemID) end
+		if s and s.request then
+			if not self.disabled then UI:RequestAction(s.request, self.action) end
+		elseif s and s.kind == "recipe" then
+			insertLink(s.recipeID, s.itemID)
+		end
 	end)
 	d.shopButton = pill(rb, half, 24)
 	d.shopButton:SetPoint("BOTTOMRIGHT", -14, 12)
 	d.shopButton:SetScript("OnClick", function(self)
 		local s = UI.selected
 		if self.disabled or not s or s.kind ~= "recipe" then return end
+		if s.request then return UI:RequestAction(s.request, self.action) end
 		local reagents = ns.reagents and ns.reagents:Get(s.recipeID)
 		local ok, why = ns.Prices.ShoppingList(s.name, reagents, 1)
 		if ok then
@@ -1246,6 +1321,51 @@ function UI:Create()
 	bug.cancelButton:SetScript("OnClick", function() UI:CloseBugReport(true) end)
 	self.bugDialog = bug
 
+	-- a new item request: count and a short note for the selected recipe
+	local rq = panel(f, C.bg, C.border)
+	rq:SetFrameLevel((f:GetFrameLevel() or 1) + 60)
+	rq:SetSize(360, 190)
+	rq:SetPoint("CENTER", 0, 10)
+	rq:EnableMouse(true)
+	rq:EnableMouseWheel(true)
+	rq:SetScript("OnMouseWheel", function() end)
+	rq:Hide()
+	rq.title = label(rq, "GameFontNormal", C.gold)
+	rq.title:SetPoint("TOPLEFT", 14, -12)
+	rq.item = label(rq, "GameFontHighlight", C.text)
+	rq.item:SetPoint("TOPLEFT", 14, -34)
+	rq.item:SetWidth(332)
+	local function field(y, width, letters, numeric)
+		local caption = label(rq, "GameFontHighlightSmall", C.muted)
+		caption:SetPoint("TOPLEFT", 14, y)
+		local holder = panel(rq, C.panel, C.line)
+		holder:SetSize(width, 24)
+		holder:SetPoint("TOPLEFT", 14, y - 16)
+		holder:EnableMouse(true)
+		local eb = CreateFrame("EditBox", nil, holder)
+		eb:SetFontObject(ChatFontNormal or GameFontHighlightSmall)
+		eb:SetPoint("LEFT", 6, 0)
+		eb:SetPoint("RIGHT", -6, 0)
+		eb:SetHeight(20)
+		eb:SetAutoFocus(false)
+		eb:EnableMouse(true)
+		eb:SetMaxLetters(letters)
+		if numeric then eb:SetNumeric(true) end
+		holder:SetScript("OnMouseDown", function() eb:SetFocus() end)
+		eb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+		eb:SetScript("OnEnterPressed", function() UI:SaveRequest() end)
+		return caption, eb
+	end
+	rq.countLabel, rq.count = field(-58, 80, 4, true)
+	rq.noteLabel, rq.note = field(-104, 332, ns.Requests.MAX_NOTE, false)
+	rq.saveButton = pill(rq, 120, 24)
+	rq.saveButton:SetPoint("BOTTOMRIGHT", -14, 12)
+	rq.saveButton:SetScript("OnClick", function() UI:SaveRequest() end)
+	rq.cancelButton = pill(rq, 120, 24)
+	rq.cancelButton:SetPoint("RIGHT", rq.saveButton, "LEFT", -6, 0)
+	rq.cancelButton:SetScript("OnClick", function() UI:CloseRequestBox() end)
+	self.requestBox = rq
+
 	local saved = ns.db.settings.category
 	self.category = type(saved) == "number" and saved or nil
 
@@ -1257,6 +1377,7 @@ function UI:Create()
 		search:ClearFocus()
 		menu:Hide()
 		UI:CloseBugReport() -- the typed text stays for the next time
+		UI:CloseRequestBox()
 	end)
 	local events = CreateFrame("Frame", nil, f)
 	events:RegisterEvent("GET_ITEM_INFO_RECEIVED")
@@ -1296,6 +1417,56 @@ end
 function UI:Toggle()
 	self:Create()
 	if self.frame:IsShown() then self.frame:Hide() else self.frame:Show() end
+end
+
+-- The box for a new request of the selected recipe.
+function UI:OpenRequestBox(s)
+	self:Create()
+	local rq = self.requestBox
+	rq.recipeID, rq.itemID = s.recipeID, s.itemID or 0
+	rq.title:SetText(ns.T("REQ_BOX_TITLE"))
+	rq.item:SetText(qualityName(s))
+	rq.countLabel:SetText(ns.T("REQ_BOX_COUNT"))
+	rq.noteLabel:SetText(ns.T("REQ_BOX_NOTE"))
+	setPill(rq.saveButton, ns.T("REQ_SAVE"), false)
+	setPill(rq.cancelButton, ns.T("BUG_CANCEL"), false)
+	rq.count:SetText("1")
+	rq.note:SetText("")
+	rq.name = s.name
+	rq:Show()
+	rq.count:SetFocus()
+end
+
+function UI:CloseRequestBox()
+	local rq = self.requestBox
+	if not rq then return end
+	rq.count:ClearFocus()
+	rq.note:ClearFocus()
+	rq:Hide()
+end
+
+function UI:SaveRequest()
+	local rq = self.requestBox
+	if not rq or not rq:IsShown() or not ns.requests then return end
+	local n = tonumber(rq.count:GetText() or "")
+	local rec, why = ns.requests:Create(rq.recipeID, rq.itemID, n or 0, rq.note:GetText() or "")
+	if not rec then
+		if why == "limit" then ns.Say("REQ_LIMIT", ns.Requests.MAX_OPEN) else ns.Say("REQ_INVALID", ns.Requests.MAX_COUNT) end
+		return
+	end
+	ns.Say("REQ_CREATED", rec.n, rq.name or ns.RequestItemName(rec))
+	self:CloseRequestBox()
+	self:Refresh()
+end
+
+-- A button of a request: take, give back, done, cancel.
+function UI:RequestAction(rec, action)
+	if not ns.requests or not action then return end
+	local fn = ({ take = "Take", giveback = "GiveBack", done = "Done", cancel = "Cancel" })[action]
+	if not fn then return end
+	local ok = ns.requests[fn](ns.requests, rec.id)
+	if not ok then ns.Say("REQ_ACTION_FAILED") end
+	self:Refresh()
 end
 
 -- Texts of the bug report box (also after a change of language).
@@ -1565,7 +1736,7 @@ function UI:DrawList(data)
 			row.icon:SetDesaturated(d.kind == "recipe" and d.nobody or false)
 			-- items on screen are loaded first
 			if d.kind == "recipe" then ns.Scanner.WantItem(d.itemID, true) end
-			local profit = d.kind == "recipe" and craftProfit(d) or nil
+			local profit = d.kind == "recipe" and not d.request and craftProfit(d) or nil
 			row.profit:SetText(profit and ((profit < 0 and HEX_LOSS or HEX_PROFIT) .. ns.Prices.Short(profit) .. "|r") or "")
 			if not header then row.name:SetWidth(LIST_W - 86 - (profit and 44 or 0)) end
 			local req = d.kind == "recipe" and d.req or -1
@@ -1574,6 +1745,11 @@ function UI:DrawList(data)
 			if header then
 				row.name:SetText(HEX_GOLD .. d.title .. "|r")
 				row.sub:SetText("")
+			elseif d.request then
+				-- a request: count and item, then its state and who asked
+				setIcon(row.icon, recipeIcon(d))
+				row.name:SetText(HEX_GOLD .. d.request.n .. "x|r " .. qualityName(d))
+				row.sub:SetText(requestState(d.request) .. HEX_MUTED .. "  ·  " .. ns.T("REQ_FROM", d.requester) .. "|r")
 			elseif d.kind == "recipe" then
 				setIcon(row.icon, recipeIcon(d))
 				row.name:SetText(ownColorDot(d.recipeID) .. qualityName(d))
@@ -1728,7 +1904,7 @@ function UI:DrawReagents(s)
 			d.profitValue:SetText("-")
 		end
 	end
-	setPill(d.shopButton, ns.T("BTN_SHOP"), false, not (reagents and ns.Prices.CanShop()))
+	if not s.request then setPill(d.shopButton, ns.T("BTN_SHOP"), false, not (reagents and ns.Prices.CanShop())) end
 end
 
 -- Searches the auction house (through Auctionator) for the selected recipe's item, reagents
@@ -1769,9 +1945,11 @@ function UI:DrawDetail()
 	d.title:SetText(ns.T("HEAD_DETAILS"))
 	setPill(d.refreshButton, ns.T("BTN_REFRESH"), false)
 	showIf(d.refreshButton, s ~= nil and s.kind == "recipe" and ns.Prices.CanRefresh())
+	setPill(d.requestButton, ns.T("BTN_REQUEST"), false)
+	showIf(d.requestButton, s ~= nil and s.kind == "recipe" and not s.request and ns.requests ~= nil)
 	if not s then
 		d.body:Hide()
-		d.empty:SetText(ns.T(self.view == "members" and "PICK_MEMBER" or "PICK_RECIPE"))
+		d.empty:SetText(ns.T(self.view == "members" and "PICK_MEMBER" or (self.view == "requests" and "PICK_REQUEST") or "PICK_RECIPE"))
 		d.empty:Show()
 		return
 	end
@@ -1789,6 +1967,12 @@ function UI:DrawDetail()
 		d.subBase = s.prof .. ((req and req > 1) and ("  " .. HEX_MUTED .. ns.T("REQ_LEVEL", req) .. "|r") or "")
 		d.sub:SetText(d.subBase)
 		d.recipeInfo:SetText((recipeItemText(s.recipeID, true)) or "")
+		if s.request then
+			local rec = s.request
+			local info = ns.T("REQ_INFO", rec.n, s.requester) .. "  ·  " .. requestState(rec)
+			if rec.note ~= "" then info = info .. HEX_MUTED .. "  ·  " .. ns.T("REQ_NOTE", rec.note) .. "|r" end
+			d.recipeInfo:SetText(info)
+		end
 		self:DrawReagents(s)
 		d.crafterTitle:SetText(ns.T("HEAD_CRAFTERS"))
 		d.crafterCount:SetText(tostring(#s.crafters))
@@ -1799,7 +1983,19 @@ function UI:DrawDetail()
 		local hint = #s.crafters > CRAFTER_ROWS and "HINT_CRAFTER_SCROLL" or "HINT_CRAFTER"
 		if #s.crafters == 0 then hint = s.nobody and "HINT_NOBODY" or "HINT_NOBODY_ONLINE" end
 		d.recipeHint:SetText(ns.T(hint))
-		setPill(d.linkButton, ns.T("BTN_LINK"), false)
+		if s.request then
+			-- the two buttons become what the viewer may do with the request
+			local first, second = requestActions(s.request)
+			for _, pair in ipairs({ { d.linkButton, first }, { d.shopButton, second } }) do
+				local b, act = pair[1], pair[2]
+				b.action = act and act[2] or nil
+				setPill(b, act and ns.T(act[1]) or requestState(s.request), false, act == nil)
+				b:Show()
+			end
+		else
+			d.linkButton.action, d.shopButton.action = nil, nil
+			setPill(d.linkButton, ns.T("BTN_LINK"), false)
+		end
 	else
 		d.recipeBody:Hide()
 		d.memberBody:Show()
@@ -1841,6 +2037,7 @@ function UI:Draw()
 	local query = (self.search:GetText() or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 	local members = self.view == "members"
 	local leveling = self.view == "leveling"
+	local requestsView = self.view == "requests"
 
 	-- texts that follow the language
 	self.title:SetText(ns.T("WINDOW_TITLE"):upper())
@@ -1851,11 +2048,12 @@ function UI:Draw()
 	setPill(self.recipesTab, ns.T("HEAD_RECIPES"), self.view == "recipes")
 	setPill(self.levelingTab, ns.T("HEAD_LEVELING"), leveling)
 	setPill(self.membersTab, ns.T("HEAD_MEMBERS"), members)
+	setPill(self.requestsTab, ns.T("HEAD_REQUESTS"), requestsView)
 	setPill(self.onlineButton, ns.T(ns.db.settings.onlineOnly and "ONLINE_ON" or "ONLINE_OFF"), ns.db.settings.onlineOnly)
 	local recipeFilter = ns.db.settings.recipeFilter or "known"
 	setPill(self.recipeButton, ns.T(RECIPE_FILTER_TEXT[recipeFilter] or "RECIPES_KNOWN"), recipeFilter ~= "known",
 		self.memberFilter ~= nil) -- a player filter lists that player's known recipes
-	showIf(self.recipeButton, not members)
+	showIf(self.recipeButton, not members and not requestsView)
 	setPill(self.syncButton, ns.T("BTN_SYNC"), false)
 	setPill(self.bugButton, ns.T("BUG_BUTTON"), false)
 
@@ -1865,10 +2063,12 @@ function UI:Draw()
 	local key = table.concat({ self.view, query, tostring(self.category), tostring(ns.db.settings.onlineOnly),
 		tostring(ns.db.settings.recipeFilter), ns.catalog and ns.catalog.revision or 0,
 		tostring(self.memberFilter), tostring(store), store and store.revision or 0, store and store.rosterRevision or 0,
-		tostring(ns.lang), self.nameEpoch or 0, ns.recipeInfoRevision or 0 }, "\1")
+		tostring(ns.lang), self.nameEpoch or 0, ns.recipeInfoRevision or 0,
+		tostring(ns.requests), ns.requests and ns.requests.revision or 0 }, "\1")
 	local cache = self.listCache
 	if not cache or cache.key ~= key then
-		local build = members and self.BuildMemberRows or (leveling and self.BuildLevelingRows) or self.BuildRecipeRows
+		local build = members and self.BuildMemberRows or (leveling and self.BuildLevelingRows)
+			or (requestsView and self.BuildRequestRows) or self.BuildRecipeRows
 		local category = self.category
 		local data, counts, total = build(self, query, category)
 		-- a profession that is no longer visible (dropped, filtered) shows all of them instead
@@ -1905,9 +2105,10 @@ function UI:Draw()
 
 	self:DrawSidebar(counts, category)
 
-	self.listTitle:SetText(ns.T(members and "HEAD_MEMBERS" or (leveling and "HEAD_LEVELING") or "HEAD_RECIPES"))
-	self.listCount:SetText(ns.T(members and "COUNT_MEMBERS" or "MEMBER_RECIPES", cache.listed))
-	if members then
+	self.listTitle:SetText(ns.T(members and "HEAD_MEMBERS" or (leveling and "HEAD_LEVELING")
+		or (requestsView and "HEAD_REQUESTS") or "HEAD_RECIPES"))
+	self.listCount:SetText(ns.T(members and "COUNT_MEMBERS" or (requestsView and "COUNT_REQUESTS") or "MEMBER_RECIPES", cache.listed))
+	if members or requestsView then
 		self.playerButton:Hide()
 		self.playerMenu:Hide()
 	else

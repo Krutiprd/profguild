@@ -115,3 +115,109 @@ H.test("addon requests: a guild change stops the old guild's requests", function
 	H.ok(old.dead); H.ok(ns.requests ~= old)
 	H.eq(#sentOfType(ns, before, "TU"), 0, "nothing of the old guild reaches the new one")
 end)
+
+local function openRecipe(UI, recipeID)
+	UI:SetView("recipes")
+	UI:SetCategory(197)
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.recipeID == recipeID and not d.request then r._scripts.OnClick(r, "LeftButton") end
+	end
+	return UI.selected
+end
+
+local function openRequest(UI, id)
+	UI:SetView("requests")
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.request and d.request.id == id then r._scripts.OnClick(r, "LeftButton") return d, r end
+	end
+end
+
+H.test("addon requests window: a request is made from the recipe details", function()
+	local ns = login()
+	local UI = ns.UI
+	UI:Toggle()
+	H.eq(openRecipe(UI, 3865).recipeID, 3865)
+	local d = UI.detail
+	H.ok(d.requestButton:IsShown(), "button in the details"); H.eq(d.requestButton.text:GetText(), ns.T("BTN_REQUEST"))
+	d.requestButton._scripts.OnClick(d.requestButton)
+	local box = UI.requestBox
+	H.ok(box:IsShown(), "the box opens")
+	box.count:SetText("3")
+	box.note:SetText("for my alt")
+	local before = #M.sent
+	box.saveButton._scripts.OnClick(box.saveButton)
+	H.ok(not box:IsShown(), "closed after saving")
+	local rec = ns.requests:All()[1]
+	H.ok(rec, "created"); H.eq(rec.n, 3); H.eq(rec.note, "for my alt"); H.eq(rec.r, 3865)
+	M.advance(3)
+	H.eq(#sentOfType(ns, before, "TU"), 1, "sent to the guild")
+	-- a wrong count is not saved
+	d.requestButton._scripts.OnClick(d.requestButton)
+	box.count:SetText("0")
+	box.saveButton._scripts.OnClick(box.saveButton)
+	H.eq(#ns.requests:All(), 1, "count 0 refused")
+	box.cancelButton._scripts.OnClick(box.cancelButton)
+	H.ok(not box:IsShown())
+	-- the view lists it
+	local row = openRequest(UI, rec.id)
+	H.ok(row, "listed in the requests view")
+	H.eq(UI.requestsTab.text:GetText(), ns.T("HEAD_REQUESTS"))
+	-- our own open request: we may only cancel it
+	H.ok(not d.linkButton:IsShown() or d.linkButton.disabled, "no take of our own")
+	H.eq(d.shopButton.text:GetText(), ns.T("BTN_REQ_CANCEL"))
+	H.ok(d.recipeInfo:GetText():find(ns.T("REQ_STATE_OPEN"), 1, true), "state in the details: " .. d.recipeInfo:GetText())
+	d.shopButton._scripts.OnClick(d.shopButton)
+	H.eq(ns.requests:Get(rec.id).st, "cancelled")
+end)
+
+H.test("addon requests window: a guildmate's request is taken, then done", function()
+	local ns = login()
+	local UI = ns.UI
+	UI:Toggle()
+	local rec = anaRequest(ns, 3865, 4)
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } })
+	local row = openRequest(UI, rec.id)
+	H.ok(row, "Ana's request is listed")
+	local listRow
+	for _, r in ipairs(UI.rows) do if rawget(r, "data") == row then listRow = r end end
+	H.ok(listRow.name:GetText():find("4x", 1, true), "count in the list: " .. listRow.name:GetText())
+	H.ok(listRow.sub:GetText():find("Ana Brightwood", 1, true), "requester in the list")
+	local d = UI.detail
+	H.eq(d.linkButton.text:GetText(), ns.T("BTN_REQ_TAKE"))
+	local before = #M.sent
+	d.linkButton._scripts.OnClick(d.linkButton)
+	local held = ns.requests:Get(rec.id)
+	H.eq(held.st, "taken"); H.eq(held.cr, ME)
+	M.advance(3)
+	H.eq(#sentOfType(ns, before, "TU"), 1)
+	-- the selection stays, the buttons follow the state
+	UI:Refresh()
+	H.ok(UI.selected and UI.selected.request and UI.selected.request.id == rec.id, "still selected")
+	H.eq(d.linkButton.text:GetText(), ns.T("BTN_REQ_DONE"))
+	H.eq(d.shopButton.text:GetText(), ns.T("BTN_REQ_GIVEBACK"))
+	d.linkButton._scripts.OnClick(d.linkButton)
+	H.eq(ns.requests:Get(rec.id).st, "done")
+	UI:Refresh()
+	H.ok(UI.selected and UI.selected.request.id == rec.id, "still selected after done")
+	H.ok(d.linkButton.disabled and d.shopButton.disabled, "nothing more to do")
+end)
+
+H.test("addon requests window: a change arriving while selected keeps the selection", function()
+	local ns = login()
+	local UI = ns.UI
+	UI:Toggle()
+	local rec = anaRequest(ns, 3865, 1)
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } })
+	openRequest(UI, rec.id)
+	local cancel = {}
+	for k, v in pairs(rec) do cancel[k] = v end
+	cancel.st, cancel.u = "cancelled", rec.u + 3
+	M.advance(4)
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { cancel } })
+	M.advance(1)
+	H.ok(UI.selected and UI.selected.request.id == rec.id, "still selected")
+	H.eq(UI.selected.request.st, "cancelled", "the new state")
+	H.ok(UI.detail.recipeInfo:GetText():find(ns.T("REQ_STATE_CANCELLED"), 1, true))
+end)
