@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.3.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.4.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -72,7 +72,23 @@ Treba 2 hráčov s Profguildom 0.3.0, aspoň jeden s Auctionatorom.
 | `/pg status` u oboch | Riadok „Ceny od guildy: N, najnovšia pred …“, odoslané a prijaté U/D/R |
 | Hráč bez Auctionatora | Vidí ceny od guildy, zisk aj cenu craftu |
 
-## 5. Hlásenie chyby
+## 5. Požiadavky v guilde (0.4.0)
+
+Treba 2–3 hráčov s Profguildom 0.4.0.
+
+| Krok | Očakávaný výsledok |
+| --- | --- |
+| A otvorí recept v `/pg`, dá „POŽIADAŤ GUILDU“, počet 2, poznámka | V chate „Požiadavka odoslaná guilde“; v karte „POŽIADAVKY“ je „2x …“, otvorená |
+| B, ktorý recept vie | V chate „A žiada guildu o 2x …“; v karte POŽIADAVKY ju vidí |
+| B dá „VYROBÍM TO“ | U A v chate „B vyrobí tvoju požiadavku“; stav „prevzal B“ u všetkých |
+| B a C dajú „VYROBÍM TO“ naraz (na pokyn) | Po pár sekundách u všetkých ten istý výrobca (kto bol skôr) |
+| B dá „VZDAŤ SA“ | Požiadavka je znova otvorená |
+| B (alebo A) dá „HOTOVO“ | Stav „hotové“ u všetkých; po 2 dňoch zmizne |
+| A dá „ZRUŠIŤ POŽIADAVKU“ | Stav „zrušená“ u všetkých |
+| C sa prihlási neskôr | Do minúty vidí tie isté požiadavky v tom istom stave |
+| `/pg status` | Riadok „Požiadavky: N otvorených, M prevzatých …“ |
+
+## 6. Hlásenie chyby
 
 Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
 
@@ -86,7 +102,7 @@ Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
 
 `/pg bug list` vypíše posledné hlásenia, `/pg bug clear confirm` ich zmaže aj so zapamätanými chybami.
 
-## 6. Čo poslať späť
+## 7. Čo poslať späť
 
 - Výstup `/pg debug` a `/pg status` od každého testera.
 - Každú Lua chybu (screenshot alebo text z BugSack); Profguild si ich pamätá aj sám (`errors`).

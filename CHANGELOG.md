@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 – 2026-11-20
+
+- Item requests inside the guild: "ASK THE GUILD" in a recipe's details sends a request (count
+  and a short note), also for a recipe nobody knows. The new view "REQUESTS" lists them with the
+  state, who asked and who crafts; the details show the reagents, their estimated cost and who
+  knows the recipe. The first guildmate to press "I'LL CRAFT IT" takes it; the crafter can give
+  it back or mark it done, the requester can mark it done or cancel it. No fees.
+- Everybody gets the same list, also players who were offline: digests list every request with
+  its version, missing or other versions are asked for, answers serve the whole guild (messages
+  `TU`, `TD`, `TR`). When two guildmates take a request at the same time, the earlier take wins
+  everywhere. 20 open requests per player, 200 in the guild; open and taken requests disappear
+  after 7 days, done and cancelled ones after 2 days.
+- Chat notices: a new request for a recipe you know, and your request taken by somebody.
+  `/pg status` shows the requests and their messages.
+
 ## 0.3.0 – 2026-11-20
 
 - Guild price sharing: auction prices go to the whole guild, the newer price of an item always
