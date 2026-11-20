@@ -608,6 +608,8 @@ function ReportsMT:OnMessage(msg)
 		-- (clients that keep different own reports differ for good: one answering digest per
 		-- hello at most, DIGEST_GAP stops the ping-pong)
 		local full = #msg.x >= 3 * Reports.MAX_DIGEST
+		-- the sender's own reports come first, the rest newest first: the last entry is the cut
+		if full and validTime(msg.x[#msg.x]) then oldest = msg.x[#msg.x] end
 		local differs, clock = false, self.a.clock()
 		for id, rec in pairs(self.list) do
 			if theirs[id] ~= rec.st and theirs[id] ~= "d" and not self:_Expired(rec, clock)

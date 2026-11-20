@@ -548,7 +548,8 @@ function ns.CheckReports()
 			if rec and rec.st == "d" then
 				reportChanged(r.shared, "delivered")
 			elseif not rec and r.by == me and (r.guild == nil or r.guild == ns.guildName)
-				and type(r.t) == "number" and r.t > clock - Reports.KEEP then
+				and type(r.t) == "number" and r.t > clock - Reports.KEEP
+				and (ns.IsReportReceiver() or ns.ReceiverInGuild()) then
 				-- our copy was lost (pushed out before 0.5.0's rules, or by an alt): again, same id
 				r.shared = nil
 				ns.OnBugReport(r, true)
