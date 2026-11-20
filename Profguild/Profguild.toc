@@ -8,6 +8,7 @@
 ## IconTexture: Interface\AddOns\Profguild\Media\icon
 ## AddonCompartmentFunc: Profguild_OnAddonCompartmentClick
 ## X-License: MIT
+## X-Curse-Project-ID: 1819307
 
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
