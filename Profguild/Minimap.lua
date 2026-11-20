@@ -7,7 +7,7 @@ local _, ns = ...
 local MinimapButton = {}
 ns.Minimap = MinimapButton
 
-local ICON = "Interface\\Icons\\Trade_LeatherWorking"
+local ICON = "Interface\\AddOns\\Profguild\\Media\\icon" -- made from docs/logo/icon.svg
 local DEFAULT_ANGLE = 215 -- degrees, counter-clockwise from the right: lower left
 
 -- Offset of the button centre from the minimap centre for an angle and a minimap radius.
@@ -64,8 +64,8 @@ function MinimapButton:Create()
 
 	local icon = b:CreateTexture(nil, "ARTWORK")
 	icon:SetTexture(ICON)
-	icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-	icon:SetSize(18, 18)
+	icon:SetTexCoord(0, 1, 0, 1)
+	icon:SetSize(20, 20)
 	icon:SetPoint("CENTER")
 	b.icon = icon
 

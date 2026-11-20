@@ -5,7 +5,7 @@
 ## Author: Profguild team
 ## Version: 0.4.0
 ## SavedVariables: ProfguildDB
-## IconTexture: Interface\Icons\Trade_LeatherWorking
+## IconTexture: Interface\AddOns\Profguild\Media\icon
 ## AddonCompartmentFunc: Profguild_OnAddonCompartmentClick
 ## X-License: MIT
 
