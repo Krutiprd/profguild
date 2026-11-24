@@ -1477,8 +1477,14 @@ function UI:Create()
 			UI.requestRecipe = nil
 			rq.item:SetText("")
 			UI:DrawRequestBox()
-		else
+		elseif not userInput then
 			UI:DrawRequestPicks()
+		elseif not UI.pickPending then -- typing: at most one search per 0.15 s
+			UI.pickPending = true
+			C_Timer.After(0.15, function()
+				UI.pickPending = false
+				UI:DrawRequestPicks()
+			end)
 		end
 	end)
 	pick:EnableMouseWheel(true)
@@ -1487,6 +1493,7 @@ function UI:Create()
 		UI:DrawRequestPicks()
 	end)
 	rq.search:SetScript("OnEnterPressed", function()
+		UI:DrawRequestPicks() -- the search may still be waiting
 		local first = rq.picks[1]
 		if first and first:IsShown() and first.data then UI:ChooseRequestRecipe(first.data) end
 	end)

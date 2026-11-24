@@ -211,6 +211,8 @@ H.test("addon requests window: NEW REQUEST searches a recipe of the guild", func
 	H.ok(box.saveButton.disabled)
 	UI.memberFilter = "Player-1-0000FFFF"
 	H.eq(#UI:FindRequestRecipes("recipe 3865"), 1, "found despite a player filter")
+	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { anaRequest(ns, 3865, 1) } })
+	H.ok(#UI:BuildRequestRows("", nil)[1].crafters > 0, "request rows ignore the player filter too")
 	UI.memberFilter = nil
 	-- the same name first, then names beginning with it; the wheel reaches the rest
 	local entries, names = {}, { "Major Pot", "Minor Pot", "Pot", "Pot Big", "Super Pot", "A Pot", "B Pot" }
@@ -225,6 +227,13 @@ H.test("addon requests window: NEW REQUEST searches a recipe of the guild", func
 	H.eq(found[1].name, "Pot"); H.eq(found[2].name, "Pot Big")
 	box.search:SetText("pot")
 	H.ok(box.searchLabel:GetText():find("1-5 / 7", 1, true), "caption says which are shown")
+	-- typing waits a moment, Enter does not
+	box.search._text = "pot big"
+	box.search._scripts.OnTextChanged(box.search, true)
+	H.eq(box.picks[1].data.name, "Pot", "not searched yet")
+	M.advance(1)
+	H.eq(box.picks[1].data.name, "Pot Big", "searched after the pause")
+	box.search:SetText("pot")
 	box.pick._scripts.OnMouseWheel(box.pick, -1)
 	box.pick._scripts.OnMouseWheel(box.pick, -1)
 	box.pick._scripts.OnMouseWheel(box.pick, -1)
@@ -356,4 +365,11 @@ H.test("addon requests: no lost-take notice when the requester finishes or cance
 		end
 		H.eq(count(lost) - base, 0, "no notice after " .. change)
 	end
+end)
+
+H.test("addon settings: a damaged list of collapsed groups is replaced", function()
+	ProfguildDB = { settings = { collapsed = true } }
+	local ns = loadAddon()
+	M.fire("ADDON_LOADED", "Profguild")
+	H.eq(type(ns.db.settings.collapsed), "table")
 end)

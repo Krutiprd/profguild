@@ -498,6 +498,8 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	local learn, yellow, green, grey = ns.Prices.RecipeSkill(3865)
 	H.ok(learn == nil and yellow == 60 and green == 70 and grey == 80, "a trainer recipe: learn level unknown")
 	H.eq(ns.Prices.RecipeSkill(1), nil, "not in Data.lua")
+	ns.RecipeData[3864] = { false, "", 0, 320, 310 }
+	H.eq(table.concat({ select(2, ns.Prices.RecipeSkill(3864)) }, ","), "310,310,310", "yellow never above grey")
 	Auctionator = { API = { v1 = {
 		GetAuctionPriceByItemID = function(_, id) return ({ [7777] = 374000 })[id] end,
 		GetAuctionAgeByItemID = function() return 0 end,
