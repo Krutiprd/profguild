@@ -26,8 +26,11 @@ local PROF_STEP = 26
 local LIST_ROWS, ROW_H, ROW_STEP = 8, 36, 38
 local DETAIL_ROWS, DETAIL_STEP = 10, 24  -- member professions
 local CRAFTER_ROWS, CRAFTER_STEP, CRAFTER_TOP = 4, 22, -334
-local REAGENT_ROWS, REAGENT_STEP, REAGENT_TOP = 6, 22, -128
+local REAGENT_ROWS, REAGENT_STEP, REAGENT_TOP = 5, 22, -154
 local MENU_ROWS, MENU_STEP, MENU_W = 12, 20, 190
+local REQ_BOX_H = 190                                 -- the request box: item, count, note
+local REQ_PICK_ROWS, REQ_PICK_STEP = 5, 20            -- its recipe search (NEW REQUEST)
+local REQ_PICK_H = 78 + REQ_PICK_ROWS * REQ_PICK_STEP - 30
 
 local WHITE8 = "Interface\\Buttons\\WHITE8X8"
 local QUESTION = "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -48,6 +51,7 @@ local C = {
 	clear    = { 0, 0, 0, 0 },
 }
 local HEX_ONLINE, HEX_OFFLINE, HEX_MUTED, HEX_GOLD = "|cff70d08c", "|cff8a8f94", "|cff9a9ea3", "|cffebc273"
+local PLUS_TEX, MINUS_TEX = "Interface\\Buttons\\UI-PlusButton-Up", "Interface\\Buttons\\UI-MinusButton-Up"
 local HEX_LOSS = "|cffe06c5f"
 local HEX_PROFIT = "|cff70d08c"
 -- skill-up colours of the profession window: 0 optimal, 1 medium, 2 easy, 3 trivial
@@ -548,7 +552,9 @@ end
 -- filter always lists that player's known recipes. Returns the rows (grouped by profession when
 -- all are shown, then by item group, each group led by a header row), the number of recipes per
 -- profession counted before the search and profession filters, and their sum.
-function UI:BuildRecipeRows(query, category)
+-- A group the player collapsed (ns.db.settings.collapsed) keeps only its header, unless a
+-- search is typed; flat = true (Leveling) leaves every recipe in.
+function UI:BuildRecipeRows(query, category, flat)
 	local store = ns.store
 	local rows, counts, total = {}, {}, 0
 	if not store then return rows, counts, total end
@@ -611,15 +617,17 @@ function UI:BuildRecipeRows(query, category)
 		return a.recipeID < b.recipeID
 	end)
 	-- a header row before every group; with all professions shown it names the profession too
-	local out, last = {}, nil
+	local collapsed = not flat and query == "" and ns.db.settings.collapsed or {}
+	local out, header = {}, nil
 	for _, r in ipairs(rows) do
-		local title = category and r.group or (r.prof .. " · " .. r.group)
 		local key = r.skillLine .. "\1" .. r.group
-		if key ~= last then
-			out[#out + 1] = { kind = "header", key = "h" .. key, title = title }
-			last = key
+		if not header or header.group ~= key then
+			header = { kind = "header", key = "h" .. key, group = key, count = 0,
+				title = category and r.group or (r.prof .. " · " .. r.group), collapsed = collapsed[key] == true }
+			out[#out + 1] = header
 		end
-		out[#out + 1] = r
+		header.count = header.count + 1
+		if not header.collapsed then out[#out + 1] = r end
 	end
 	return out, counts, total
 end
@@ -686,7 +694,7 @@ end
 -- which they turn grey (the game knows it for every recipe of an opened profession window),
 -- then by the skill they are learned at. Recipes without skill data come last.
 function UI:BuildLevelingRows(query, category)
-	local rows, counts, total = self:BuildRecipeRows(query, category)
+	local rows, counts, total = self:BuildRecipeRows(query, category, true)
 	local out = {}
 	for _, d in ipairs(rows) do
 		if d.kind == "recipe" then
@@ -828,7 +836,11 @@ local function createListRow(parent, index)
 	end)
 	row:SetScript("OnClick", function(self)
 		local d = self.data
-		if not d or d.kind == "header" then return end
+		if d and d.kind == "header" then
+			UI:ToggleGroup(d.group)
+			return
+		end
+		if not d then return end
 		if d.kind == "recipe" and IsShiftKeyDown() then
 			insertLink(d.recipeID, d.itemID)
 			return
@@ -1053,6 +1065,11 @@ function UI:Create()
 		UI:Refresh()
 	end)
 	-- recipe filter: known by somebody, known by nobody, all (click switches to the next)
+	-- requests view: a new request without opening a recipe first
+	self.newRequestButton = pill(mid, 160, 20)
+	self.newRequestButton:SetPoint("TOPLEFT", 12, -66)
+	self.newRequestButton.text:SetFontObject("GameFontHighlightSmall")
+	self.newRequestButton:SetScript("OnClick", function() UI:OpenRequestBox(nil) end)
 	self.recipeButton = pill(mid, 130, 20)
 	self.recipeButton:SetPoint("LEFT", self.onlineButton, "RIGHT", 4, 0)
 	self.recipeButton:SetScript("OnClick", function(self)
@@ -1164,15 +1181,6 @@ function UI:Create()
 	end)
 	d.refreshButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
 	d.refreshButton:Hide()
-	-- ask the guild to craft the selected recipe (Requests.lua)
-	d.requestButton = pill(det, 104, 18)
-	d.requestButton:SetPoint("RIGHT", d.refreshButton, "LEFT", -6, 0)
-	d.requestButton:SetFrameLevel((det:GetFrameLevel() or 1) + 10)
-	d.requestButton:SetScript("OnClick", function()
-		local s = UI.selected
-		if s and s.kind == "recipe" and not s.request then UI:OpenRequestBox(s) end
-	end)
-	d.requestButton:Hide()
 	hline(det, 10, -32, DETAIL_W - 20)
 	d.empty = label(det, "GameFontHighlight", C.muted)
 	d.empty:SetPoint("CENTER", 0, 20)
@@ -1199,6 +1207,16 @@ function UI:Create()
 	d.recipeInfo = label(body, "GameFontHighlightSmall", C.muted)
 	d.recipeInfo:SetPoint("TOPLEFT", 14, -91)
 	d.recipeInfo:SetWidth(DETAIL_W - 28)
+	-- ask the guild to craft the selected recipe (Requests.lua): big, right under the recipe,
+	-- players overlooked it as a small button in the header
+	d.requestButton = pill(body, 170, 22)
+	d.requestButton:SetPoint("TOPLEFT", 14, -104)
+	d.requestButton.text:SetFontObject("GameFontHighlight")
+	d.requestButton:SetScript("OnClick", function()
+		local s = UI.selected
+		if s and s.kind == "recipe" and not s.request then UI:OpenRequestBox(s) end
+	end)
+	d.requestButton:Hide()
 	local hover = CreateFrame("Frame", nil, body)
 	hover:SetPoint("TOPLEFT", 12, -40)
 	hover:SetSize(DETAIL_W - 24, 54)
@@ -1218,11 +1236,11 @@ function UI:Create()
 	rb:SetAllPoints()
 	d.recipeBody = rb
 	d.reagentTitle = label(rb, "GameFontNormal", C.gold)
-	d.reagentTitle:SetPoint("TOPLEFT", 14, -104)
+	d.reagentTitle:SetPoint("TOPLEFT", 14, -130)
 	d.reagentCount = label(rb, "GameFontHighlightSmall", C.muted)
-	d.reagentCount:SetPoint("TOPRIGHT", -14, -106)
+	d.reagentCount:SetPoint("TOPRIGHT", -14, -132)
 	d.reagentCount:SetJustifyH("RIGHT")
-	hline(rb, 12, -122, DETAIL_W - 24)
+	hline(rb, 12, -148, DETAIL_W - 24)
 	d.reagentRows = {}
 	for i = 1, REAGENT_ROWS do d.reagentRows[i] = createReagentRow(rb, i) end
 	d.reagentNote = label(rb, "GameFontHighlightSmall", C.muted)
@@ -1391,10 +1409,11 @@ function UI:Create()
 	bug.cancelButton:SetScript("OnClick", function() UI:CloseBugReport(true) end)
 	self.bugDialog = bug
 
-	-- a new item request: count and a short note for the selected recipe
+	-- a new item request: count and a short note for the selected recipe. Opened without a
+	-- recipe (NEW REQUEST) it starts with a search over the recipes the guild knows.
 	local rq = panel(f, C.bg, C.border, nil, "dialog")
 	rq:SetFrameLevel((f:GetFrameLevel() or 1) + 60)
-	rq:SetSize(360, 190)
+	rq:SetSize(360, REQ_BOX_H)
 	rq:SetPoint("CENTER", 0, 10)
 	rq:EnableMouse(true)
 	rq:EnableMouseWheel(true)
@@ -1402,13 +1421,18 @@ function UI:Create()
 	rq:Hide()
 	rq.title = label(rq, "GameFontNormal", C.gold)
 	rq.title:SetPoint("TOPLEFT", 14, -12)
-	rq.item = label(rq, "GameFontHighlight", C.text)
+	local form = CreateFrame("Frame", nil, rq)
+	form:SetPoint("TOPLEFT", 0, 0)
+	form:SetSize(360, REQ_BOX_H)
+	rq.form = form
+	rq.item = label(form, "GameFontHighlight", C.text)
 	rq.item:SetPoint("TOPLEFT", 14, -34)
 	rq.item:SetWidth(332)
-	local function field(y, width, letters, numeric)
-		local caption = label(rq, "GameFontHighlightSmall", C.muted)
+	local function field(y, width, letters, numeric, parent)
+		parent = parent or form
+		local caption = label(parent, "GameFontHighlightSmall", C.muted)
 		caption:SetPoint("TOPLEFT", 14, y)
-		local holder = panel(rq, C.panel, C.line)
+		local holder = panel(parent, C.panel, C.line)
 		holder:SetSize(width, 24)
 		holder:SetPoint("TOPLEFT", 14, y - 16)
 		holder:EnableMouse(true)
@@ -1432,9 +1456,41 @@ function UI:Create()
 	rq.count:SetScript("OnEnterPressed", function() rq.note:SetFocus() end)
 	rq.count:SetScript("OnTabPressed", function() rq.note:SetFocus() end)
 	rq.note:SetScript("OnTabPressed", function() rq.count:SetFocus() end)
+	local pick = CreateFrame("Frame", nil, rq)
+	pick:SetPoint("TOPLEFT", 0, 0)
+	pick:SetSize(360, REQ_PICK_H + 30)
+	pick:Hide()
+	rq.pick = pick
+	rq.searchLabel, rq.search = field(-34, 332, 40, false, pick)
+	rq.search:SetScript("OnTextChanged", function() UI:DrawRequestPicks() end)
+	rq.search:SetScript("OnEnterPressed", function()
+		local first = rq.picks[1]
+		if first and first:IsShown() and first.data then UI:ChooseRequestRecipe(first.data) end
+	end)
+	rq.pickNote = label(pick, "GameFontHighlightSmall", C.muted)
+	rq.pickNote:SetPoint("TOPLEFT", 16, -82)
+	rq.pickNote:SetWidth(328)
+	rq.picks = {}
+	for i = 1, REQ_PICK_ROWS do
+		local b = CreateFrame("Button", nil, pick)
+		b:SetSize(332, REQ_PICK_STEP - 2)
+		b:SetPoint("TOPLEFT", 14, -78 - (i - 1) * REQ_PICK_STEP)
+		b.hl = b:CreateTexture(nil, "HIGHLIGHT")
+		b.hl:SetAllPoints()
+		b.hl:SetColorTexture(1, 1, 1, 0.08)
+		b.name = label(b, "GameFontHighlightSmall", C.text)
+		b.name:SetPoint("LEFT", 4, 0)
+		b.name:SetWidth(230)
+		b.count = label(b, "GameFontHighlightSmall", C.muted)
+		b.count:SetPoint("RIGHT", -4, 0)
+		b.count:SetJustifyH("RIGHT")
+		b:SetScript("OnClick", function(self) if self.data then UI:ChooseRequestRecipe(self.data) end end)
+		b:Hide()
+		rq.picks[i] = b
+	end
 	rq.saveButton = pill(rq, 120, 24)
 	rq.saveButton:SetPoint("BOTTOMRIGHT", -14, 12)
-	rq.saveButton:SetScript("OnClick", function() UI:SaveRequest() end)
+	rq.saveButton:SetScript("OnClick", function(self) if not self.disabled then UI:SaveRequest() end end)
 	rq.cancelButton = pill(rq, 120, 24)
 	rq.cancelButton:SetPoint("RIGHT", rq.saveButton, "LEFT", -6, 0)
 	rq.cancelButton:SetScript("OnClick", function() UI:CloseRequestBox() end)
@@ -1500,21 +1556,91 @@ function UI:DrawRequestBox()
 	rq.title:SetText(ns.T("REQ_BOX_TITLE"))
 	rq.countLabel:SetText(ns.T("REQ_BOX_COUNT"))
 	rq.noteLabel:SetText(ns.T("REQ_BOX_NOTE"))
-	setPill(rq.saveButton, ns.T("REQ_SAVE"), false)
+	rq.searchLabel:SetText(ns.T("REQ_BOX_SEARCH"))
+	setPill(rq.saveButton, ns.T("REQ_SAVE"), false, self.requestRecipe == nil)
 	setPill(rq.cancelButton, ns.T("BUG_CANCEL"), false)
+	if rq.pick:IsShown() then self:DrawRequestPicks() end
 end
 
+-- Recipes somebody in the guild knows whose name contains the query (2 letters at least),
+-- the ones with most crafters first. Rows like those of the recipe list.
+function UI:FindRequestRecipes(query)
+	local out = {}
+	query = (query or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+	local store = ns.store
+	if #query < 2 or not store then return out end
+	local now, staleDays = GetServerTime(), ns.StaleDays()
+	local catalog = ns.catalog and ns.catalog:All() or {}
+	for recipeID, entry in pairs(store:Index().recipes) do
+		local itemID = entry.itemID
+		if (not itemID or itemID == 0) and catalog[entry.skillLine] then itemID = catalog[entry.skillLine][recipeID] or itemID end
+		local name = recipeName(recipeID, itemID)
+		if matches(query, name) then
+			local crafters = craftersOf(entry, false, now, staleDays)
+			if #crafters > 0 then
+				out[#out + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = itemID or 0,
+					skillLine = entry.skillLine, name = name, crafters = crafters }
+			end
+		end
+	end
+	table.sort(out, function(a, b)
+		if #a.crafters ~= #b.crafters then return #a.crafters > #b.crafters end
+		if a.name ~= b.name then return a.name < b.name end
+		return a.recipeID < b.recipeID
+	end)
+	return out
+end
+
+function UI:DrawRequestPicks()
+	local rq = self.requestBox
+	if not rq then return end
+	local query = rq.search:GetText() or ""
+	local found = self:FindRequestRecipes(query)
+	for i, b in ipairs(rq.picks) do
+		local d = found[i]
+		b.data = d
+		if d then
+			local chosen = self.requestRecipe and self.requestRecipe.recipeID == d.recipeID
+			b.name:SetText((chosen and "> " or "") .. qualityName(d))
+			b.count:SetText(ns.T("REQ_PICK_CRAFTERS", #d.crafters))
+			b:Show()
+		else
+			b:Hide()
+		end
+	end
+	local short = #query:gsub("%s", "") < 2
+	rq.pickNote:SetText(short and ns.T("REQ_BOX_PICK") or (#found == 0 and ns.T("REQ_BOX_NONE") or ""))
+	showIf(rq.pickNote, short or #found == 0)
+end
+
+function UI:ChooseRequestRecipe(d)
+	local rq = self.requestBox
+	self.requestRecipe = { recipeID = d.recipeID, itemID = d.itemID or 0, name = d.name }
+	rq.item:SetText(qualityName(d))
+	self:DrawRequestBox()
+	rq.search:ClearFocus()
+	rq.count:SetFocus()
+end
+
+-- s: the recipe row to ask for; nil opens the box with the recipe search (NEW REQUEST).
 function UI:OpenRequestBox(s)
 	self:Create()
+	if not self.frame:IsShown() then self.frame:Show() end
 	local rq = self.requestBox
-	rq.recipeID, rq.itemID = s.recipeID, s.itemID or 0
-	rq.item:SetText(qualityName(s))
-	self:DrawRequestBox()
+	local picking = s == nil
+	-- the recipe asked for, kept on UI: fields of a frame are no place for a nil
+	self.requestRecipe = s and { recipeID = s.recipeID, itemID = s.itemID or 0, name = s.name } or nil
+	rq.item:SetText(s and qualityName(s) or "")
+	showIf(rq.pick, picking)
+	rq.form:ClearAllPoints()
+	rq.form:SetPoint("TOPLEFT", 0, picking and -REQ_PICK_H or 0)
+	rq:SetHeight(REQ_BOX_H + (picking and REQ_PICK_H or 0))
+	rq.search:SetText("")
 	rq.count:SetText("1")
 	rq.note:SetText("")
-	rq.name = s.name
+	self:DrawRequestBox()
 	rq:Show()
-	rq.count:SetFocus()
+	if picking then rq.search:SetFocus() else rq.count:SetFocus() end
 end
 
 function UI:CloseRequestBox()
@@ -1522,14 +1648,16 @@ function UI:CloseRequestBox()
 	if not rq then return end
 	rq.count:ClearFocus()
 	rq.note:ClearFocus()
+	rq.search:ClearFocus()
 	rq:Hide()
 end
 
 function UI:SaveRequest()
 	local rq = self.requestBox
-	if not rq or not rq:IsShown() or not ns.requests then return end
+	local r = self.requestRecipe
+	if not rq or not rq:IsShown() or not ns.requests or not r then return end
 	local n = tonumber(rq.count:GetText() or "")
-	local rec, why = ns.requests:Create(rq.recipeID, rq.itemID, n or 0, rq.note:GetText() or "")
+	local rec, why = ns.requests:Create(r.recipeID, r.itemID, n or 0, rq.note:GetText() or "")
 	if not rec then
 		if why == "limit" then
 			ns.Say("REQ_LIMIT", ns.Requests.MAX_OPEN)
@@ -1540,7 +1668,7 @@ function UI:SaveRequest()
 		end
 		return
 	end
-	ns.Say("REQ_CREATED", rec.n, rq.name or ns.RequestItemName(rec))
+	ns.Say("REQ_CREATED", rec.n, r.name or ns.RequestItemName(rec))
 	self:CloseRequestBox()
 	self:Refresh()
 end
@@ -1653,6 +1781,16 @@ function UI:SetView(view)
 end
 
 -- skillLine nil = all professions
+-- Collapses a group of the recipe list, or opens it again; kept in ns.db.settings.collapsed.
+function UI:ToggleGroup(group)
+	if not group then return end
+	local collapsed = ns.db.settings.collapsed or {}
+	ns.db.settings.collapsed = collapsed
+	collapsed[group] = not collapsed[group] or nil
+	self.listCache = nil
+	self:Refresh()
+end
+
 function UI:SetCategory(skillLine)
 	self.category = skillLine
 	ns.db.settings.category = skillLine
@@ -1834,7 +1972,9 @@ function UI:DrawList(data)
 			row.level:SetText(req > 1 and ns.T("LIST_LEVEL", req) or "")
 			row.sub:SetWidth(LIST_W - 86 - (req > 1 and 40 or 0))
 			if header then
-				row.name:SetText(HEX_GOLD .. d.title .. "|r")
+				-- [+] / [-]: a click collapses or opens the group; a collapsed one says how many it hides
+				row.name:SetText("|T" .. (d.collapsed and PLUS_TEX or MINUS_TEX) .. ":14:14|t " .. HEX_GOLD .. d.title
+					.. "|r" .. (d.collapsed and (HEX_MUTED .. "  (" .. d.count .. ")|r") or ""))
 				row.sub:SetText("")
 			elseif d.request then
 				-- a request: count and item, then its state and who asked
@@ -2146,6 +2286,8 @@ function UI:Draw()
 		self.memberFilter ~= nil) -- a player filter lists that player's known recipes
 	showIf(self.recipeButton, not members and not requestsView)
 	showIf(self.onlineButton, not requestsView) -- requests are not filtered by who is online
+	setPill(self.newRequestButton, ns.T("BTN_NEW_REQUEST"), false)
+	showIf(self.newRequestButton, requestsView and ns.requests ~= nil)
 	setPill(self.syncButton, ns.T("BTN_SYNC"), false)
 	setPill(self.bugButton, ns.T("BUG_BUTTON"), false)
 

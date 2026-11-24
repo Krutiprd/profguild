@@ -78,7 +78,7 @@ Treba 2–3 hráčov s Profguildom 0.4.0.
 
 | Krok | Očakávaný výsledok |
 | --- | --- |
-| A otvorí recept v `/pg`, dá „POŽIADAŤ GUILDU“, počet 2, poznámka | V chate „Požiadavka odoslaná guilde“; v karte „POŽIADAVKY“ je „2x …“, otvorená |
+| A otvorí recept v `/pg`, dá „POŽIADAŤ O VÝROBU“, počet 2, poznámka | V chate „Požiadavka odoslaná guilde“; v karte „POŽIADAVKY“ je „2x …“, otvorená |
 | B, ktorý recept vie | V chate „A žiada guildu o 2x …“; v karte POŽIADAVKY ju vidí |
 | B dá „VYROBÍM TO“ | U A v chate „B vyrobí tvoju požiadavku“; stav „prevzal B“ u všetkých |
 | B a C dajú „VYROBÍM TO“ naraz (na pokyn) | Po pár sekundách u všetkých ten istý výrobca (kto bol skôr); ten druhý dostane v chate „Tvoje prevzatie … neplatí“ |

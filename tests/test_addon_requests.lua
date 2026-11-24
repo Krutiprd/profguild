@@ -172,6 +172,43 @@ H.test("addon requests window: a request is made from the recipe details", funct
 	H.eq(ns.requests:Get(rec.id).st, "cancelled")
 end)
 
+H.test("addon requests window: NEW REQUEST searches a recipe of the guild", function()
+	local ns = login()
+	local UI = ns.UI
+	UI:Toggle()
+	UI:SetView("requests")
+	local b = UI.newRequestButton
+	H.ok(b:IsShown(), "shown in the requests view"); H.eq(b.text:GetText(), ns.T("BTN_NEW_REQUEST"))
+	b._scripts.OnClick(b)
+	local box = UI.requestBox
+	H.ok(box:IsShown() and box.pick:IsShown(), "the box opens with the search")
+	H.ok(box.saveButton.disabled, "nothing to send before a recipe is chosen")
+	box.saveButton._scripts.OnClick(box.saveButton)
+	H.eq(#ns.requests:All(), 0, "no request without a recipe")
+	box.search:SetText("r")
+	UI:DrawRequestPicks()
+	H.eq(box.pickNote:GetText(), ns.T("REQ_BOX_PICK"), "one letter: asks for more")
+	box.search:SetText("recipe 3865")
+	UI:DrawRequestPicks()
+	local first = box.picks[1]
+	H.ok(first:IsShown() and first.data.recipeID == 3865, "found the recipe")
+	H.ok(not box.picks[2]:IsShown(), "only that one")
+	first._scripts.OnClick(first)
+	H.ok(not box.saveButton.disabled, "a recipe chosen: can be sent")
+	box.count:SetText("2")
+	box.saveButton._scripts.OnClick(box.saveButton)
+	local rec = ns.requests:All()[1]
+	H.ok(rec and rec.r == 3865 and rec.n == 2, "created from the search")
+	box.search:SetText("no such thing")
+	UI:DrawRequestPicks()
+	-- opened from a recipe the search stays hidden
+	H.eq(openRecipe(UI, 3865).recipeID, 3865)
+	H.ok(not b:IsShown(), "not in the recipes view")
+	UI.detail.requestButton._scripts.OnClick(UI.detail.requestButton)
+	H.ok(box:IsShown() and not box.pick:IsShown(), "from a recipe: no search")
+	H.ok(not box.saveButton.disabled)
+end)
+
 H.test("addon requests window: a guildmate's request is taken, then done", function()
 	local ns = login()
 	local UI = ns.UI

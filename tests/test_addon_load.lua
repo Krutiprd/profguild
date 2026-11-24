@@ -185,6 +185,15 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(grouped[2].recipeID, 11479)
 	H.eq(grouped[3].title, "Trade Goods – Metal & Stone")
 	H.eq(grouped[4].recipeID, 17187)
+	-- a collapsed group keeps only its header with the number of its recipes; a search, and
+	-- Leveling, still list everything
+	ns.db.settings.collapsed = { [grouped[1].group] = true }
+	local folded = UI:BuildRecipeRows("", 171)
+	H.eq(#folded, 3, "the collapsed group hides its recipe")
+	H.ok(folded[1].collapsed and folded[1].count == 1, "header: collapsed, 1 recipe")
+	H.eq(folded[2].title, "Trade Goods – Metal & Stone", "the next group follows")
+	H.eq(#UI:BuildRecipeRows("", 171, true), 4, "flat: nothing hidden")
+	ns.db.settings.collapsed = nil
 	local realGetItemInfo = C_Item.GetItemInfo
 	local levels = { [3577] = 30, [4305] = 45, [14342] = 60 }
 	C_Item.GetItemInfo = function(id)
@@ -208,8 +217,14 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	UI:Refresh()
 	local headerRow = UI.rows[1]
 	H.eq(rawget(headerRow, "data").kind, "header")
+	local group = rawget(headerRow, "data").group
 	headerRow._scripts.OnClick(headerRow, "LeftButton")
 	H.eq(UI.selected, nil, "a header is not selectable")
+	H.ok(ns.db.settings.collapsed[group], "a click on the header collapses its group")
+	H.ok(rawget(UI.rows[1], "data").collapsed, "the list was rebuilt with the group collapsed")
+	H.ok(UI.rows[1].name:GetText():find("PlusButton", 1, true), "the header shows [+]")
+	UI.rows[1]._scripts.OnClick(UI.rows[1], "LeftButton")
+	H.eq(ns.db.settings.collapsed[group], nil, "a second click opens it again")
 
 	-- details: clicking a recipe lists its crafters, clicking a crafter whispers
 	H.ok(UI.detail.empty:IsShown(), "details ask to choose a recipe")
@@ -382,17 +397,17 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	ns.reagents:Set(3865, eight)
 	UI:Refresh()
 	local shown = visible(UI.detail.reagentRows)
-	H.eq(#shown, 6, "six rows")
+	H.eq(#shown, 5, "five rows")
 	H.eq(shown[1].itemID, 1)
-	H.eq(UI.detail.reagentCount:GetText(), "1-6 / 8", "heading says which are shown")
+	H.eq(UI.detail.reagentCount:GetText(), "1-5 / 8", "heading says which are shown")
 	H.ok(not UI.detail.reagentNote:IsShown(), "nothing drawn over the first row")
 	local reagentRow = UI.detail.reagentRows[1]
 	reagentRow._scripts.OnMouseWheel(reagentRow, -1)
 	reagentRow._scripts.OnMouseWheel(reagentRow, -1)
 	reagentRow._scripts.OnMouseWheel(reagentRow, -1)
 	shown = visible(UI.detail.reagentRows)
-	H.eq(shown[6].itemID, 8, "last reagent reached")
-	H.eq(UI.detail.reagentCount:GetText(), "3-8 / 8")
+	H.eq(shown[5].itemID, 8, "last reagent reached")
+	H.eq(UI.detail.reagentCount:GetText(), "4-8 / 8")
 	ns.reagents:Set(3865, { [2589] = 2 })
 
 	-- the list is built once: scrolling and selecting reuse it, and no item is looked up
@@ -470,8 +485,12 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(#visible(UI.detail.rows), 0, "no crafters")
 	-- where the recipe comes from (Data.lua) and the price of its recipe item (Auctionator)
 	H.ok(ns.RecipeData, "Data.lua loaded")
-	ns.RecipeData[3866] = { 7777, "dv" }
-	ns.RecipeData[3865] = false
+	ns.RecipeData[3866] = { 7777, "dv", 135, 140, 145 }
+	ns.RecipeData[3865] = { false, "", 0, 60, 80 }
+	H.eq(table.concat({ ns.Prices.RecipeSkill(3866) }, ","), "135,140,142,145", "learn, yellow, green, grey")
+	local learn, yellow, green, grey = ns.Prices.RecipeSkill(3865)
+	H.ok(learn == nil and yellow == 60 and green == 70 and grey == 80, "a trainer recipe: learn level unknown")
+	H.eq(ns.Prices.RecipeSkill(1), nil, "not in Data.lua")
 	Auctionator = { API = { v1 = {
 		GetAuctionPriceByItemID = function(_, id) return ({ [7777] = 374000 })[id] end,
 		GetAuctionAgeByItemID = function() return 0 end,
