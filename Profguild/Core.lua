@@ -92,6 +92,8 @@ local function initDB()
 	if db.settings.recipeFilter ~= "unknown" and db.settings.recipeFilter ~= "all" then
 		db.settings.recipeFilter = "known"
 	end
+	-- recipe groups collapsed in the window: [skill line .. "\1" .. group] = true
+	if type(db.settings.collapsed) ~= "table" then db.settings.collapsed = {} end
 	ns.db = db
 	ns.SetLanguage(db.settings.lang)
 	-- bug reports and the last Lua errors of Profguild (see Bugs.lua)

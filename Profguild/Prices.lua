@@ -170,7 +170,8 @@ function Prices.RecipeSkill(recipeID)
 	local e = ns.RecipeData and ns.RecipeData[recipeID]
 	if type(e) ~= "table" or type(e[4]) ~= "number" or type(e[5]) ~= "number" then return nil end
 	local learn = type(e[3]) == "number" and e[3] > 0 and e[3] or nil
-	return learn, e[4], math.floor((e[4] + e[5]) / 2), e[5]
+	local yellow = math.min(e[4], e[5]) -- the client has a recipe with yellow above grey
+	return learn, yellow, math.floor((yellow + e[5]) / 2), e[5]
 end
 
 -- How many of an item were on the market: Auctionator keeps the highest quantity it saw on each

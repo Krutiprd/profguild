@@ -60,8 +60,8 @@ ChatThrottleLib into 255-byte parts within the game's limit (10 messages, then 1
 ```
 lua5.1 tests/run.lua        # unit tests, simulated 20-member guild, full addon load in a fake client
 tools/package.sh            # builds dist/Profguild-<version>.zip
-python -I tools/recipe_data.py <WTF/.../SavedVariables/Profguild.lua>
-                            # adds recipe items and their sources from Wowhead to Profguild/Data.lua
+python -I tools/recipe_data.py [--recheck] [--build <client build>]
+                            # rebuilds Profguild/Data.lua from the client tables and Wowhead
 ```
 
 | File | Role |

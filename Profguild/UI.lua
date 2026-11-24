@@ -489,11 +489,12 @@ local function matches(query, ...)
 end
 
 -- Visible crafters of one recipe, filtered by staleness, online and member filters.
-local function craftersOf(entry, onlineOnly, now, staleDays)
+-- anyMember = true ignores the member filter (requests, where the filter is not shown).
+local function craftersOf(entry, onlineOnly, now, staleDays, anyMember)
 	local store = ns.store
 	local list = {}
 	for _, guid in ipairs(entry.guids) do
-		if (not UI.memberFilter or UI.memberFilter == guid) and not store:IsStale(guid, staleDays, now) then
+		if (anyMember or not UI.memberFilter or UI.memberFilter == guid) and not store:IsStale(guid, staleDays, now) then
 			local online = store:IsOnline(guid)
 			if online or not onlineOnly then
 				local rec = store:Get(guid)
@@ -553,7 +554,8 @@ end
 -- all are shown, then by item group, each group led by a header row), the number of recipes per
 -- profession counted before the search and profession filters, and their sum.
 -- A group the player collapsed (ns.db.settings.collapsed) keeps only its header, unless a
--- search is typed; flat = true (Leveling) leaves every recipe in.
+-- search is typed; flat = true (Leveling) leaves every recipe in. A header row holds the number of
+-- its recipes (count) and, when collapsed, the hidden rows (hidden).
 function UI:BuildRecipeRows(query, category, flat)
 	local store = ns.store
 	local rows, counts, total = {}, {}, 0
@@ -620,14 +622,20 @@ function UI:BuildRecipeRows(query, category, flat)
 	local collapsed = not flat and query == "" and ns.db.settings.collapsed or {}
 	local out, header = {}, nil
 	for _, r in ipairs(rows) do
-		local key = r.skillLine .. "\1" .. r.group
+		-- the group without an item is named in the addon's language: its key must not change with it
+		local key = r.skillLine .. "\1" .. (r.groupRank == RANK_NO_ITEM and "" or r.group)
 		if not header or header.group ~= key then
 			header = { kind = "header", key = "h" .. key, group = key, count = 0,
 				title = category and r.group or (r.prof .. " · " .. r.group), collapsed = collapsed[key] == true }
+			if header.collapsed then header.hidden = {} end
 			out[#out + 1] = header
 		end
 		header.count = header.count + 1
-		if not header.collapsed then out[#out + 1] = r end
+		if header.collapsed then
+			header.hidden[#header.hidden + 1] = r
+		else
+			out[#out + 1] = r
+		end
 	end
 	return out, counts, total
 end
@@ -650,7 +658,7 @@ function UI:BuildRequestRows(query, category)
 		if not requests:_Hidden(rec) then
 			local entry = index[rec.r]
 			local skillLine = (entry and entry.skillLine) or skillOf[rec.r] or 0
-			local crafters = entry and craftersOf(entry, false, now, staleDays) or {}
+			local crafters = entry and craftersOf(entry, false, now, staleDays, true) or {}
 			local name = recipeName(rec.r, rec.i)
 			local prof = skillLine > 0 and ns.Scanner.ProfessionName(skillLine) or "?"
 			local who = ns.MemberName(rec.by)
@@ -823,8 +831,8 @@ local function createListRow(parent, index)
 	row:EnableMouseWheel(true)
 	row:SetScript("OnMouseWheel", function(_, delta) UI:Scroll(delta) end)
 	row:SetScript("OnEnter", function(self)
-		if self.data and self.data.kind == "header" then return end
 		paint(self, C.hover, C.border)
+		if self.data and self.data.kind == "header" then return end
 		if self.data and self.data.kind == "recipe" then
 			local d = self.data
 			showTooltip(self, function() recipeTooltip(self, d) end, { [d.itemID or 0] = true })
@@ -1064,12 +1072,12 @@ function UI:Create()
 		UI.offset = 0
 		UI:Refresh()
 	end)
-	-- recipe filter: known by somebody, known by nobody, all (click switches to the next)
 	-- requests view: a new request without opening a recipe first
 	self.newRequestButton = pill(mid, 160, 20)
 	self.newRequestButton:SetPoint("TOPLEFT", 12, -66)
 	self.newRequestButton.text:SetFontObject("GameFontHighlightSmall")
 	self.newRequestButton:SetScript("OnClick", function() UI:OpenRequestBox(nil) end)
+	-- recipe filter: known by somebody, known by nobody, all (click switches to the next)
 	self.recipeButton = pill(mid, 130, 20)
 	self.recipeButton:SetPoint("LEFT", self.onlineButton, "RIGHT", 4, 0)
 	self.recipeButton:SetScript("OnClick", function(self)
@@ -1462,7 +1470,22 @@ function UI:Create()
 	pick:Hide()
 	rq.pick = pick
 	rq.searchLabel, rq.search = field(-34, 332, 40, false, pick)
-	rq.search:SetScript("OnTextChanged", function() UI:DrawRequestPicks() end)
+	rq.search:SetScript("OnTextChanged", function(_, userInput)
+		UI.pickOffset = 0
+		-- a typed change starts a new search: the recipe chosen before must not be sent by mistake
+		if userInput and UI.requestRecipe then
+			UI.requestRecipe = nil
+			rq.item:SetText("")
+			UI:DrawRequestBox()
+		else
+			UI:DrawRequestPicks()
+		end
+	end)
+	pick:EnableMouseWheel(true)
+	pick:SetScript("OnMouseWheel", function(_, delta)
+		UI.pickOffset = (UI.pickOffset or 0) - (delta or 0)
+		UI:DrawRequestPicks()
+	end)
 	rq.search:SetScript("OnEnterPressed", function()
 		local first = rq.picks[1]
 		if first and first:IsShown() and first.data then UI:ChooseRequestRecipe(first.data) end
@@ -1556,14 +1579,14 @@ function UI:DrawRequestBox()
 	rq.title:SetText(ns.T("REQ_BOX_TITLE"))
 	rq.countLabel:SetText(ns.T("REQ_BOX_COUNT"))
 	rq.noteLabel:SetText(ns.T("REQ_BOX_NOTE"))
-	rq.searchLabel:SetText(ns.T("REQ_BOX_SEARCH"))
 	setPill(rq.saveButton, ns.T("REQ_SAVE"), false, self.requestRecipe == nil)
 	setPill(rq.cancelButton, ns.T("BUG_CANCEL"), false)
 	if rq.pick:IsShown() then self:DrawRequestPicks() end
 end
 
--- Recipes somebody in the guild knows whose name contains the query (2 letters at least),
--- the ones with most crafters first. Rows like those of the recipe list.
+-- Recipes somebody in the guild knows whose name or crafted item contains the query (2 letters
+-- at least): the same name first, then names beginning with it, then the ones with most
+-- crafters. Rows like those of the recipe list.
 function UI:FindRequestRecipes(query)
 	local out = {}
 	query = (query or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -1575,15 +1598,17 @@ function UI:FindRequestRecipes(query)
 		local itemID = entry.itemID
 		if (not itemID or itemID == 0) and catalog[entry.skillLine] then itemID = catalog[entry.skillLine][recipeID] or itemID end
 		local name = recipeName(recipeID, itemID)
-		if matches(query, name) then
-			local crafters = craftersOf(entry, false, now, staleDays)
+		if matches(query, name) or matches(query, ns.Scanner.ItemName(itemID or 0, true)) then
+			local crafters = craftersOf(entry, false, now, staleDays, true)
 			if #crafters > 0 then
 				out[#out + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = itemID or 0,
-					skillLine = entry.skillLine, name = name, crafters = crafters }
+					skillLine = entry.skillLine, name = name, crafters = crafters,
+					rank = name:lower() == query and 1 or (name:lower():sub(1, #query) == query and 2 or 3) }
 			end
 		end
 	end
 	table.sort(out, function(a, b)
+		if a.rank ~= b.rank then return a.rank < b.rank end
 		if #a.crafters ~= #b.crafters then return #a.crafters > #b.crafters end
 		if a.name ~= b.name then return a.name < b.name end
 		return a.recipeID < b.recipeID
@@ -1596,8 +1621,13 @@ function UI:DrawRequestPicks()
 	if not rq then return end
 	local query = rq.search:GetText() or ""
 	local found = self:FindRequestRecipes(query)
+	self.pickOffset = math.max(0, math.min(#found - REQ_PICK_ROWS, self.pickOffset or 0))
+	local offset = self.pickOffset
+	-- more than fit: the caption says which are shown, the mouse wheel moves on
+	rq.searchLabel:SetText(ns.T("REQ_BOX_SEARCH") .. (#found > REQ_PICK_ROWS
+		and string.format("  %d-%d / %d", offset + 1, offset + REQ_PICK_ROWS, #found) or ""))
 	for i, b in ipairs(rq.picks) do
-		local d = found[i]
+		local d = found[offset + i]
 		b.data = d
 		if d then
 			local chosen = self.requestRecipe and self.requestRecipe.recipeID == d.recipeID
@@ -1780,7 +1810,6 @@ function UI:SetView(view)
 	self:Refresh()
 end
 
--- skillLine nil = all professions
 -- Collapses a group of the recipe list, or opens it again; kept in ns.db.settings.collapsed.
 function UI:ToggleGroup(group)
 	if not group then return end
@@ -1791,6 +1820,7 @@ function UI:ToggleGroup(group)
 	self:Refresh()
 end
 
+-- skillLine nil = all professions
 function UI:SetCategory(skillLine)
 	self.category = skillLine
 	ns.db.settings.category = skillLine
@@ -1954,7 +1984,6 @@ function UI:DrawList(data)
 				row.name:ClearAllPoints()
 				if header then
 					row.name:SetPoint("BOTTOMLEFT", 6, 5)
-					row.name:SetWidth(LIST_W - 48)
 				else
 					row.name:SetPoint("TOPLEFT", 40, -4)
 					row.name:SetWidth(LIST_W - 86)
@@ -1969,12 +1998,13 @@ function UI:DrawList(data)
 			row.profit:SetText(profit and ((profit < 0 and HEX_LOSS or HEX_PROFIT) .. ns.Prices.Short(profit) .. "|r") or "")
 			if not header then row.name:SetWidth(LIST_W - 86 - (profit and 44 or 0)) end
 			local req = d.kind == "recipe" and d.req or -1
-			row.level:SetText(req > 1 and ns.T("LIST_LEVEL", req) or "")
+			row.level:SetText(header and d.collapsed and (HEX_MUTED .. "(" .. d.count .. ")|r")
+				or (req > 1 and ns.T("LIST_LEVEL", req) or ""))
+			if header then row.name:SetWidth(LIST_W - 48 - (d.collapsed and 40 or 0)) end
 			row.sub:SetWidth(LIST_W - 86 - (req > 1 and 40 or 0))
 			if header then
 				-- [+] / [-]: a click collapses or opens the group; a collapsed one says how many it hides
-				row.name:SetText("|T" .. (d.collapsed and PLUS_TEX or MINUS_TEX) .. ":14:14|t " .. HEX_GOLD .. d.title
-					.. "|r" .. (d.collapsed and (HEX_MUTED .. "  (" .. d.count .. ")|r") or ""))
+				row.name:SetText("|T" .. (d.collapsed and PLUS_TEX or MINUS_TEX) .. ":14:14|t " .. HEX_GOLD .. d.title .. "|r")
 				row.sub:SetText("")
 			elseif d.request then
 				-- a request: count and item, then its state and who asked
@@ -2311,8 +2341,10 @@ function UI:Draw()
 			category = nil
 			data, counts, total = build(self, query, nil)
 		end
-		local listed = 0 -- rows without the group headers
-		for _, d in ipairs(data) do if d.kind ~= "header" then listed = listed + 1 end end
+		local listed = 0 -- rows without the group headers, with those of collapsed groups
+		for _, d in ipairs(data) do
+			if d.kind ~= "header" then listed = listed + 1 elseif d.hidden then listed = listed + #d.hidden end
+		end
 		cache = { key = key, data = data, counts = counts, total = total, category = category, listed = listed }
 		self.listCache = cache
 	end
@@ -2331,10 +2363,14 @@ function UI:Draw()
 		end
 	end
 
-	-- keep the selection while it is still listed
+	-- keep the selection while it is still listed, also inside a collapsed group
 	if self.selected then
 		local found
-		for _, d in ipairs(data) do if d.key == self.selected.key then found = d break end end
+		for _, d in ipairs(data) do
+			if d.key == self.selected.key then found = d end
+			for _, h in ipairs(d.hidden or {}) do if h.key == self.selected.key then found = h break end end
+			if found then break end
+		end
 		self.selected = found
 	end
 
@@ -2359,6 +2395,7 @@ function UI:Draw()
 		self:DrawPlayerMenu()
 	end
 	self:DrawList(data)
+	if self.requestBox and self.requestBox:IsShown() and self.requestBox.pick:IsShown() then self:DrawRequestPicks() end
 
 	if not ns.store then
 		self.listEmpty:SetText(ns.T("NO_GUILD"))

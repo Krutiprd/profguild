@@ -201,6 +201,36 @@ H.test("addon requests window: NEW REQUEST searches a recipe of the guild", func
 	H.ok(rec and rec.r == 3865 and rec.n == 2, "created from the search")
 	box.search:SetText("no such thing")
 	UI:DrawRequestPicks()
+	-- typing after a choice drops it; the player filter of the recipe list does not count here
+	b._scripts.OnClick(b)
+	box.search:SetText("recipe 3865")
+	UI:ChooseRequestRecipe(box.picks[1].data)
+	H.ok(UI.requestRecipe, "chosen")
+	box.search._scripts.OnTextChanged(box.search, true)
+	H.eq(UI.requestRecipe, nil, "typing again drops the choice")
+	H.ok(box.saveButton.disabled)
+	UI.memberFilter = "Player-1-0000FFFF"
+	H.eq(#UI:FindRequestRecipes("recipe 3865"), 1, "found despite a player filter")
+	UI.memberFilter = nil
+	-- the same name first, then names beginning with it; the wheel reaches the rest
+	local entries, names = {}, { "Major Pot", "Minor Pot", "Pot", "Pot Big", "Super Pot", "A Pot", "B Pot" }
+	for i in ipairs(names) do entries[900000 + i] = { skillLine = 171, itemID = 0, guids = { ME } } end
+	local realIndex, realName = ns.store.Index, C_Spell and C_Spell.GetSpellName
+	local realRecipeName = ns.Scanner.RecipeName
+	ns.store.Index = function() return { recipes = entries } end
+	ns.Scanner.RecipeName = function(id) return names[id - 900000] or realRecipeName(id) end
+	if realName then C_Spell.GetSpellName = function(id) return names[id - 900000] or realName(id) end end
+	local found = UI:FindRequestRecipes("pot")
+	H.eq(#found, 7)
+	H.eq(found[1].name, "Pot"); H.eq(found[2].name, "Pot Big")
+	box.search:SetText("pot")
+	H.ok(box.searchLabel:GetText():find("1-5 / 7", 1, true), "caption says which are shown")
+	box.pick._scripts.OnMouseWheel(box.pick, -1)
+	box.pick._scripts.OnMouseWheel(box.pick, -1)
+	box.pick._scripts.OnMouseWheel(box.pick, -1)
+	H.eq(box.picks[5].data.name, found[7].name, "the wheel reaches the last one")
+	ns.store.Index, ns.Scanner.RecipeName = realIndex, realRecipeName
+	if realName then C_Spell.GetSpellName = realName end
 	-- opened from a recipe the search stays hidden
 	H.eq(openRecipe(UI, 3865).recipeID, 3865)
 	H.ok(not b:IsShown(), "not in the recipes view")

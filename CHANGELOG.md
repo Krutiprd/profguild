@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Recipe groups collapse and open with a click on their header; the choice is remembered. A
+  search and Leveling list everything.
+- "REQUEST CRAFT" is a big button under the recipe's name. "NEW REQUEST" in the requests view
+  finds a recipe by name without opening it first.
+- The requests view ignores the player filter of the recipe list.
+- Recipe data covers every recipe of the crafting professions: rebuilt from the client's tables
+  and Wowhead, with skill levels.
+
 ## 0.5.0 – 2026-11-20
 
 - Bug reports reach the author through the guild: a report saved with "Report a bug" or

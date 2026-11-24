@@ -223,6 +223,13 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.ok(ns.db.settings.collapsed[group], "a click on the header collapses its group")
 	H.ok(rawget(UI.rows[1], "data").collapsed, "the list was rebuilt with the group collapsed")
 	H.ok(UI.rows[1].name:GetText():find("PlusButton", 1, true), "the header shows [+]")
+	H.eq(UI.listCache.listed, 2, "the recipe count includes the collapsed group")
+	H.eq(UI.listEmpty:GetText(), "", "no empty-list text over a collapsed group")
+	local inside = rawget(UI.rows[1], "data").hidden[1]
+	UI.selected = inside
+	UI:Refresh()
+	H.eq(UI.selected and UI.selected.key, inside.key, "a recipe in a collapsed group stays selected")
+	UI.selected = nil
 	UI.rows[1]._scripts.OnClick(UI.rows[1], "LeftButton")
 	H.eq(ns.db.settings.collapsed[group], nil, "a second click opens it again")
 
