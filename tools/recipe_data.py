@@ -1,29 +1,44 @@
-"""Builds Profguild/Data.lua: for every recipe the item that teaches it and where that item comes from.
+"""Builds Profguild/Data.lua: for every recipe the item that teaches it, where that item comes from,
+the skill needed to learn it and the skill levels at which it turns yellow and grey.
 
-    python -I tools/recipe_data.py [--recheck] <path to SavedVariables/Profguild.lua> [more files]
+    python -I tools/recipe_data.py [--recheck] [--build 1.60.1.71037]
 
---recheck also looks up again the recipes Data.lua lists without a recipe item.
+--recheck asks Wowhead again for the recipe items it named no source for.
 
-Recipe IDs come from the recipe catalog and from every guild member's record in the saved
-files. For each recipe the spell name is read from Wowhead's tooltip API (WoW Forever is
-dataEnv 16) and the recipe item from Wowhead's search ("Recipe: <name>", "Pattern: ..."). The
-search result says how the item is obtained (looted, sold by NPCs, quest reward, crafted).
+Recipes, recipe items and skill levels come from the WoW Forever client's own tables, exported by
+wago.tools (product "wowf"):
+  SkillLineAbility   every recipe of a crafting skill line, with TrivialSkillLineRankLow (yellow)
+                     and TrivialSkillLineRankHigh (grey); green is the middle of the two
+  ItemXItemEffect,   the items whose "learn" effect (TriggerType 6) teaches the recipe
+  ItemEffect
+  ItemSparse         RequiredSkillRank of a recipe item: the skill needed to learn it (orange)
+How a recipe item is obtained (looted, sold by NPCs, quest reward, crafted) is not in the client;
+it comes from Wowhead's item XML ("source" in its json, WoW Forever path /forever/).
 
-Only recipes not yet in Data.lua are looked up, answers are cached in tools/.wowhead_cache.json
-and requests are paced, so a rerun after opening a new profession costs a few requests.
+Recipes learned from a trainer have no recipe item; the skill a trainer asks for is server data,
+so their learn level stays 0 (unknown).
+
+The client tables are kept in tools/.wago/<build>/, Wowhead answers in tools/.wowhead_cache.json,
+and Wowhead requests are paced, so a rerun costs only what is new.
 """
-import json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
+import csv, json, os, re, sys, time, urllib.error, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, 'Profguild', 'Data.lua')
 CACHE = os.path.join(ROOT, 'tools', '.wowhead_cache.json')
+WAGO = os.path.join(ROOT, 'tools', '.wago')
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/130.0'
-PACE = 2.0  # seconds between two requests; faster runs get the IP blocked by Wowhead's firewall
-PREFIX = r'^(Recipe|Formula|Pattern|Plans|Schematic|Manual|Design|Technique)\s*:'
+PACE = 2.0  # seconds between two Wowhead requests; faster runs get the IP blocked by its firewall
+BUILD = '1.60.1.71037'
+# Crafting skill lines: Blacksmithing, Leatherworking, Alchemy, Cooking, Mining (smelting),
+# Tailoring, Engineering, First Aid, Enchanting
+SKILL_LINES = {164, 165, 171, 185, 186, 197, 202, 129, 333}
+# Wowhead's source ids -> the letters Data.lua uses
+SOURCES = {2: 'd', 5: 'v', 4: 'q', 1: 'c'}
+LETTERS = 'dvqc'
+UNWANTED = re.compile(r'^(Deprecated|\[PH\])|\bOLD\b|\bTEST\b', re.I)
 
 cache = json.load(open(CACHE, encoding='utf-8')) if os.path.exists(CACHE) else {}
-RECHECK = False
-RECHECK_IDS = set()
 
 
 class Blocked(Exception):
@@ -31,161 +46,186 @@ class Blocked(Exception):
 
 
 class Transient(Exception):
-    """No usable answer this time (5xx, timeout, not JSON): not cached, asked again next run."""
+    """No usable answer this time (5xx, timeout, firewall page): not cached, asked again next run."""
 
 
-def get(url):
-    """JSON answer of a URL. Only real answers are cached: 200 with JSON, and 404 (unknown id)."""
-    if url in cache:
-        return json.loads(cache[url])
+def fetch(url):
     time.sleep(PACE)
     req = urllib.request.Request(url, headers={'User-Agent': UA})
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            body = r.read().decode('utf-8', 'replace')
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode('utf-8', 'replace')
     except urllib.error.HTTPError as e:
         if e.code in (403, 429):
             raise Blocked('HTTP %d' % e.code)
         if e.code != 404:
             raise Transient('HTTP %d' % e.code)
-        body = json.dumps({'error': 'HTTP 404'})
+        return 404, ''
     except (urllib.error.URLError, OSError) as e:  # timeouts, refused connections
         raise Transient(str(e))
-    try:
-        answer = json.loads(body)
-    except ValueError:
-        raise Transient('not JSON')  # e.g. a firewall challenge page
-    cache[url] = body
-    return answer
 
 
-def block(text, start):
-    i = text.find(start)
-    if i < 0:
-        return ''
-    depth = 0
-    for k in range(i, len(text)):
-        if text[k] == '{':
-            depth += 1
-        elif text[k] == '}':
-            depth -= 1
-            if depth == 0:
-                return text[i:k]
-    return ''
+def wago_table(name, build):
+    """Rows of a client table as dicts, downloaded once per build."""
+    path = os.path.join(WAGO, build, name + '.csv')
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        status, body = fetch('https://wago.tools/db2/%s/csv?build=%s' % (name, build))
+        if status != 200 or not body.startswith(('ID,', '"ID"')) and ',ID,' not in body.split('\n', 1)[0]:
+            sys.exit('wago.tools gave no %s table for build %s' % (name, build))
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.write(body)
+    with open(path, encoding='utf-8', newline='') as f:
+        return list(csv.DictReader(f))
 
 
-def recipe_ids(path):
-    text = open(path, encoding='utf-8', errors='replace').read()
-    ids = set()
-    # catalog: [skillLine] = { [recipeID] = itemID }
-    for m in re.finditer(r'\[\d+\] = \{([^{}]*)\}', block(text, '["catalog"] = {')):
-        ids.update(int(a) for a in re.findall(r'\[(\d+)\] = \d+', m.group(1)))
-    # guild records: ["r"] = { [recipeID] = itemID }
-    for m in re.finditer(r'\["r"\] = \{([^{}]*)\}', block(text, '["guilds"] = {')):
-        ids.update(int(a) for a in re.findall(r'\[(\d+)\] = \d+', m.group(1)))
-    return ids
+def item_url(item_id):
+    return 'https://www.wowhead.com/forever/item=%d&xml' % item_id
 
 
-def source_code(description):
-    d = description.lower()
-    code = ''
-    if 'looted' in d or 'drop' in d:
-        code += 'd'
-    if 'sold by' in d:
-        code += 'v'
-    if 'quest' in d:
-        code += 'q'
-    if 'crafted' in d:
-        code += 'c'
-    return code
-
-
-def norm(t):
-    return re.sub(r'[^a-z0-9]', '', t.lower())
-
-
-def lookup(recipe_id):
-    tip = get('https://nether.wowhead.com/tooltip/spell/%d?dataEnv=16' % recipe_id)
-    name = tip.get('name')
-    if not name:
+def cached_info(item_id):
+    """What the cache holds for an item: { src: Wowhead source ids, rank, name, found }, or None.
+    Older runs kept only the source ids as a string: rank and name are missing there."""
+    v = cache.get(item_url(item_id))
+    if v is None:
         return None
-    url = 'https://www.wowhead.com/forever/search/suggestions-template?q=' + urllib.parse.quote(name)
-    if RECHECK and recipe_id in RECHECK_IDS:
-        cache.pop(url, None)  # --recheck: ask the search again, not the cached answer
-    answer = get(url)
-    if 'results' not in answer:
-        cache.pop(url, None)  # no usable answer: not kept, looked up again next time
-        return None
-    for r in answer['results']:
-        if r.get('type') == 3 and re.match(PREFIX, r.get('name', '')) and norm(r['name'].split(':', 1)[1]) == norm(name):
-            return r['id'], source_code(r.get('pinDescription', ''))
-    return False  # the game knows it, Wowhead lists no item: learned from a trainer or found otherwise
+    if isinstance(v, str):
+        return {'src': v}
+    return v
+
+
+def item_info(item_id):
+    """Wowhead's data of an item: source letters, skill rank to learn it, name, whether it exists."""
+    info = cached_info(item_id)
+    if info is None or 'found' not in info:
+        status, body = fetch(item_url(item_id))
+        if status == 404 or '<error>' in body:
+            info = {'src': '', 'found': False}
+        elif '<wowhead>' not in body:
+            raise Transient('not XML')  # e.g. a firewall challenge page
+        else:
+            src = re.search(r'"source":\[([\d,]*)\]', body)
+            rank = re.search(r'"reqskillrank":(\d+)', body)
+            name = re.search(r'<name><!\[CDATA\[(.*?)\]\]></name>', body)
+            info = {'src': src.group(1) if src else '', 'rank': int(rank.group(1)) if rank else 0,
+                    'name': name.group(1) if name else '', 'found': True}
+        cache[item_url(item_id)] = info
+    return info
+
+
+def letters(info):
+    ids = {int(x) for x in (info or {}).get('src', '').split(',') if x}
+    return ''.join(SOURCES[i] for i in sorted(SOURCES, key=lambda i: LETTERS.index(SOURCES[i])) if i in ids)
 
 
 def read_data():
+    """The recipe items and source letters Data.lua already has."""
     data = {}
     if os.path.exists(DATA):
-        for rid, item, src in re.findall(r'\[(\d+)\] = \{ (\d+), "([a-z]*)" \}', open(DATA, encoding='utf-8').read()):
+        text = open(DATA, encoding='utf-8').read()
+        for rid, item, src in re.findall(r'\[(\d+)\] = \{ (\d+), "([a-z]*)" \}', text):
             data[int(rid)] = (int(item), src)
-        for rid in re.findall(r'\[(\d+)\] = false', open(DATA, encoding='utf-8').read()):
-            data[int(rid)] = False
     return data
 
 
-def write_data(data):
+def client_recipes(build):
+    """{ recipeID: (yellow, grey) } and { recipeID: [(itemID, learn skill, name)] } from the client.
+    The export lacks ItemSparse rows of many items: their learn skill and name are None here and
+    come from Wowhead (an item Wowhead does not know either is a leftover of another version)."""
+    colors = {}
+    for r in wago_table('SkillLineAbility', build):
+        if int(r['SkillLine']) in SKILL_LINES and int(r['TrivialSkillLineRankHigh']) > 0:
+            colors[int(r['Spell'])] = (int(r['TrivialSkillLineRankLow']), int(r['TrivialSkillLineRankHigh']))
+    learn_effects = {r['ID']: int(r['SpellID']) for r in wago_table('ItemEffect', build) if r['TriggerType'] == '6'}
+    sparse = {int(r['ID']): r for r in wago_table('ItemSparse', build)}
+    items = {}
+    for r in wago_table('ItemXItemEffect', build):
+        spell = learn_effects.get(r['ItemEffectID'])
+        item = sparse.get(int(r['ItemID']))
+        if spell not in colors or (item and UNWANTED.search(item['Display_lang'])):
+            continue
+        items.setdefault(spell, []).append((int(r['ItemID']), int(item['RequiredSkillRank']) if item else None,
+                                            item['Display_lang'] if item else None))
+    return colors, items
+
+
+def write_data(entries):
     lines = [
-        '-- Profguild: Data (generated by tools/recipe_data.py from Wowhead, do not edit by hand)',
-        '-- [recipeID] = { recipe item, how the item is obtained }: d looted, v sold by NPCs,',
-        '-- q quest reward, c crafted. false: Wowhead lists no item that teaches the recipe.',
+        '-- Profguild: Data (generated by tools/recipe_data.py, do not edit by hand)',
+        '-- From the WoW Forever client tables (wago.tools) and Wowhead\'s item data.',
+        '-- [recipeID] = { recipe item, how the item is obtained, skill to learn it, yellow, grey }',
+        '--   recipe item: false when no item teaches it (a trainer recipe or similar)',
+        '--   obtained: d looted, v sold by NPCs, q quest reward, c crafted ("" unknown)',
+        '--   skill to learn it: 0 unknown (trainer recipes); the recipe is orange from there',
+        '--   yellow / grey: skill at which it turns yellow / grey; green from the middle of the two',
         '',
         'local _, ns = ...',
         'ns = ns or {}',
         '',
         'ns.RecipeData = {',
     ]
-    for rid in sorted(data):
-        v = data[rid]
-        lines.append('\t[%d] = false,' % rid if v is False else '\t[%d] = { %d, "%s" },' % (rid, v[0], v[1]))
+    for rid in sorted(entries):
+        item, src, learn, yellow, grey = entries[rid]
+        lines.append('\t[%d] = { %s, "%s", %d, %d, %d },' % (rid, 'false' if item is False else item, src, learn, yellow, grey))
     lines += ['}', '']
     with open(DATA, 'w', encoding='utf-8', newline='\n') as f:
         f.write('\n'.join(lines))
 
 
-def main(paths):
-    ids = set()
-    for p in paths:
-        ids |= recipe_ids(p)
-    data = read_data()
-    # new recipes first; "no recipe item" entries are checked again only with --recheck, and
-    # keep their value until a lookup gives a real answer
-    todo = sorted(i for i in ids if i not in data)
-    if RECHECK:
-        RECHECK_IDS.update(r for r, v in data.items() if v is False)
-        todo += sorted(RECHECK_IDS)
-    print('recipes %d, already in Data.lua %d, to look up %d' % (len(ids), len(ids) - len(todo), len(todo)))
-    for n, rid in enumerate(todo, 1):
+def main(build, recheck):
+    colors, items = client_recipes(build)
+    old = read_data()
+    if recheck:
+        for url in [u for u, v in cache.items() if '&xml' in u and v == '']:
+            del cache[url]
+    # every recipe item once; an item without client data also needs its rank and name
+    todo = sorted({i for lst in items.values() for i, learn, _ in lst
+                   if cached_info(i) is None or (learn is None and 'found' not in cached_info(i))})
+    print('recipes %d, with a recipe item %d; Wowhead lookups to do %d (about %d min)'
+          % (len(colors), len(items), len(todo), len(todo) * PACE / 60 + 1))
+    stopped = False
+    for n, item in enumerate(todo, 1):
         try:
-            found = lookup(rid)
+            item_info(item)
         except Blocked as e:
             print('Wowhead refused a request (%s) after %d of %d. Stopped; run again later.' % (e, n - 1, len(todo)))
+            stopped = True
             break
         except Transient as e:
-            print('  recipe %d: no answer (%s), skipped' % (rid, e))
-            continue
-        if found is not None:
-            data[rid] = found
+            print('  item %d: no answer (%s), skipped' % (item, e))
         if n % 25 == 0:
             json.dump(cache, open(CACHE, 'w', encoding='utf-8'))
-            print('  %d / %d' % (n, len(todo)))
+            print('  %d / %d' % (n, len(todo)), flush=True)
     json.dump(cache, open(CACHE, 'w', encoding='utf-8'))
-    write_data(data)
-    items = sum(1 for v in data.values() if v)
-    print('Data.lua: %d recipes, %d with a recipe item' % (len(data), items))
+
+    entries = {}
+    for rid, (yellow, grey) in colors.items():
+        cands = []
+        for item, learn, name in items.get(rid, []):
+            info = cached_info(item)
+            if learn is None:  # no client data: Wowhead's, or not in the game at all
+                if not info or not info.get('found') or UNWANTED.search(info.get('name', '')):
+                    continue
+                learn = info.get('rank', 0)
+            src = letters(info)
+            prev = old.get(rid)
+            if prev and prev[0] == item:  # Wowhead's search named sources too: keep both
+                src = ''.join(c for c in LETTERS if c in src or c in prev[1])
+            # prefer the item Data.lua had, then one Wowhead knows a source for, then the lowest id
+            cands.append((not (prev and prev[0] == item), src == '', item, learn, src))
+        if cands:
+            _, _, item, learn, src = min(cands)
+            entries[rid] = (item, src, learn, yellow, grey)
+        else:
+            entries[rid] = (False, '', 0, yellow, grey)
+    write_data(entries)
+    with_item = sum(1 for e in entries.values() if e[0] is not False)
+    with_src = sum(1 for e in entries.values() if e[1])
+    print('Data.lua: %d recipes, %d with a recipe item, %d with a known source%s'
+          % (len(entries), with_item, with_src, ' (incomplete, Wowhead stopped)' if stopped else ''))
 
 
 if __name__ == '__main__':
-    args = [a for a in sys.argv[1:] if a != '--recheck']
-    RECHECK = '--recheck' in sys.argv[1:]
-    if not args:
-        sys.exit(__doc__)
-    main(args)
+    args = sys.argv[1:]
+    build = args[args.index('--build') + 1] if '--build' in args else BUILD
+    main(build, '--recheck' in args)

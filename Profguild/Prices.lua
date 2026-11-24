@@ -148,9 +148,9 @@ function Prices.Cost(reagents)
 	return total, missing
 end
 
--- The item that teaches a recipe and how it is obtained, from Data.lua (Wowhead):
+-- The item that teaches a recipe and how it is obtained, from Data.lua (client data, Wowhead):
 -- itemID, source letters ("d" looted, "v" sold by NPCs, "q" quest, "c" crafted).
--- false: Wowhead lists no such item (a trainer recipe or similar). nil: not in Data.lua.
+-- false: no item teaches it (a trainer recipe or similar). nil: not in Data.lua.
 function Prices.RecipeItem(recipeID)
 	local seen = ns.db and ns.db.recipeItems and ns.db.recipeItems[recipeID]
 	local e = ns.RecipeData and ns.RecipeData[recipeID]
@@ -159,9 +159,18 @@ function Prices.RecipeItem(recipeID)
 		local src = type(e) == "table" and e[1] == seen and type(e[2]) == "string" and e[2] or ""
 		return seen, src
 	end
-	if e == false then return false end
+	if e == false or (type(e) == "table" and e[1] == false) then return false end
 	if type(e) == "table" and type(e[1]) == "number" then return e[1], type(e[2]) == "string" and e[2] or "" end
 	return nil
+end
+
+-- Skill levels of a recipe from Data.lua (the client's tables): learn (orange from there; nil for
+-- trainer recipes, the client does not know it), yellow, green, grey. nil when Data.lua lacks them.
+function Prices.RecipeSkill(recipeID)
+	local e = ns.RecipeData and ns.RecipeData[recipeID]
+	if type(e) ~= "table" or type(e[4]) ~= "number" or type(e[5]) ~= "number" then return nil end
+	local learn = type(e[3]) == "number" and e[3] > 0 and e[3] or nil
+	return learn, e[4], math.floor((e[4] + e[5]) / 2), e[5]
 end
 
 -- How many of an item were on the market: Auctionator keeps the highest quantity it saw on each

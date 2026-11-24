@@ -2,3 +2,4 @@ dist/
 *.DS_Store
 tools/.wowhead_cache.json
 __pycache__/
+tools/.wago/
