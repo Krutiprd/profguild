@@ -1,6 +1,6 @@
 # 0.7.0 – Learning trainers and recipe vendors from NPCs (design)
 
-Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 8, after fourteen
+Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 9, after fourteen
 independent readers (history at the end).
 
 ## Intent
@@ -13,8 +13,8 @@ OneForAll, AzerothCore) must not be used. So the addon collects it by being play
 Success: after some weeks of normal play most trainer recipes of the guild's professions show a
 trainer, without anybody doing anything for it, and nobody notices the traffic.
 
-Non-goals: reagents sold by vendors (a later version, *(user)* starts with recipes), drops and
-quest rewards, map pins, routes, data shipped with the addon, sharing between guilds, judging
+Non-goals: reagents sold by vendors (a later version, *(user)* starts with recipes), where drops and
+quest rewards come from, routes, data shipped with the addon, sharing between guilds, judging
 whether the viewer meets a recipe's requirements (the game's tooltip on hover says them).
 
 Anti-goals: the addon changes filters or anything else in the trainer or merchant window; the other
@@ -121,7 +121,8 @@ Nothing the game marks secret (`issecretvalue`) is read. Not in combat.
 **Probe first.** A throwaway addon outside the repo logs raw values in the live client: API names and returns
 of both windows, whether known services are listed and their cost, `UnitGUID("npc")`, position and map, other
 costs, spell IDs of services, Data.lua recipes without a name at login and after a minute, services without a requirement, equal names per profession, merchant filter and
-conditional items, price at two reputations if possible, guild and faction. Gate: without a usable NPC ID
+conditional items, price at two reputations if possible, guild and faction, `C_Map.SetUserWaypoint` and
+`C_Map.CanSetUserWaypointOnMap` and whether the pin shows on the map. Gate: without a usable NPC ID
 this design is stopped and discussed again. Anything else found changes only the reader.
 
 ## Sharing
@@ -173,26 +174,43 @@ without NI, NR, NU.
 
 ## Window
 
-Detail of a recipe:
+FIND RECIPE *(user)*: a button beside REQUEST CRAFT switches the middle of a recipe's detail (reagents and cost) to where
+the recipe is had; the crafters stay *(user: layout B, crafters visible)*.
 
 ```
-Recipe: trainer                                    (existing source line)
-Hahrana Ironhide (+2), Feralas 74,43 · ~40s        (new line)
-[ REQUEST CRAFT ]            100 · 120 · 130 · 140  (numbers: right of the button, right-aligned)
+Azure Silk Vest
+Tailoring                     100 120 130 140
+Value on AH 1g 20s
+[ REQUEST CRAFT ] [ FIND RECIPE ]
+Pattern: Azure Silk Vest
+ Auction house                           80s      (green frame: cheapest)
+ 1 day ago
+ Vendor: Maria Lumere          ~95s [ Map ]
+ Stormwind 56,64, limited stock
+ Vendor: Jormund                ~1g [ Map ]
+ Ironforge 38,30
+[ BACK TO REAGENTS ]
 ```
 
-- The new line has its own hover area; it and the numbers are empty for members.
+- Both buttons are 146 x 22 px at the place of today's one; without a requests object FIND RECIPE keeps its place. Requests and
+  members have neither the button nor the list. FIND RECIPE pressed again, BACK TO REAGENTS or selecting another row goes back. A
+  refresh of prices or guild data redraws the list in place and keeps the scroll position, clamped to its length.
+- Rows, 3 visible; the wheel over the list scrolls it (elsewhere the crafters as today): AH (price and age as the source line
+  shows them, else "not seen on the AH"; only when a recipe item exists), then trainers, then vendors, then one row for drop, quest
+  or crafted, without a place. Trainers and vendors each: the player's map, then the lowest price, then name. No sheet of a vendor
+  or trainer that Data.lua says exists: a row "nobody in the guild opened one yet". Nothing known at all: "source not known".
+- `~` marks a price from guildmates. What this account read itself (npcOwn) in the last 30 days is shown instead of the guild's,
+  without `~`; also no `~` when both are equal. Unknown price or position: left out. Limited stock and other costs
+  ("5 Merchant's Favor") are said.
+- Green frame: the row with the lowest copper price, among at least two with one; rows with other costs do not take part *(call)*.
+- Hover of a row: name, zone, "seen n days ago", what `~` means; for a vendor or the AH the game's tooltip of the recipe item
+  (reputation, level, specialisation it asks for).
+- Map *(user)*: sets the game's map pin at the place (whole percent, where the finder stood), where the client allows it; else
+  through TomTom when it is there (`TomTom:AddWaypoint`); else, and without a place, the button is hidden.
 - Vendors of a recipe are those of Data.lua's recipe item or of the one in `recipeItems`.
-- The new line shows the trainer, else the vendor. Which of several: the player's map, then the lowest price,
-  then name. "(+2)" counts the others. `~` marks a price from guildmates. What this
-  account read itself (npcOwn) in the last 30 days is shown instead of the guild's, without `~`; also no `~` when both are equal. Unknown price or position: left out. Limited stock and other
-  costs ("5 Merchant's Favor") are said. Too long: cut at the end, hover has all.
-- Hover lists all (at most 12, "and n more") with "seen n days ago", for a vendor the game's tooltip of the recipe
-  item (reputation, level, specialisation it asks for), and what `~` means.
-- The skill numbers move from the end of the value or profession line (the code that rewrites `d.sub` goes), where they would be cut, to the right of the
-  button. Requests (no button) have them at the same place and have no NPC line.
-- The window keeps its size: the crafter list shows 3 rows instead of 4 and scrolls as today; what is
-  between the new line and it moves down one line. Same positions for requests.
+- The skill numbers move from the end of the value or profession line (the code that rewrites `d.sub` goes) to the right end of
+  the profession line, right-aligned. Requests have them at the same place. The source line stays; the crafter list keeps its 4
+  rows and all other positions.
 - Skill: learn from own or guild trainer sheets (the later day, then greatest; not above grey), else `recipeInfo.m`, else
   Data.lua (> 0); grey from `recipeInfo.g`, else Data.lua; yellow from Data.lua, at most grey; green = floor((yellow
   + grey) / 2). Equal numbers are shown. Learn unknown: three numbers. Learn above yellow: learn and grey only;
@@ -230,6 +248,8 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
   no more than one write per register and 14 days each, except that
   a price may also rise to a higher reading; with a login after each visit; different Data.lua
   versions; unknown against known; a price too high with a visit at least every 30 days (corrected within 60).
+- FIND RECIPE: each state (several, trainer only, nothing found, unknown, no recipe item, place missing, pin not allowed
+  with and without TomTom), switching recipe, kind and view while it is open, a guildmate's data arriving while it is open.
 - Reader with mocks made from the probe's log; UI texts and layout; mutation tests as for 0.6.0.
 - Independent review, up to 4 rounds, then a test in the game by docs/TESTOVANIE.md. Push and tag only
   when the user says so.
@@ -258,3 +278,4 @@ File split, hash function, message field names, exact texts, where the probe's l
   memory, no churn at the entry limit, counters of rule 9 at most once per 60 s, ND after a block restored.
 - 7 to 8 (readers 13, 14): a blocked NU waits instead of being dropped, ND after a block only when something was lost and
   spread (rules 6 and 7 simulated with it: 100 of 100 runs of blocked clients equal within 550 s), NR cap does not mute, bounds and message filling exact, mixed forgers accepted.
+- 8 to 9 (user): FIND RECIPE with map pin and AH price instead of the NPC line; the window keeps its positions.
