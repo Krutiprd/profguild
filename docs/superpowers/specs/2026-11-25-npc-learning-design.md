@@ -1,6 +1,6 @@
 # 0.7.0 – Learning trainers and recipe vendors from NPCs (design)
 
-Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 6, after ten
+Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 7, after twelve
 independent readers (history at the end).
 
 ## Intent
@@ -61,8 +61,8 @@ give the same, and an unknown never erases a known value.
 **Expiry:** a register not read for 120 days is removed, an entry when `seen` is; the head goes with the last
 entry, and its own days do not expire. Done before every digest, inventory and answer, and at load. *Sendable* is an
 entry whose `seen` is at most 118 days old, with its registers of at most 118 days, and the head of a sheet with a
-sendable entry. Only that is sent, hashed, counted and compared. A received entry without `seen` is ignored, so is a register
-older than 120 days or with a day later than tomorrow.
+sendable entry. Only that is sent, hashed, counted and compared. A received entry without `seen` is ignored, so is an entry's register
+older than 120 days and any register with a day later than tomorrow. Head registers have no lower age limit.
 
 **Own visit** is turned into registers of today, and these are merged (so one that loses a tie changes nothing):
 - `seen`: when absent or older than 14 days.
@@ -87,8 +87,9 @@ reaches guild B. Without a guild the window reads npcOwn. Both tables are valida
 Messages carry the faction, another one is ignored.
 
 Limits, applied in this order after a merge: entries per sheet (no limit by size: one by content does not converge); 20 000 entries; 600 sheets. The older goes first (`seen`; a
-sheet by its newest entry), then by a hash of the key (not by ID: new recipes have the highest IDs). A message over
-4 kB (as received, encoded) is ignored; the largest sheet must fit (a test).
+sheet by its newest entry), then by a hash of the key (not by ID: new recipes have the highest IDs). All IDs and counts are 1 to
+2^31-1. A message over 6 kB (as received, encoded) is ignored; a sheet with every bound at its maximum must fit (a test).
+An own visit or npcOwn import adds no entry to a sheet at its entry limit unless an entry older than 14 days makes room.
 Any change of fields, order or limits raises EPOCH or the protocol. Receipt never depends on Data.lua or the catalog.
 
 Trust: the guild is trusted as for prices. A malicious member can fill the table and waste
@@ -106,8 +107,8 @@ services, else it is left out. Service to recipe, among the recipes (Data.lua an
 4. the only one of those left by 3 (or of all, when 3 left none) whose Data.lua grey is at least the skill.
 Otherwise not recorded, and counted for `/pg npc`. Recipes without Data.lua take part in 1 and 2 only. After
 matching, two services that give one recipe different values are both left out, and a skill above the recipe's Data.lua grey is recorded as unknown. While a recipe's name is
-not loaded, 2-4 decide nothing for its profession; tried again 60 s later by a timer (the same NPC still open), from then on such
-recipes are left out. `recipeInfo.m` keeps its present behaviour.
+not loaded, 2-4 decide nothing for its profession; the services read are kept in memory and
+matched again 60 s after the first attempt, window open or not; from then until logout recipes still without a name are left out. `recipeInfo.m` keeps its present behaviour.
 
 Merchant: MERCHANT_SHOW and MERCHANT_UPDATE, 0.5 s debounce, all entries by index. An item counts when
 `GetItemInfoInstant` says class 9 or Data.lua has it as a recipe item. Some entry without an item ID yet: again
@@ -118,7 +119,7 @@ Nothing the game marks secret (`issecretvalue`) is read. Not in combat.
 
 **Probe first.** A throwaway addon outside the repo logs raw values in the live client: API names and returns
 of both windows, whether known services are listed and their cost, `UnitGUID("npc")`, position and map, other
-costs, spell IDs of services, services without a requirement, equal names per profession, merchant filter and
+costs, spell IDs of services, Data.lua recipes without a name at login and after a minute, services without a requirement, equal names per profession, merchant filter and
 conditional items, price at two reputations if possible, guild and faction. Gate: without a usable NPC ID
 this design is stopped and discussed again. Anything else found changes only the reader.
 
@@ -136,7 +137,8 @@ clients do not receive it. Sends follow `ns.SendBlockReason`. All messages carry
 All carry the sender's current table hash, which replaces what was known of it.
 
 Rules, simulated by reader 10 for revision 5 with registers and own visits (repo encoding, per-prefix throttle, 2 % and 5 % loss
-per part, 20/72/200 clients): all 180 burst runs equal within 375 s. The changes of revision 6 were simulated one by one or in part.
+per part, 20/72/200 clients): all 180 burst runs equal within 375 s. Reader 12 ran the rules below together: 108 of 108 burst
+runs equal within 620 s, all other sharing targets met (2 rules changed after it found them failing).
 Epoch, faction and 0.6.0 were not simulated. The plan rebuilds the simulation as tests before the module is
 wired in; its targets bind, and details may change to meet them. A *round* begins with an NI and ends with 12 s
 without NI, NR, NU.
@@ -157,13 +159,14 @@ without NI, NR, NU.
    per 30 s.
 6. After 2 rounds without any NU or NR (bystanders count them too), or 3 own NIs for it, the pair (our hash, their hash) is
    ignored for an hour. Any change of either hash lifts it.
-7. The next message goes when the one before has left, plus 1 s per part. Blocked: what waits is dropped; the next
-   hello's ND brings it.
+7. The next message goes when the one before has left, plus 1 s per part. Blocked: what waits is dropped; 10 s after
+   the block ends an ND is sent (also one due while blocked), unless an equal one was heard in the last 60 s.
 8. An own visit sends its changed sheet (whole) after 3 s; blocked: as rule 7.
 9. Caps, by the sender name the game gives (not a field of the message): one NI per 60 s and 2 ND per minute have any
    effect; the same sheet content is sent at most 6 times an hour for one sender, and for one table hash
    carried by NIs: one counter per (name, content) and one per (hash, content),
-   raised for every NI and NR heard that lacks or asks for it, whoever it is addressed to.
+   raised for every NI heard that lacks it (both) and NR heard that asks for it (name only), whoever it is addressed to, at most
+   once per 60 s each.
 10. A failed send (OnSendFailed) undoes its marks. Guild change stops the object.
 
 ## Window
@@ -199,7 +202,7 @@ Hahrana Ironhide (+2), Feralas 74,43 · ~40s        (new line)
 
 Test first. Pure module with an adapter; a simulated guild with the real encoding, the server's throttle per prefix
 (10, then 1 part per second; the mock is extended) and ChatThrottleLib's byte budget. Loss is per part, 2 %.
-- Merge: random sheets in any order, with duplicates: equal tables. At the limits: equal after an exchange.
+- Merge: random sheets in any order, with duplicates: equal tables. At the limits: equal after repeated exchanges.
 - Two clients cut off from each other read different recipes of one trainer, and a newcomer reads a trainer 5 s after
   login: nothing is lost anywhere.
 - Full game (100 trainers with 20-70 recipes, 80 vendors, 10 sold each): at most 60 kB on the wire with 2 % loss; newcomer
@@ -210,7 +213,7 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
   after one new visit.
 - One changing visit per minute, 2 % loss, 40 % of clients blocked now and then: at most 300 kB per hour guild-wide at
   72 clients, and equal within 30 minutes after the visits stop.
-- Holder blocked mid-answer or before its first NU, logs out; newcomers one after another; other epoch, faction, protocol;
+- Holder blocked mid-answer or before its first NU, logs out; newcomers one after another (95 % complete in 10 minutes, all in 40); other epoch, faction, protocol;
   a client refusing sheets (limits): at most 30 kB per 3 hours
   at 72 clients without visits.
 - 0.6.0 files from the tag in the same guild: no error, no extra message.
@@ -219,7 +222,7 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
 - Crossing NIs while some registers are 119 days old, and one clock 6 hours off: the traffic stops or stays under 250 kB an hour.
 - All clients blocked 30 % of the time, one holder of 30 sheets: equal within 15 minutes.
 - Forged NI, NR, ND floods (honest clients' traffic): under 400 kB an hour; junk NU every 3 s, also with the guild's hash: a newcomer is
-  complete within 30 minutes. A forger of empty tables' NIs may delay a newcomer by an hour *(call)*.
+  complete within 30 minutes. A forger of empty tables' NIs may delay a newcomer by an hour, so may a forger of NIs and NRs together *(call)*.
 - One merchant with two costs of one item; costs that differ between visitors.
 - Expiry at the edge with clients that do not log out; alternating visits with two reputations, languages, positions:
   no more than one write per register and 14 days each, except that
@@ -249,3 +252,5 @@ File split, hash function, message field names, exact texts, where the probe's l
   remembered, ND after a block, caps by the game's sender name, bounded wait; targets made exact.
 - 5 to 6 (readers 9, 10, both with models): price rule for other costs, no limit by size and no memory of evictions, names
   not loaded, postponement only by a useful NU, NR cap, echo only when it adds, hash widths, ND after a block dropped.
+- 6 to 7 (readers 11, 12, both with models): head registers without age limit, 6 kB and ID bounds, names matched again from
+  memory, no churn at the entry limit, counters of rule 9 at most once per 60 s, ND after a block restored.
