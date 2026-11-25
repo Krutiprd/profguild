@@ -1,6 +1,6 @@
 # 0.7.0 – Learning trainers and recipe vendors from NPCs (design)
 
-Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 7, after twelve
+Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 8, after fourteen
 independent readers (history at the end).
 
 ## Intent
@@ -87,8 +87,9 @@ reaches guild B. Without a guild the window reads npcOwn. Both tables are valida
 Messages carry the faction, another one is ignored.
 
 Limits, applied in this order after a merge: entries per sheet (no limit by size: one by content does not converge); 20 000 entries; 600 sheets. The older goes first (`seen`; a
-sheet by its newest entry), then by a hash of the key (not by ID: new recipes have the highest IDs). All IDs and counts are 1 to
-2^31-1. A message over 6 kB (as received, encoded) is ignored; a sheet with every bound at its maximum must fit (a test).
+sheet by its newest entry), then by a hash of the key (not by ID: new recipes have the highest IDs). NPC, recipe, item and currency IDs and the counts
+of other costs are 1 to 2^31-1 (map as in the table; an ND's number of sheets 0-600). A message over 6144 bytes (as received, encoded) is ignored; a sheet with every bound at its maximum must fit (a test; columns or a flat array do,
+nested lists hardly, keyed tables not).
 An own visit or npcOwn import adds no entry to a sheet at its entry limit unless an entry older than 14 days makes room.
 Any change of fields, order or limits raises EPOCH or the protocol. Receipt never depends on Data.lua or the catalog.
 
@@ -133,7 +134,7 @@ clients do not receive it. Sends follow `ns.SendBlockReason`. All messages carry
 - `NI` inventory, to everyone: (NPC ID, 16-bit hash of the random number of this NI together with the sheet's content hash of at least 31 bits) of all
   sendable sheets, delta coded (about 0.75 kB for 180, 1.7 kB for 600).
 - `NR` request, to the sender of an NI: NPC IDs.
-- `NU` update: whole sheets, about 1 kB per message.
+- `NU` update: whole sheets, about 1 kB per message; a sheet that would take it over 1 kB starts a new message.
 All carry the sender's current table hash, which replaces what was known of it.
 
 Rules, simulated by reader 10 for revision 5 with registers and own visits (repo encoding, per-prefix throttle, 2 % and 5 % loss
@@ -158,9 +159,10 @@ without NI, NR, NU.
 5. 12-24 s after the last NI, NR or NU: ND if our hash changed or differs from the NI's, unless an equal one was heard; at most one
    per 30 s.
 6. After 2 rounds without any NU or NR (bystanders count them too), or 3 own NIs for it, the pair (our hash, their hash) is
-   ignored for an hour. Any change of either hash lifts it.
-7. The next message goes when the one before has left, plus 1 s per part. Blocked: what waits is dropped; 10 s after
-   the block ends an ND is sent (also one due while blocked), unless an equal one was heard in the last 60 s.
+   ignored for an hour. A round in which we lacked IDs but did not ask because of rule 4's NR cap is not counted by us. Any change of either hash lifts it.
+7. The next message goes when the one before has left, plus 1 s per part. Blocked: a planned or failed NU
+   waits up to 30 s, tried again every 1-3 s, then it is dropped; other messages are dropped. If something was dropped or due while
+   blocked, an ND is sent 10-20 s after the block ends, unless an equal one was heard in the last 60 s.
 8. An own visit sends its changed sheet (whole) after 3 s; blocked: as rule 7.
 9. Caps, by the sender name the game gives (not a field of the message): one NI per 60 s and 2 ND per minute have any
    effect; the same sheet content is sent at most 6 times an hour for one sender, and for one table hash
@@ -220,9 +222,9 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
 - Hostile: wrong types, NaN, fractions, huge lists, names with escapes, floods, future days, forged NI and ND.
 - Recipe traffic beside a full answer arrives at most 3 s later than without it, with no other addon sending.
 - Crossing NIs while some registers are 119 days old, and one clock 6 hours off: the traffic stops or stays under 250 kB an hour.
-- All clients blocked 30 % of the time, one holder of 30 sheets: equal within 15 minutes.
-- Forged NI, NR, ND floods (honest clients' traffic): under 400 kB an hour; junk NU every 3 s, also with the guild's hash: a newcomer is
-  complete within 30 minutes. A forger of empty tables' NIs may delay a newcomer by an hour, so may a forger of NIs and NRs together *(call)*.
+- All clients blocked 30 % of the time, block periods 12-45, 100-1200 s, one holder of 30 sheets: equal within 15 minutes.
+- Forged NI, NR, ND floods, each kind alone (honest clients' traffic): under 400 kB an hour; junk NU every 3 s, also with the guild's hash: a newcomer is
+  complete within 30 minutes. A forger of empty tables' NIs may delay a newcomer by an hour; one who mixes kinds may delay it as long as they last and cause up to about 520 kB an hour *(call)*.
 - One merchant with two costs of one item; costs that differ between visitors.
 - Expiry at the edge with clients that do not log out; alternating visits with two reputations, languages, positions:
   no more than one write per register and 14 days each, except that
@@ -254,3 +256,5 @@ File split, hash function, message field names, exact texts, where the probe's l
   not loaded, postponement only by a useful NU, NR cap, echo only when it adds, hash widths, ND after a block dropped.
 - 6 to 7 (readers 11, 12, both with models): head registers without age limit, 6 kB and ID bounds, names matched again from
   memory, no churn at the entry limit, counters of rule 9 at most once per 60 s, ND after a block restored.
+- 7 to 8 (readers 13, 14): a blocked NU waits instead of being dropped, ND after a block only when something was lost and
+  spread (rules 6 and 7 simulated with it: 100 of 100 runs of blocked clients equal within 550 s), NR cap does not mute, bounds and message filling exact, mixed forgers accepted.
