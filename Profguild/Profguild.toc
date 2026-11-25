@@ -28,6 +28,7 @@ Requests.lua
 Reports.lua
 NpcData.lua
 NpcTable.lua
+NpcSync.lua
 Prices.lua
 Data.lua
 Scanner.lua
