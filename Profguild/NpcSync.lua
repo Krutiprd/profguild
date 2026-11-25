@@ -369,7 +369,7 @@ function step(self)
 			-- rule 10: the sheets go back and wait like blocked ones (rule 7)
 			self.sending = false
 			self.push = self.push or {}
-			for _, id in ipairs(sent) do self.push[id] = self.push[id] or {} end
+			for _, id in ipairs(sent) do self.push[id] = {} end
 			return later(self, rnd(self, NpcSync.RETRY))
 		end
 		after(self, ceil(size / NpcSync.PART), function() step(self) end)
@@ -546,7 +546,7 @@ local function onNR(self, sender, h, to, ids)
 		local push = self.push or {}
 		for _, id in ipairs(ids) do
 			if tab:Sendable(id) and count(self, sender .. ":" .. contentKey(self, id)) then
-				push[id] = push[id] or {}
+				push[id] = {}
 			end
 		end
 		self.push = push
@@ -597,7 +597,7 @@ local function onNU(self, sender, h, x)
 				if not R.echo[id] then
 					R.echo[id] = true
 					self.push = self.push or {}
-					self.push[id] = self.push[id] or {}
+					self.push[id] = {}
 					if not self.sending then later(self, rnd(self, NpcSync.ECHO_DELAY)) end
 				end
 			end
