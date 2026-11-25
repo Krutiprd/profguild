@@ -1,6 +1,8 @@
 -- Profguild: NpcData
 -- What the guild knows about trainers and recipe vendors: one sheet per NPC, merged register by
 -- register. Pure: no WoW API, days are integers (UTC days, server time / 86400).
+-- Here: sheets, merge, own visits, validation, packing, hashes; the table of sheets
+-- (NpcData.New) is in NpcTable.lua.
 --
 -- Sheet:
 --   { name=, nd=,                 name and its day (both nil when unknown)
@@ -42,6 +44,12 @@ NpcData.MAX_COSTS = 3
 NpcData.MAX_NAME = 60
 NpcData.MAX_MAP = 100000
 NpcData.MAX_SKILL = 1000
+NpcData.SEND = 118               -- only entries and registers of at most this age are sent and hashed
+NpcData.LIMIT_ENTRIES = 20000    -- entries in a table
+NpcData.LIMIT_SHEETS = 600       -- sheets in a table
+NpcData.EPOCH = 1                -- raised when held data must be dropped; carried in messages, saved
+NpcData.PROTOCOL = 1             -- raised with any change of fields, order or limits on the wire
+NpcData.HASH_MOD = 2147483647
 
 local floor, type, pairs, sort = math.floor, type, pairs, table.sort
 local RENEW, FALL = NpcData.RENEW, NpcData.FALL
@@ -393,3 +401,204 @@ function NpcData.Visit(held, reading, today, limit)
 	end
 	return m, not deepEqual(m, held)
 end
+
+-- Packing --------------------------------------------------------------------
+-- A sheet as a list of columns (for the wire and for SavedVariables):
+--   [1] npcID, [2] name or false, [3] its day or false, [4] map or false, [5] x, [6] y, [7] place day,
+--   [8] base: the sheet's newest day; every other day is stored as base - day,
+--   trained, in ascending ID: [9] IDs (the first, then differences), [10] skill, [11] copper,
+--     [12] seen, [13] skill day, [14] copper day,
+--   sold, in ascending ID: [15] IDs, [16] copper (-1: price unknown), [17] number of other costs * 2 + l,
+--     [18] seen, [19] price day, [20] the other costs of all prices in order, flat: kind, id, count, ...
+-- A day column whose days all equal the base is 0; the day of an unknown register is stored as 0.
+
+local function sortedKeys(t)
+	local ks = {}
+	for k in pairs(t) do ks[#ks + 1] = k end
+	sort(ks)
+	return ks
+end
+
+local function flat(col)
+	for i = 1, #col do
+		if col[i] ~= 0 then return col end
+	end
+	return 0
+end
+
+function NpcData.Pack(id, s)
+	local base = 0
+	local function up(d) if d and d > base then base = d end end
+	up(s.nd) up(s.pd)
+	for _, e in pairs(s.t) do up(e[1]) up(e[3]) up(e[5]) end
+	for _, e in pairs(s.v) do up(e[1]) up(e[3]) end
+	local list = { id, s.name or false, s.name and base - s.nd or false, s.map or false,
+		s.map and s.x or false, s.map and s.y or false, s.map and base - s.pd or false, base }
+
+	local ids, sk, cp, d1, d2, d3, prev = {}, {}, {}, {}, {}, {}, 0
+	for i, k in ipairs(sortedKeys(s.t)) do
+		local e = s.t[k]
+		ids[i], prev = k - prev, k
+		sk[i], cp[i], d1[i] = e[2], e[4], base - e[1]
+		d2[i] = e[2] ~= 0 and base - e[3] or 0
+		d3[i] = e[4] ~= 0 and base - e[5] or 0
+	end
+	list[9], list[10], list[11], list[12], list[13], list[14] = ids, sk, cp, flat(d1), flat(d2), flat(d3)
+
+	local vc, terms, e1, e2, costs
+	ids, vc, terms, e1, e2, costs, prev = {}, {}, {}, {}, {}, {}, 0
+	for i, k in ipairs(sortedKeys(s.v)) do
+		local e = s.v[k]
+		local p = e[2]
+		ids[i], prev = k - prev, k
+		e1[i] = base - e[1]
+		if p then
+			vc[i], terms[i], e2[i] = p.c, #p.o * 2 + p.l, base - e[3]
+			for _, c in ipairs(p.o) do
+				costs[#costs + 1], costs[#costs + 2], costs[#costs + 3] = c[1], c[2], c[3]
+			end
+		else
+			vc[i], terms[i], e2[i] = -1, 0, 0
+		end
+	end
+	list[15], list[16], list[17], list[18], list[19], list[20] = ids, vc, terms, flat(e1), flat(e2), costs
+	return list
+end
+
+-- Whether c is a list of exactly n integers lo..hi (or 0, when zero allows a column of base days).
+local function column(c, n, lo, hi, zero)
+	if zero and c == 0 then return true end
+	if type(c) ~= "table" or c[n + 1] ~= nil then return false end
+	for i = 1, n do
+		if not int(c[i], lo, hi) then return false end
+	end
+	return true
+end
+
+local function at(c, i) return c == 0 and 0 or c[i] end
+
+local function unpackSheet(l)
+	local base = l[8]
+	if not int(base, 0, 1e7) then return nil end
+	local s = { t = {}, v = {} }
+	if l[2] ~= false then
+		if type(l[2]) ~= "string" or not int(l[3], 0, base) then return nil end
+		s.name, s.nd = l[2], base - l[3]
+	end
+	if l[4] ~= false then
+		if not (int(l[4], 0, NpcData.MAX_MAP) and int(l[5], 0, 100) and int(l[6], 0, 100) and int(l[7], 0, base)) then
+			return nil
+		end
+		s.map, s.x, s.y, s.pd = l[4], l[5], l[6], base - l[7]
+	end
+
+	local ids = l[9]
+	if type(ids) ~= "table" then return nil end
+	local n = #ids
+	if not (column(ids, n, 1, NpcData.MAX_ID) and column(l[10], n, 0, NpcData.MAX_SKILL)
+		and column(l[11], n, 0, NpcData.MAX_COPPER) and column(l[12], n, 0, base, true)
+		and column(l[13], n, 0, base, true) and column(l[14], n, 0, base, true)) then
+		return nil
+	end
+	local id = 0
+	for i = 1, n do
+		id = id + ids[i]
+		if id > NpcData.MAX_ID then return nil end
+		local skill, copper = l[10][i], l[11][i]
+		s.t[id] = { base - at(l[12], i), skill, skill ~= 0 and base - at(l[13], i) or 0,
+			copper, copper ~= 0 and base - at(l[14], i) or 0 }
+	end
+
+	ids = l[15]
+	if type(ids) ~= "table" then return nil end
+	n = #ids
+	local costs = l[20]
+	if not (column(ids, n, 1, NpcData.MAX_ID) and column(l[16], n, -1, NpcData.MAX_COPPER)
+		and column(l[17], n, 0, NpcData.MAX_COSTS * 2 + 1) and column(l[18], n, 0, base, true)
+		and column(l[19], n, 0, base, true) and type(costs) == "table") then
+		return nil
+	end
+	local k = 0
+	id = 0
+	for i = 1, n do
+		id = id + ids[i]
+		if id > NpcData.MAX_ID then return nil end
+		local c, terms = l[16][i], l[17][i]
+		local e = { base - at(l[18], i), false, 0 }
+		if c >= 0 then
+			local o = {}
+			for j = 1, floor(terms / 2) do
+				o[j] = { costs[k + 1], costs[k + 2], costs[k + 3] }
+				k = k + 3
+			end
+			e[2], e[3] = { c = c, o = o, l = terms % 2 }, base - at(l[19], i)
+		elseif terms ~= 0 then
+			return nil
+		end
+		s.v[id] = e
+	end
+	if not column(costs, k, 1, NpcData.MAX_ID) then return nil end
+	return s
+end
+
+-- id (nil when the list has none) and the valid sheet (nil when the list is broken or holds no entry).
+function NpcData.Unpack(list, today)
+	if type(list) ~= "table" or not validID(list[1]) then return nil, nil end
+	local ok, s = pcall(unpackSheet, list)
+	if not ok or not s then return list[1], nil end
+	return list[1], NpcData.Valid(s, today)
+end
+
+-- Hashes ---------------------------------------------------------------------
+-- The mixing of GuildPrices.Hash: every intermediate stays below 2^53.
+
+local M = NpcData.HASH_MOD
+
+local function mix(x) return (x + (x % 65521) * (x % 65519)) % M end
+local function feed(x, v) return mix((x * 48271 + v % M) % M) end
+
+-- 0..HASH_MOD-1 over the canonical numbers of a (sendable) sheet: absent parts by a marker, entries
+-- in ID order.
+function NpcData.HashSheet(id, s)
+	local x = feed(1, id)
+	if s.name then
+		x = feed(feed(feed(x, 1), s.nd), #s.name)
+		for i = 1, #s.name do x = feed(x, s.name:byte(i)) end
+	else
+		x = feed(x, 0)
+	end
+	if s.map then x = feed(feed(feed(feed(feed(x, 1), s.map), s.x), s.y), s.pd) else x = feed(x, 0) end
+	local ks = sortedKeys(s.t)
+	x = feed(x, #ks)
+	for _, k in ipairs(ks) do
+		local e = s.t[k]
+		x = feed(x, k)
+		for j = 1, 5 do x = feed(x, e[j]) end
+	end
+	ks = sortedKeys(s.v)
+	x = feed(x, #ks)
+	for _, k in ipairs(ks) do
+		local e = s.v[k]
+		local p = e[2]
+		x = feed(feed(x, k), e[1])
+		if p then
+			x = feed(feed(feed(feed(feed(x, 1), p.c), #p.o), p.l), e[3])
+			for _, c in ipairs(p.o) do x = feed(feed(feed(x, c[1]), c[2]), c[3]) end
+		else
+			x = feed(x, 0)
+		end
+	end
+	return x
+end
+
+-- 0..65535: a hash under a salt, so hashes equal in some bits differ under most salts.
+function NpcData.SaltedHash(hash, salt)
+	local x = feed(feed(feed(7, hash), salt), hash)
+	return floor(x / 32768) % 65536
+end
+
+-- For NpcTable.lua (the table of sheets), not for other callers.
+NpcData.internal = {
+	validID = validID, count = count, trim = trim, copyPrice = copyPrice, deepEqual = deepEqual,
+	priceWrites = priceWrites, makeRoom = makeRoom, EMPTY = EMPTY,
+}

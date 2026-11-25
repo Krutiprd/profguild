@@ -27,6 +27,7 @@ GuildPrices.lua
 Requests.lua
 Reports.lua
 NpcData.lua
+NpcTable.lua
 Prices.lua
 Data.lua
 Scanner.lua

@@ -1,7 +1,7 @@
 -- NPC sheets: registers, merge (a join), own visits and validation.
 -- Days in these tests are D + n, so a day of the brief like "100@10" is D + 10.
 local H = ...
-local ns = H.newNamespace({ "NpcData.lua" })
+local ns = H.newNamespace({ "NpcData.lua", "NpcTable.lua" })
 local ND = ns.NpcData
 
 local D = 20000
@@ -415,4 +415,480 @@ H.test("npc data: Valid", function()
 	ND.Valid(unsorted, T)
 	H.eq(unsorted.v[200][2].o[1][1], 2, "the argument is untouched")
 	H.eq(valid(function(s) s.extra = 5 end).extra, nil, "unknown fields dropped")
+end)
+
+-- Table ----------------------------------------------------------------------
+
+H.loadLibs()
+local LS, LD = LibStub("LibSerialize"), LibStub("LibDeflate")
+local function encode(msg) return LD:EncodeForWoWAddonChannel(LD:CompressDeflate(LS:Serialize(msg))) end
+local function nu(packed)
+	return { t = "NU", pv = 1, e = 1, f = "Alliance", s = "Player-1234-0ABCDEF0", h = 2147483646, x = packed }
+end
+
+-- A table on its own clock: tab, set(day).
+local function newTable(day, saved, limits)
+	local clock = day * 86400 + 3600
+	local tab = ND.New(saved or {}, function() return clock end, limits)
+	return tab, function(d) clock = d * 86400 + 3600 end
+end
+
+local function entries(n, seen, first)
+	local t = {}
+	for id = first or 1, (first or 1) + n - 1 do t[id] = { seen, 0, 0, 0, 0 } end
+	return t
+end
+
+-- Random valid sheets over the full domains (days today - 120 .. tomorrow).
+local function wideSheet(today)
+	local function day() return today + 2 - rnd(122) end
+	local s = { t = {}, v = {} }
+	if rnd(3) > 1 then
+		local b = {}
+		for i = 1, rnd(60) do
+			local c = 31 + rnd(95)
+			if c == 124 then c = 65 end
+			b[i] = string.char(c)
+		end
+		s.name, s.nd = table.concat(b), today + 1 - rnd(5000)
+	end
+	if rnd(3) > 1 then s.map, s.x, s.y, s.pd = rnd(100001) - 1, rnd(101) - 1, rnd(101) - 1, today + 1 - rnd(5000) end
+	for _ = 1, rnd(30) - 1 do
+		local e = { day(), 0, 0, 0, 0 }
+		if rnd(3) > 1 then e[2], e[3] = rnd(1000), day() end
+		if rnd(3) > 1 then e[4], e[5] = rnd(9999990000), day() end
+		s.t[rnd(2147483647)] = e
+	end
+	for _ = 1, rnd(10) - 1 do
+		local e = { day(), false, 0 }
+		if rnd(3) > 1 then
+			local o = {}
+			for j = 1, rnd(4) - 1 do o[j] = { rnd(2), rnd(2147483647), rnd(2147483647) } end
+			table.sort(o, costLess)
+			e[2], e[3] = price(rnd(9999990001) - 1, o, rnd(2) - 1), day()
+		end
+		s.v[rnd(2147483647)] = e
+	end
+	return ND.Valid(s, today)
+end
+
+H.test("npc data: expiry", function()
+	local B = D + 300
+	local tab, set = newTable(B)
+	tab:MergeIn(5, { name = "N", nd = B - 900, t = { [1] = { B, 10, B - 1, 20, B }, [2] = { B - 1, 0, 0, 0, 0 } },
+		v = { [3] = { B, price(5), B } } })
+	set(B + 119)
+	H.ok(tab:Get(5).t[2] and tab:Get(5).t[1][2] == 10, "120 days old stays")
+	set(B + 120)
+	local s = tab:Get(5)
+	H.eq(s.t[2], nil, "entry 121 days old goes with its seen")
+	H.eq(s.t[1][2], 0, "register 121 days old goes") H.eq(s.t[1][3], 0)
+	H.eq(s.t[1][4], 20, "register 120 days old stays") H.eq(s.name, "N", "head stays")
+	H.ok(tab.saved.s[5], "saved")
+	set(B + 121)
+	H.eq(tab:Get(5), nil, "head goes with the last entry")
+	H.eq(tab.saved.s[5], nil, "saved too")
+
+	-- Expire runs before Hash, SendableIDs and Sendable when the day advanced without a call
+	for _, call in ipairs({ "Hash", "SendableIDs", "Sendable", "SheetHash", "Count" }) do
+		local t2, set2 = newTable(B)
+		t2:MergeIn(5, { t = { [1] = { B, 0, 0, 0, 0 } }, v = {} })
+		H.ok(t2:Hash() ~= 0, "held")
+		set2(B + 121)
+		t2[call](t2, 5)
+		H.eq(t2.saved.s[5], nil, "expired before " .. call)
+	end
+end)
+
+H.test("npc data: sendable", function()
+	local T = D + 300
+	local tab = newTable(T)
+	tab:MergeIn(5, { name = "N", nd = T - 900, t = {
+		[1] = { T - 118, 10, T - 119, 20, T - 118 }, [2] = { T - 119, 5, T - 119, 0, 0 } },
+		v = { [3] = { T - 118, price(5), T - 119 } } })
+	local c = tab:Sendable(5)
+	H.ok(deepEq(c, { name = "N", nd = T - 900, t = { [1] = { T - 118, 0, 0, 20, T - 118 } },
+		v = { [3] = { T - 118, false, 0 } } }), "118 in, 119 out, older registers out")
+	H.eq(tab:Get(5).t[2][2], 5, "held still")
+	local other = newTable(T)
+	other:MergeIn(5, { name = "N", nd = T - 900, t = { [1] = { T - 118, 0, 0, 20, T - 118 } },
+		v = { [3] = { T - 118, false, 0 } } })
+	H.eq(tab:Hash(), other:Hash(), "hash without the 119-day parts")
+	H.eq(tab:SheetHash(5), other:SheetHash(5))
+	local s1, e1 = tab:Count()
+	H.eq(s1, 1, "counted: sheets") H.eq(e1, 2, "counted: sendable entries")
+
+	local old = newTable(T)
+	old:MergeIn(6, { name = "N", nd = T, t = { [1] = { T - 119, 0, 0, 0, 0 } }, v = {} })
+	H.ok(old:Get(6), "held")
+	H.eq(old:Sendable(6), nil, "a sheet without a sendable entry")
+	H.eq(#old:SendableIDs(), 0) H.eq(old:Hash(), 0) H.eq(old:SheetHash(6), nil)
+	H.eq(select(1, old:Count()), 0)
+end)
+
+H.test("npc data: hash", function()
+	local T = D + 3
+	H.eq(newTable(T):Hash(), 0, "empty is 0")
+	for trial = 1, 30 do
+		local sheets = {}
+		for i = 1, 12 do sheets[i] = { 100 + rnd(20), randomSheet() } end
+		local a, b = newTable(T), newTable(T)
+		for i = 1, #sheets do a:MergeIn(sheets[i][1], sheets[i][2]) end
+		for i = #sheets, 1, -1 do b:MergeIn(sheets[i][1], sheets[i][2]) end
+		H.eq(a:Hash(), b:Hash(), "independent of insertion order " .. trial)
+		H.ok(a:Hash() >= 0 and a:Hash() < 2147483647 and a:Hash() == math.floor(a:Hash()), "range")
+	end
+
+	local function sheet()
+		return { name = "Ab", nd = T - 5, map = 3, x = 4, y = 5, pd = T - 6,
+			t = { [10] = { T, 7, T - 1, 9, T - 2 }, [11] = { T - 3, 0, 0, 0, 0 } },
+			v = { [20] = { T, price(5, { { 1, 2, 3 }, { 2, 2, 3 } }, 1), T - 1 }, [21] = { T, false, 0 } } }
+	end
+	local function hashOf(change)
+		local s = sheet()
+		change(s)
+		local tab = newTable(T)
+		tab:MergeIn(1, s)
+		return tab:Hash()
+	end
+	local base = hashOf(function() end)
+	H.eq(base, hashOf(function() end), "equal content equal hash")
+	local seen = { [base] = true }
+	local changes = {
+		function(s) s.name = "Ac" end, function(s) s.nd = T - 4 end, function(s) s.name, s.nd = nil, nil end,
+		function(s) s.map = 4 end, function(s) s.x = 5 end, function(s) s.y = 6 end, function(s) s.pd = T - 7 end,
+		function(s) s.map, s.x, s.y, s.pd = nil, nil, nil, nil end,
+		function(s) s.t[12] = s.t[11]; s.t[11] = nil end, function(s) s.t[11] = nil end,
+		function(s) s.v[22] = s.v[21]; s.v[21] = nil end, function(s) s.v[22] = { T, false, 0 } end,
+		function(s) s.v[20][2].l = 0 end, function(s) s.v[20][2].c = 6 end, function(s) s.v[20][3] = T end,
+		function(s) s.v[20][2].o[2][3] = 4 end, function(s) s.v[20][2].o[2][2] = 3 end,
+		function(s) s.v[20][2].o[2] = nil end, function(s) s.v[21][1] = T - 1 end,
+		function(s) s.v[21][2], s.v[21][3] = price(0), T end,
+	}
+	for j = 1, 5 do
+		changes[#changes + 1] = function(s) s.t[10][j] = s.t[10][j] - 1 end
+	end
+	for i, change in ipairs(changes) do
+		local h = hashOf(change)
+		H.ok(not seen[h], "one register or day changed: different hash " .. i)
+		seen[h] = true
+	end
+	local x, y = newTable(T), newTable(T)
+	x:MergeIn(1, sheet()) y:MergeIn(2, sheet())
+	H.ok(x:Hash() ~= y:Hash(), "another NPC ID")
+
+	-- salts
+	local tab = newTable(T)
+	local pairsTested = 0
+	for i = 1, 300 do
+		local h1 = rnd(2147483647) - 1
+		local h2 = (h1 + 65536 * rnd(32767)) % 2147483647
+		if h2 % 65536 == h1 % 65536 and h2 ~= h1 then
+			pairsTested = pairsTested + 1
+			local differ = 0
+			for salt = 1, 64 do
+				local s1, s2 = tab:SaltedHash(h1, salt), tab:SaltedHash(h2, salt)
+				H.ok(s1 >= 0 and s1 <= 65535 and s1 == math.floor(s1), "salted range")
+				if s1 ~= s2 then differ = differ + 1 end
+			end
+			H.ok(differ >= 60, "equal low 16 bits differ under 60 of 64 salts " .. i .. ": " .. differ)
+		end
+	end
+	H.ok(pairsTested > 100, "pairs tested")
+	H.eq(tab:SaltedHash(12345, 7), tab:SaltedHash(12345, 7), "fixed")
+end)
+
+H.test("npc data: limits", function()
+	local T = D + 300
+	-- 201 trained
+	local tab = newTable(T)
+	tab:MergeIn(1, { t = entries(200, T, 1), v = {} })
+	H.eq(select(2, tab:Count()), 200)
+	local changed, taken = tab:MergeIn(1, { t = { [1000] = { T - 1, 0, 0, 0, 0 } }, v = {} })
+	H.ok(not changed and not taken, "the older is not taken")
+	H.eq(tab:Get(1).t[1000], nil)
+	changed, taken = tab:MergeIn(1, { t = { [1001] = { T, 0, 0, 0, 0 } }, v = {} })
+	local worst, worstHash = nil, -1
+	for id = 1, 200 do if ND.KeyHash(id) > worstHash then worst, worstHash = id, ND.KeyHash(id) end end
+	if ND.KeyHash(1001) > worstHash then worst = 1001 end
+	H.ok(worst ~= 1001 and worst ~= 200, "the case tests the hash, not the ID")
+	H.eq(tab:Get(1).t[worst], nil, "ties by hash")
+	H.ok(tab:Get(1).t[1001] and tab:Get(1).t[200], "the highest IDs stay")
+	H.ok(changed and taken, "taken")
+	H.eq(select(2, tab:Count()), 200)
+
+	-- 601 sheets
+	tab = newTable(T)
+	for id = 1, 601 do tab:MergeIn(id, { t = { [1] = { id == 300 and T - 1 or T, 0, 0, 0, 0 } }, v = {} }) end
+	H.eq(tab:Count(), 600, "600 sheets") H.eq(tab:Get(300), nil, "the older sheet goes")
+	changed, taken = tab:MergeIn(300, { t = { [1] = { T - 1, 0, 0, 0, 0 } }, v = {} })
+	H.ok(not changed and not taken, "refused")
+	tab:MergeIn(300, { t = { [1] = { T, 0, 0, 0, 0 } }, v = {} })
+	worst, worstHash = nil, -1
+	for id = 1, 601 do if ND.KeyHash(id) > worstHash then worst, worstHash = id, ND.KeyHash(id) end end
+	H.eq(tab:Count(), 600) H.eq(tab:Get(worst), nil, "equal days: by hash")
+	H.ok(worst ~= 601 and tab:Get(300) and tab:Get(601), "not by ID")
+	for id in pairs(tab.saved.s) do H.ok(tab:Get(id), "saved current") end
+
+	-- 20000 entries
+	tab = newTable(T)
+	for id = 1, 100 do tab:MergeIn(id, { t = entries(150, T, 1), v = entries(49, T, 1) }) end
+	tab:MergeIn(101, { t = entries(110, T - 5, 1), v = {} })
+	local s, n = tab:Count()
+	H.eq(n, 20000, "20000 entries") H.eq(s, 101) H.eq(count(tab:Get(101).t), 100, "the older entries go")
+	tab:MergeIn(102, { t = entries(20, T - 6, 1), v = entries(5, T, 1) })
+	s, n = tab:Count()
+	H.eq(n, 20000, "20000 entries") H.eq(s, 102)
+	H.eq(count(tab:Get(102).t), 0, "the oldest go") H.eq(count(tab:Get(102).v), 5)
+	H.eq(count(tab:Get(101).t), 95, "then the older of another sheet")
+	tab:MergeIn(103, { t = entries(5, T - 7, 1), v = {} })
+	H.eq(tab:Get(103), nil, "a sheet whose entries all go goes with them") H.eq(tab.saved.s[103], nil)
+
+	-- the order: entries per sheet, entries, sheets (as at load)
+	local function load(sheets, limits)
+		local saved = { e = 1, s = {} }
+		for id, sh in pairs(sheets) do saved.s[id] = ND.Pack(id, sh) end
+		return newTable(T, saved, limits)
+	end
+	tab = load({ [1] = { t = { [1] = { T, 0, 0, 0, 0 }, [2] = { T - 9, 0, 0, 0, 0 } }, v = {} },
+		[2] = { t = entries(3, T - 1), v = {} }, [3] = { t = entries(2, T - 2), v = {} } },
+		{ t = 2, v = 2, entries = 5, sheets = 3 })
+	H.eq(count(tab:Get(3).t), 2, "per sheet before entries") H.eq(tab:Get(1).t[2], nil)
+	H.eq(select(2, tab:Count()), 5)
+	tab = load({ [1] = { t = { [1] = { T, 0, 0, 0, 0 }, [2] = { T - 9, 0, 0, 0, 0 } }, v = {} },
+		[2] = { t = entries(2, T - 1), v = {} }, [3] = { t = entries(2, T - 2), v = {} } },
+		{ t = 2, v = 2, entries = 5, sheets = 2 })
+	H.eq(tab:Get(1).t[2], nil, "entries before sheets") H.eq(tab:Get(3), nil)
+	H.eq(select(2, tab:Count()), 3)
+
+	-- three tables over every limit exchanging repeatedly become equal
+	local L = { t = 4, v = 3, entries = 40, sheets = 8 }
+	for trial = 1, 20 do
+		local tabs = { (newTable(T, nil, L)), (newTable(T, nil, L)), (newTable(T, nil, L)) }
+		for _, x in ipairs(tabs) do
+			for _ = 1, 12 do
+				local sh = { t = {}, v = {} }
+				for _ = 1, rnd(8) do sh.t[rnd(10)] = { T - rnd(5), rnd(3) - 1, T - rnd(5), 0, 0 } end
+				for _ = 1, rnd(5) - 1 do sh.v[rnd(10)] = { T - rnd(5), rnd(2) == 1 and price(rnd(3)) or false, T - rnd(5) } end
+				for _, e in pairs(sh.t) do if e[2] == 0 then e[3] = 0 end end
+				for _, e in pairs(sh.v) do if not e[2] then e[3] = 0 end end
+				x:MergeIn(rnd(20), sh)
+				local ns, ne = 0, 0
+				for _, h in pairs(x.sheets) do ns, ne = ns + 1, ne + count(h.t) + count(h.v) end
+				H.ok(ne <= 40 and ns <= 8 and count(x.saved.s) == ns, "within the limits")
+			end
+		end
+		local equal = false
+		for _ = 1, 10 do
+			for i, from in ipairs(tabs) do
+				for j, to in ipairs(tabs) do
+					if i ~= j then
+						for _, id in ipairs(from:SendableIDs()) do to:MergeIn(id, from:Sendable(id)) end
+					end
+				end
+			end
+			equal = tabs[1]:Hash() == tabs[2]:Hash() and tabs[2]:Hash() == tabs[3]:Hash()
+				and deepEq(tabs[1].saved, tabs[2].saved) and deepEq(tabs[2].saved, tabs[3].saved)
+			if equal then break end
+		end
+		H.ok(equal, "equal after exchanges " .. trial)
+		H.eq(tabs[1]:Count(), 8, "full " .. trial)
+	end
+end)
+
+H.test("npc data: pack", function()
+	local T = D + 300
+	local n = 0
+	while n < 1000 do
+		local s = wideSheet(T)
+		if s then
+			n = n + 1
+			local id = rnd(2147483647)
+			local list = ND.Pack(id, s)
+			local id2, s2 = ND.Unpack(list, T)
+			H.eq(id2, id, "id " .. n)
+			H.ok(deepEq(s2, s), "round trip " .. n)
+			local ok, back = LS:Deserialize(LS:Serialize(list))
+			H.ok(ok and deepEq(select(2, ND.Unpack(back, T)), s), "serialized round trip " .. n)
+		end
+	end
+
+	local same, mixed = { t = {}, v = {} }, { t = {}, v = {} }
+	for id = 1, 50 do
+		same.t[id * 37] = { T, 300, T, 5000, T }
+		mixed.t[id * 37] = { T - id % 7, 300, T - id % 5, 5000, T - id % 3 }
+	end
+	H.ok(#LS:Serialize(ND.Pack(1, same)) < #LS:Serialize(ND.Pack(1, mixed)), "all days equal is shorter")
+
+	local good = { name = "N", nd = T, map = 1, x = 2, y = 3, pd = T,
+		t = { [5] = { T, 1, T, 2, T - 1 }, [9] = { T - 1, 0, 0, 3, T } },
+		v = { [7] = { T, price(5, { { 1, 2, 3 } }, 1), T }, [8] = { T, false, 0 } } }
+	local function bad(change)
+		local list = ND.Pack(4, good)
+		local ok, _, s = pcall(function()
+			local l = change(list) or list
+			return ND.Unpack(l, T)
+		end)
+		return ok and s == nil
+	end
+	H.ok(not bad(function() end), "the good one unpacks")
+	H.ok(deepEq(select(2, ND.Unpack(ND.Pack(4, good), T)), good), "and equals")
+	local cases = {
+		string = function() return "x" end, empty = function() return {} end, number = function() return 5 end,
+		idString = function(l) l[1] = "4" end, idNaN = function(l) l[1] = 0 / 0 end,
+		baseNaN = function(l) l[8] = 0 / 0 end, baseString = function(l) l[8] = "1" end, baseNeg = function(l) l[8] = -1 end,
+		nameNumber = function(l) l[2] = 5 end, ndNaN = function(l) l[3] = 0 / 0 end, mapString = function(l) l[4] = "1" end,
+		idsString = function(l) l[9] = "x" end, idsNaN = function(l) l[9][2] = 0 / 0 end, idsZero = function(l) l[9][2] = 0 end,
+		idsFraction = function(l) l[9][1] = 1.5 end, idsInf = function(l) l[9][1] = 1 / 0 end,
+		skillShort = function(l) l[10][2] = nil end, skillLong = function(l) l[10][3] = 1 end,
+		copperNaN = function(l) l[11][1] = 0 / 0 end, seenString = function(l) l[12] = { "0", "1" } end,
+		seenTable = function(l) l[12] = { {}, 1 } end, daysShort = function(l) l[14] = { 1 } end,
+		vidsShort = function(l) l[16][2] = nil end, termsNaN = function(l) l[17][1] = 0 / 0 end,
+		termsOver = function(l) l[17][1] = 9 end, costsShort = function(l) l[20][3] = nil end,
+		costsLong = function(l) l[20][4] = 1 end, costsNaN = function(l) l[20][2] = 0 / 0 end,
+		costsString = function(l) l[20] = "abc" end, cutInHalf = function(l) for i = 11, 20 do l[i] = nil end end,
+		unknownPriceWithTerms = function(l) l[17][2] = 2 end, negativeDay = function(l) l[18] = { -1, 0 } end,
+	}
+	for name, change in pairs(cases) do H.ok(bad(change), "nil without an error: " .. name) end
+end)
+
+local function maximumSheet(today)
+	local s = { name = string.rep("\126", 60), nd = today - rnd(119) + 1, map = 100000, x = 100, y = 100,
+		pd = today - rnd(119) + 1, t = {}, v = {} }
+	local function day() return today - rnd(119) + 1 end
+	local function bigID() return 1073741824 + rnd(1073741823) end
+	while count(s.t) < 200 do s.t[bigID()] = { day(), 1000, day(), 9999990000, day() } end
+	while count(s.v) < 60 do
+		local o = {}
+		for j = 1, 3 do o[j] = { 2, bigID(), 2147483647 } end
+		table.sort(o, costLess)
+		s.v[bigID()] = { day(), price(9999990000, o, 1), day() }
+	end
+	return s
+end
+
+local measured = {}
+
+H.test("npc data: maximum sheet", function()
+	local T = D + 300
+	local worst = 0
+	for _ = 1, 20 do
+		local s = maximumSheet(T)
+		H.ok(deepEq(ND.Valid(s, T), s), "every value valid")
+		local bytes = #encode(nu({ ND.Pack(2147483647, s) }))
+		if bytes > worst then worst = bytes end
+	end
+	H.ok(worst <= 6144, "maximum sheet in one NU: " .. worst)
+	measured.maximum = worst
+end)
+
+H.test("npc data: full game", function()
+	local T = D + 300
+	local sheets, id = {}, 3000
+	local pools = {}
+	for p = 1, 12 do
+		pools[p] = {}
+		for i = 1, 150 do pools[p][i] = { 2000 + rnd(60000), 5 * rnd(90), 10 * rnd(5000) } end
+	end
+	for i = 1, 180 do
+		id = id + 5 + rnd(85)
+		local s = { name = "Trainer Name " .. id, nd = T, map = 1400 + rnd(100), x = rnd(100), y = rnd(100), pd = T, t = {}, v = {} }
+		if i <= 100 then
+			local pool = pools[rnd(12)]
+			local n = 19 + rnd(51)
+			while count(s.t) < n do
+				local r = pool[rnd(150)]
+				s.t[r[1]] = { T, r[2], T, r[3], T }
+			end
+		else
+			while count(s.v) < 10 do s.v[2000 + rnd(40000)] = { T, price(100 * rnd(500)), T } end
+		end
+		sheets[#sheets + 1] = ND.Pack(id, s)
+	end
+	local total, messages, msg = 0, 0, {}
+	for i, p in ipairs(sheets) do
+		msg[#msg + 1] = p
+		if i == #sheets or #encode(nu(msg)) >= 1000 then
+			total, messages = total + #encode(nu(msg)), messages + 1
+			msg = {}
+		end
+	end
+	H.ok(total <= 60000, "full game: " .. total)
+	print(string.format("    npc data: maximum sheet %s bytes (worst of 20 seeds), full game %d bytes in %d NU",
+		tostring(measured.maximum), total, messages))
+end)
+
+H.test("npc data: load", function()
+	local T = D + 300
+	local function sh(seen) return { name = "N", nd = T, t = { [1] = { seen, 5, seen, 0, 0 } }, v = {} } end
+	local tab = newTable(T)
+	tab:MergeIn(1, sh(T)) tab:MergeIn(2, sh(T - 1))
+	H.ok(deepEq(tab.saved.s[1], ND.Pack(1, tab:Get(1))), "saved is current")
+	local again = newTable(T, tab.saved)
+	H.eq(again:Hash(), tab:Hash(), "loads what was saved")
+
+	local other = newTable(T, { e = 2, s = { [1] = ND.Pack(1, sh(T)) } })
+	H.eq(other:Count(), 0, "other epoch dropped") H.eq(other.saved.e, 1) H.eq(next(other.saved.s), nil)
+
+	local saved = { e = 1, s = "junk" }
+	local junk = newTable(T, saved)
+	H.eq(junk:Count(), 0, "s a string") H.eq(type(saved.s), "table")
+	junk:MergeIn(1, sh(T))
+	H.ok(saved.s[1], "saved into the given table")
+
+	local half = ND.Pack(2, sh(T))
+	for i = 11, #half do half[i] = nil end
+	saved = { e = 1, s = { [1] = ND.Pack(1, sh(T)), [2] = half, [3] = "x", [4] = ND.Pack(5, sh(T)), x = { 1 },
+		[6] = ND.Pack(6, sh(T - 121)) } }
+	local rest = newTable(T, saved)
+	H.eq(rest:Count(), 1, "the rest loads") H.ok(rest:Get(1))
+	H.eq(saved.s[2], nil, "cut in half dropped") H.eq(saved.s[3], nil) H.eq(saved.s[4], nil, "wrong key")
+	H.eq(saved.s.x, nil) H.eq(saved.s[6], nil, "expired at load")
+
+	-- 600 sheets, 20000 entries: load and hash
+	saved = { e = 1, s = {} }
+	for id = 1, 600 do
+		local s = { name = "Some Trainer " .. id, nd = T, map = 1400, x = 50, y = 50, pd = T, t = {}, v = {} }
+		for r = 1, 34 do s.t[id * 100 + r] = { T - r % 50, 5 * r, T - r % 30, 100 * r, T - r % 20 } end
+		saved.s[id] = ND.Pack(id, s)
+	end
+	local start = os.clock()
+	local big = newTable(T, saved)
+	local h = big:Hash()
+	local took = os.clock() - start
+	local s, n = big:Count()
+	H.eq(s, 600) H.eq(n, 20000) H.ok(h > 0)
+	H.ok(took < 2, "load and hash in under 2 s: " .. took)
+	start = os.clock()
+	for i = 1, 600 do big:MergeIn(1000 + i, { t = entries(3, T, 1), v = {} }) big:Hash() end
+	H.ok(os.clock() - start < 2, "600 merges and hashes at the limits: " .. (os.clock() - start))
+	H.eq(big:Count(), 600)
+end)
+
+H.test("npc data: import", function()
+	local T = D + 300
+	local clock = (T - 40) * 86400
+	local now = function() return clock end
+	local guild, own = ND.New({}, now), ND.New({}, now)
+	guild:MergeIn(5, { t = { [1] = { T - 40, 90, T - 40, 0, 0 } }, v = {} })
+	clock = (T - 28) * 86400
+	guild:MergeIn(5, { t = { [2] = { T - 28, 80, T - 28, 0, 0 } }, v = {} })
+	clock = (T - 20) * 86400
+	own:OwnVisit(5, { name = "Own", t = { [1] = { skill = 100, copper = 500 }, [2] = { skill = 100 } } })
+	own:OwnVisit(6, { name = "Six", v = { [3] = { price = price(7) } } })
+	clock = T * 86400
+	guild:MergeIn(5, { t = { [1] = { T - 10, 0, 0, 600, T - 10 } }, v = {} })
+	guild:Import(own)
+	local s = guild:Get(5)
+	H.ok(deepEq(s.t[1], { T - 10, 100, T - 20, 600, T - 10 }), "a 20-day-old register enters as of its own day, newer stays")
+	H.ok(deepEq(s.t[2], { T - 28, 80, T - 28, 0, 0 }), "an 8 days newer one does not")
+	H.eq(s.name, "Own") H.eq(s.nd, T - 20)
+	H.ok(deepEq(guild:Get(6), own:Get(6)), "a sheet the guild lacks")
+	local h, saved = guild:Hash(), copy(guild.saved)
+	guild:Import(own)
+	H.eq(guild:Hash(), h, "twice changes nothing") H.ok(deepEq(guild.saved, saved))
+	H.eq(own:Get(5).t[1][2], 100, "own untouched")
+
+	guild:Clear()
+	H.eq(guild:Count(), 0, "clear") H.eq(next(guild.saved.s), nil)
 end)
