@@ -48,12 +48,13 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 | Klik na profesiu vľavo | Len jej recepty; po `/reload` ostane vybraná. „Všetky“ ukáže všetko |
 | Zoznam receptov (aj spoluhráča) | Zlaté nadpisy skupín podľa typu itemu (napr. „Armor – Plate“), brnenie prvé, enchanty v „Ostatné“ na konci; v skupine najvyšší item level hore; nadpis sa nedá vybrať |
 | Klik na nadpis skupiny [-] | Skupina sa zbalí na [+] s počtom receptov; počet receptov hore ani otvorený detail sa nezmenia; po `/reload` ostane zbalená; hľadanie ukáže aj jej recepty |
+| Prihlás sa, počkaj 30 sekúnd, „NEDOSTUPNÉ“, Blacksmithing a Tailoring | Recepty aj bez toho, že by okno profesie niekto v guilde otvoril |
 | Koliesko myši nad zoznamom | Zoznam sa posunie, vpravo sa hýbe zlatý pruh |
 | „ONLINE: ÁNO“ a „Sync guildy“ | Filter len online crafterov; sync vypíše správu do chatu |
 | Otvor profesiu, potom „RECEPTY: DOSTUPNÉ“ → „NEDOSTUPNÉ“ | Recepty, ktoré v guilde nikto nevie: sivá ikona, „v guilde to nikto nevie“, v detaile suroviny s cenou |
 | Klik na nedostupný recept (napr. Alchemy) po skene AH | V detaile „Recept: drop, vendor · na AH 37g 40s (dnes)“; v zozname „recept na AH …“ |
 | Ďalší klik „RECEPTY: VŠETKY“, potom znova „DOSTUPNÉ“ | Všetky recepty spolu; potom len tie, čo niekto vie |
-| Spoluhráč, ktorý profesiu nikdy neotvoril, dá `/pg sync` | Do minúty má v „NEDOSTUPNÉ“ tie isté recepty; `/pg status` ukazuje katalóg receptov |
+| Dvaja hráči po minúte od prihlásenia dajú `/pg sync`, potom obaja `/pg status` | Po ďalšej minúte majú v katalógu receptov rovnaké počty |
 | Klik na ikonu pri minimape | Otvorí a zavrie okno; ťahaním sa ikona posúva okolo minimapy |
 | `/pg minimap` | Ikona zmizne, druhý raz sa vráti; po `/reload` ostane poloha aj skrytie |
 | Reštart hry | Dáta ostanú (`/pg status` ukazuje rovnaký počet postáv) |
@@ -80,7 +81,7 @@ Treba 2–3 hráčov s Profguildom 0.4.0.
 | Krok | Očakávaný výsledok |
 | --- | --- |
 | A otvorí recept v `/pg`, dá „POŽIADAŤ O VÝROBU“, počet 2, poznámka | V chate „Požiadavka odoslaná guilde“; v karte „POŽIADAVKY“ je „2x …“, otvorená |
-| A v karte POŽIADAVKY dá „NOVÁ POŽIADAVKA“, napíše časť názvu a vyberie recept | Presný názov je prvý, koliesko posúva dlhší zoznam; „ODOSLAŤ“ funguje až po výbere |
+| A v karte POŽIADAVKY dá „NOVÁ POŽIADAVKA“, napíše časť názvu a vyberie recept | Nájde aj recept, ktorý nikto nevie („nikto nevie“). Presný názov je prvý, koliesko posúva dlhší zoznam; „ODOSLAŤ“ funguje až po výbere |
 | B, ktorý recept vie | V chate „A žiada guildu o 2x …“; v karte POŽIADAVKY ju vidí |
 | B dá „VYROBÍM TO“ | U A v chate „B vyrobí tvoju požiadavku“; stav „prevzal B“ u všetkých |
 | B a C dajú „VYROBÍM TO“ naraz (na pokyn) | Po pár sekundách u všetkých ten istý výrobca (kto bol skôr); ten druhý dostane v chate „Tvoje prevzatie … neplatí“ |

@@ -1,8 +1,8 @@
 -- Profguild: Catalog
 -- Every recipe of every profession, whether somebody in the guild knows it or not. Recipes are
 -- game data, the same for everyone, so the catalog is kept per account and never travels inside
--- the character records. It is filled from opened profession windows (the game lists the
--- recipes a character has not learned too) and shared with the guild on demand.
+-- the character records. It is filled from Data.lua (ns.SeedCatalog in Core.lua) and from opened
+-- profession windows (the game lists the recipes a character has not learned too) and shared with the guild on demand.
 --
 -- Messages (same channel and protocol version as Sync):
 --   KD digest  { t="KD", pv, s=senderGuid, d={ [skillLine] = number of recipes } }
@@ -123,7 +123,7 @@ function CatalogMT:Add(skillLine, list)
 	return added
 end
 
--- Forgets one profession (/pg catalog clear). The next profession window fills it again.
+-- Forgets one profession (/pg catalog clear). A profession window or the next login fills it again.
 function CatalogMT:Remove(skillLine)
 	if self.saved[skillLine] == nil then return false end
 	self.saved[skillLine] = nil

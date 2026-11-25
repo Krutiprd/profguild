@@ -209,6 +209,10 @@ H.test("addon requests window: NEW REQUEST searches a recipe of the guild", func
 	box.search._scripts.OnTextChanged(box.search, true)
 	H.eq(UI.requestRecipe, nil, "typing again drops the choice")
 	H.ok(box.saveButton.disabled)
+	H.eq(#UI:FindRequestRecipes("recipe 3866"), 1, "a recipe nobody knows can be asked for")
+	box.search:SetText("recipe 3866")
+	H.eq(box.picks[1].count:GetText(), ns.T("REQ_PICK_NOBODY"))
+	box.search:SetText("recipe 3865")
 	UI.memberFilter = "Player-1-0000FFFF"
 	H.eq(#UI:FindRequestRecipes("recipe 3865"), 1, "found despite a player filter")
 	receive(ns, { t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { anaRequest(ns, 3865, 1) } })

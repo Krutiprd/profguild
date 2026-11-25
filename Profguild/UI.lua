@@ -1591,9 +1591,9 @@ function UI:DrawRequestBox()
 	if rq.pick:IsShown() then self:DrawRequestPicks() end
 end
 
--- Recipes somebody in the guild knows whose name or crafted item contains the query (2 letters
+-- Recipes, known in the guild or not, whose name or crafted item contains the query (2 letters
 -- at least): the same name first, then names beginning with it, then the ones with most
--- crafters. Rows like those of the recipe list.
+-- crafters; so known recipes come before unknown ones of the same kind. Rows like those of the recipe list.
 function UI:FindRequestRecipes(query)
 	local out = {}
 	query = (query or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -1601,17 +1601,24 @@ function UI:FindRequestRecipes(query)
 	if #query < 2 or not store then return out end
 	local now, staleDays = GetServerTime(), ns.StaleDays()
 	local catalog = ns.catalog and ns.catalog:All() or {}
-	for recipeID, entry in pairs(store:Index().recipes) do
-		local itemID = entry.itemID
-		if (not itemID or itemID == 0) and catalog[entry.skillLine] then itemID = catalog[entry.skillLine][recipeID] or itemID end
+	local index = store:Index().recipes
+	local function consider(recipeID, skillLine, itemID, entry)
 		local name = recipeName(recipeID, itemID)
 		if matches(query, name) or matches(query, ns.Scanner.ItemName(itemID or 0, true)) then
-			local crafters = craftersOf(entry, false, now, staleDays, true)
-			if #crafters > 0 then
-				out[#out + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = itemID or 0,
-					skillLine = entry.skillLine, name = name, crafters = crafters,
-					rank = name:lower() == query and 1 or (name:lower():sub(1, #query) == query and 2 or 3) }
-			end
+			local crafters = entry and craftersOf(entry, false, now, staleDays, true) or {}
+			out[#out + 1] = { kind = "recipe", key = "r" .. recipeID, recipeID = recipeID, itemID = itemID or 0,
+				skillLine = skillLine, name = name, crafters = crafters,
+				rank = name:lower() == query and 1 or (name:lower():sub(1, #query) == query and 2 or 3) }
+		end
+	end
+	for recipeID, entry in pairs(index) do
+		local itemID = entry.itemID
+		if (not itemID or itemID == 0) and catalog[entry.skillLine] then itemID = catalog[entry.skillLine][recipeID] or itemID end
+		consider(recipeID, entry.skillLine, itemID, entry)
+	end
+	for skillLine, list in pairs(catalog) do
+		for recipeID, itemID in pairs(list) do
+			if not index[recipeID] then consider(recipeID, skillLine, itemID, nil) end
 		end
 	end
 	table.sort(out, function(a, b)
@@ -1639,7 +1646,7 @@ function UI:DrawRequestPicks()
 		if d then
 			local chosen = self.requestRecipe and self.requestRecipe.recipeID == d.recipeID
 			b.name:SetText((chosen and "> " or "") .. qualityName(d))
-			b.count:SetText(ns.T("REQ_PICK_CRAFTERS", #d.crafters))
+			b.count:SetText(#d.crafters > 0 and ns.T("REQ_PICK_CRAFTERS", #d.crafters) or ns.T("REQ_PICK_NOBODY"))
 			b:Show()
 		else
 			b:Hide()
@@ -2410,7 +2417,7 @@ function UI:Draw()
 		self.listEmpty:SetText(ns.T("EMPTY_DB"))
 	elseif cache.listed == 0 and not members and (ns.db.settings.recipeFilter or "known") ~= "known"
 		and not self.memberFilter and not (ns.catalog and next(ns.catalog:All())) then
-		-- the catalog fills only from opened profession windows (own or a guildmate's)
+		-- the catalog fills a little after the login, and from opened profession windows
 		self.listEmpty:SetText(ns.T("CATALOG_EMPTY"))
 	elseif cache.listed == 0 then
 		self.listEmpty:SetText(ns.T("NO_RESULTS"))

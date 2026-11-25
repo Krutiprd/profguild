@@ -112,7 +112,7 @@ function M.install()
 
 	_G.GetTime = function() return M.time end
 	_G.GetFramerate = function() return 60 end
-	_G.GetServerTime = function() return 1794615000 + M.time end
+	_G.GetServerTime = function() return math.floor(1794615000 + M.time) end -- whole seconds
 	_G.GetBuildInfo = function() return "1.60.1", "70685", "Nov 2026", 16001 end
 	_G.GetLocale = function() return "enUS" end
 	_G.C_AddOns = { GetAddOnMetadata = function(_, key) if key == "Version" then return "0.1.0-test" end end }

@@ -22,12 +22,15 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	M.fire("ADDON_LOADED", "Profguild")
 	H.ok(ProfguildDB and ProfguildDB.account, "db initialized")
 	M.fire("PLAYER_LOGIN")
+	local recipeData = ns.RecipeData
+	ns.RecipeData = {} -- no recipes from Data.lua here (SeedCatalog has its own test)
 	M.advance(8)
 	H.ok(ns.store, "guild store created")
 	local chatBeforeDump = #M.chat
 	M.advance(40)
 	H.ok(ProfguildDB.debug and #ProfguildDB.debug.lines > 5, "debug saved automatically after login")
 	H.eq(#M.chat, chatBeforeDump, "silently")
+	ns.RecipeData = recipeData
 	H.ok(ProfguildDB.log and ProfguildDB.log[1]:find("login, version", 1, true), "log kept in SavedVariables")
 	M.fire("GUILD_ROSTER_UPDATE")
 	M.advance(2)

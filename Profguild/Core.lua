@@ -338,6 +338,42 @@ local function verifyRecipe(recipeID, skillLine)
 	return itemID
 end
 
+-- Adds the recipes of Data.lua the catalog lacks, so recipes are listed though nobody in the guild
+-- opened that profession, and a guildmate's list that broke off on its way is completed. Every
+-- recipe is checked with the game first. The data has a few recipes no window lists; they are kept
+-- and shared like the others. The game is asked in steps and everything is stored at the end.
+-- /pg catalog clear stops a running fill and the one of this login (ns.seedOff).
+local SEED_BATCH, SEED_PACE = 50, 0.1
+function ns.SeedCatalog()
+	local ids = {}
+	for recipeID, e in pairs(ns.RecipeData or {}) do
+		local line = type(e) == "table" and e[6]
+		if line and (ns.catalog:Get(line) or {})[recipeID] == nil then ids[#ids + 1] = recipeID end
+	end
+	if #ids == 0 then return end
+	local found, i = {}, 0
+	local function step()
+		if ns.seedOff then return end
+		for _ = 1, SEED_BATCH do
+			i = i + 1
+			local recipeID = ids[i]
+			if not recipeID then break end
+			local line = ns.RecipeData[recipeID][6]
+			local itemID = verifyRecipe(recipeID, line)
+			if itemID then
+				found[line] = found[line] or {}
+				found[line][recipeID] = itemID
+			end
+		end
+		if i < #ids then return C_Timer.After(SEED_PACE, step) end
+		for line, list in pairs(found) do
+			local added = ns.catalog:Add(line, list)
+			ns.Log("catalog %s: %d recipes from Data.lua", Scanner.ProfessionName(line), added)
+		end
+	end
+	step()
+end
+
 local catalogAdapter = {
 	send = function(msg) Comm.Send(msg) end,
 	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
@@ -1175,6 +1211,7 @@ local function slash(input)
 		local sub, name = rest:match("^(%S*)%s*(.-)$")
 		if sub ~= "clear" or not ns.catalog then return ns.Say("CATALOG_USAGE") end
 		local cleared = 0
+		ns.seedOff = true
 		for skillLine in pairs(ns.catalog:All()) do
 			if name == "" or Scanner.ProfessionName(skillLine):lower() == name:lower() then
 				ns.catalog:Remove(skillLine)
@@ -1272,6 +1309,7 @@ function events.PLAYER_LOGIN()
 	C_Timer.After(60, function() ns.RefreshOwn() end)
 	-- diagnostics land in SavedVariables without typing /pg debug
 	ns.Log("login, version %s", tostring(ns.version))
+	C_Timer.After(20, ns.SeedCatalog) -- once the login rush is over
 	C_Timer.After(45, function() ns.DebugDump(true) end)
 	C_Timer.NewTicker(ns.Config.helloInterval, function() ns.Hello(false) end)
 	C_Timer.NewTicker(ns.Config.rosterInterval, function()
