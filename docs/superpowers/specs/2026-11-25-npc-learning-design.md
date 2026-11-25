@@ -1,6 +1,6 @@
 # 0.7.0 – Learning trainers and recipe vendors from NPCs (design)
 
-Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 5, after eight
+Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 6, after ten
 independent readers (history at the end).
 
 ## Intent
@@ -49,7 +49,7 @@ A sheet holds what is known about one NPC, keyed by the NPC ID from `UnitGUID("n
 |---|---|---|---|
 | head | - | name; place (uiMapID, finder's position in whole percent) | name 1-60 bytes without `|` and control characters; map 0-100000; x, y 0-100 |
 | trained | recipeID | seen; skill; copper | 200 entries; skill 1-1000; copper 1c-999 999g |
-| sold | recipe item ID | seen; price (copper 0-999 999g, up to 3 other costs: currency or item, ID, count; limited stock) | 100 entries |
+| sold | recipe item ID | seen; price (copper 0-999 999g, up to 3 other costs: currency or item, ID, count; limited stock) | 60 entries |
 
 A *register* is a value and the UTC day (server time / 86400) it was read. Unknown means the register is
 absent; `seen` is only a day. On the wire and on disk days are stored relative to a base (usually all equal).
@@ -61,18 +61,18 @@ give the same, and an unknown never erases a known value.
 **Expiry:** a register not read for 120 days is removed, an entry when `seen` is; the head goes with the last
 entry, and its own days do not expire. Done before every digest, inventory and answer, and at load. *Sendable* is an
 entry whose `seen` is at most 118 days old, with its registers of at most 118 days, and the head of a sheet with a
-sendable entry. Only that is sent, hashed, counted and compared. A received entry without `seen` is ignored; days later than
-tomorrow are refused.
+sendable entry. Only that is sent, hashed, counted and compared. A received entry without `seen` is ignored, so is a register
+older than 120 days or with a day later than tomorrow.
 
 **Own visit** is turned into registers of today, and these are merged (so one that loses a tie changes nothing):
 - `seen`: when absent or older than 14 days.
 - skill, place, name: when absent, or held is older than 14 days.
-- price: when absent; higher than held; other costs; equal and held older than 14 days; lower and held older than 30
-  days. Higher and lower compare copper at equal costs. Reputation lowers prices, so the base price
+- price: when absent; other costs or limited stock differ and held older than 14 days; at the same other costs and
+  stock: higher copper than held; equal and held older than 14 days; lower and held older than 30 days. Reputation lowers prices, so the base price
   mostly stays (a joiner or a client offline for long may replace it by a discounted one until somebody reads the
-  higher). One too high is corrected by the first lower reading more than 30 days after it was last read.
+  higher). One too high is corrected by the first lower reading more than 30 days after its saved day.
 - What is unknown or not read is left alone and expires. Nothing is deleted because a window hid it, and a second
-  visit the same day sends nothing.
+  identical reading the same day sends nothing.
 
 **Wrong data** is overwritten as above or expires 120 days after it was last read. A wrong entry that a faulty
 reader keeps reading goes only with the fix and `EPOCH`, a constant of the release carried in every message and
@@ -86,10 +86,9 @@ guild's table by the own-visit rules as of its own day (older or equal days chan
 reaches guild B. Without a guild the window reads npcOwn. Both tables are validated at load like messages.
 Messages carry the faction, another one is ignored.
 
-Limits, applied in this order after a merge: entries per sheet; about 3 kB of a sheet, by a fixed cost per entry and field
-(not the encoded size, which differs between clients; the cost is set so that 200 trained and 100 plain sold entries fit); 20 000 entries; 600 sheets. The older goes first (`seen`; a
-sheet by its newest entry), then by a hash of the key (not by ID: new recipes have the highest IDs). What was evicted at
-a day is not taken back with that day. A message over 4 kB is ignored.
+Limits, applied in this order after a merge: entries per sheet (no limit by size: one by content does not converge); 20 000 entries; 600 sheets. The older goes first (`seen`; a
+sheet by its newest entry), then by a hash of the key (not by ID: new recipes have the highest IDs). A message over
+4 kB (as received, encoded) is ignored; the largest sheet must fit (a test).
 Any change of fields, order or limits raises EPOCH or the protocol. Receipt never depends on Data.lua or the catalog.
 
 Trust: the guild is trusted as for prices. A malicious member can fill the table and waste
@@ -106,12 +105,14 @@ services, else it is left out. Service to recipe, among the recipes (Data.lua an
 3. the only one of these that Data.lua says has no recipe item;
 4. the only one of those left by 3 (or of all, when 3 left none) whose Data.lua grey is at least the skill.
 Otherwise not recorded, and counted for `/pg npc`. Recipes without Data.lua take part in 1 and 2 only. After
-matching, two services that give one recipe different values are both left out, and a skill above the recipe's Data.lua grey is recorded as unknown. Names not loaded: again after a
-minute as today. `recipeInfo.m` keeps its present behaviour.
+matching, two services that give one recipe different values are both left out, and a skill above the recipe's Data.lua grey is recorded as unknown. While a recipe's name is
+not loaded, 2-4 decide nothing for its profession; tried again 60 s later by a timer (the same NPC still open), from then on such
+recipes are left out. `recipeInfo.m` keeps its present behaviour.
 
 Merchant: MERCHANT_SHOW and MERCHANT_UPDATE, 0.5 s debounce, all entries by index. An item counts when
 `GetItemInfoInstant` says class 9 or Data.lua has it as a recipe item. Some entry without an item ID yet: again
-1 s later, at most 5 times; the same for an other cost whose ID is not known, such an entry is never recorded in part. A merchant that sells no recipe makes no sheet.
+1 s later, at most 5 times; the same for an other cost whose ID is not known, such an entry is never recorded in part. Two entries
+of one item that differ: `seen` only, price unknown. A merchant that sells no recipe makes no sheet.
 
 Nothing the game marks secret (`issecretvalue`) is read. Not in combat.
 
@@ -127,40 +128,42 @@ Prefix `ProfguildNPC`, GUILD channel, encoding, size limits and sender block of 
 The throttle queues per prefix, so this does not stand in front of recipes, prices and requests, and 0.6.0
 clients do not receive it. Sends follow `ns.SendBlockReason`. All messages carry protocol, epoch, faction, sender.
 
-- `ND` digest: number of sheets and one hash of the table.
-- `NI` inventory, to everyone: (NPC ID, 16-bit content hash salted with a random number of this NI) of all
+- `ND` digest: number of sheets and one hash of the table (at least 31 bits).
+- `NI` inventory, to everyone: (NPC ID, 16-bit hash of the random number of this NI together with the sheet's content hash of at least 31 bits) of all
   sendable sheets, delta coded (about 0.75 kB for 180, 1.7 kB for 600).
 - `NR` request, to the sender of an NI: NPC IDs.
 - `NU` update: whole sheets, about 1 kB per message.
 All carry the sender's current table hash, which replaces what was known of it.
 
-Rules, simulated by readers 6 and 8 (repo encoding, per-prefix throttle, 2 % and 5 % loss per part, 20/72/200 clients):
-with rules 1-10 all 108 burst runs were equal within 280 s. Rule 2's 120 s was measured alone. Registers,
-epoch, faction and 0.6.0 were not simulated. The plan rebuilds the simulation as tests before the module is
+Rules, simulated by reader 10 for revision 5 with registers and own visits (repo encoding, per-prefix throttle, 2 % and 5 % loss
+per part, 20/72/200 clients): all 180 burst runs equal within 375 s. The changes of revision 6 were simulated one by one or in part.
+Epoch, faction and 0.6.0 were not simulated. The plan rebuilds the simulation as tests before the module is
 wired in; its targets bind, and details may change to meet them. A *round* begins with an NI and ends with 12 s
 without NI, NR, NU.
 1. ND 10 s after hello (login and periodic), unless an equal one was heard in the last 10 minutes. An ND of ours that no equal
    ND confirmed in 60-120 s is repeated, at most 3 times, after 12 s without NI, NR, NU.
 2. Hearing a differing ND: plan an NI in 2-20 s. Any NI heard cancels it. It waits for 12 s without data and then a fresh random
-   0-12 s, 120 s at most, and is dropped when the hash of that ND is ours by then. Own NI at most every 60 s, an earlier one is delayed.
+   0-12 s, 120 s at most, and is dropped when the hash of that ND is ours by then. Own NI at most every 65 s, an earlier one is delayed.
 3. NI heard: everyone plans NU of the sheets it lacks or has with another hash, after 0.5-10 s, starting at a random
    place. A sheet heard meanwhile in identical content is left out; all is dropped when the NI sender's hash becomes ours.
-   An NU from a client whose table hash is ours postpones the rest by 40-60 s (so one that fell silent is replaced);
-   clients with another hash go on.
-4. IDs we lack: one NR to the NI's sender after 1-8 s, without IDs in NRs or NUs heard. It answers with NU. The sender of the
-   NI also sends merged results whose sendable content differs from what it received, at most once per sheet and
-   round. Everybody merges every NU. A sheet received and not taken (limits) is remembered for the session (ID,
-   content): our NIs list it as held with that content, and we do not ask for it.
+   An NU that holds, in identical content, a sheet we had planned postpones the rest by 40-60 s (so one that fell silent is
+   replaced); no other NU does.
+4. IDs we lack: one NR to the NI's sender after 1-8 s, without IDs in NRs or NUs heard;
+   none when 10 NRs to that sender were heard or sent in the last hour. It answers with NU. The sender of the
+   NI also sends a merged sheet when merging its own into the received one changes the received one, at most once per sheet and
+   round. Everybody merges every NU. A sheet received of which nothing is held (limits) is remembered for the session (ID,
+   content; the latest 100): our NIs list it as held with that content, and we do not ask for it. A sheet taken in part is not.
 5. 12-24 s after the last NI, NR or NU: ND if our hash changed or differs from the NI's, unless an equal one was heard; at most one
    per 30 s.
 6. After 2 rounds without any NU or NR (bystanders count them too), or 3 own NIs for it, the pair (our hash, their hash) is
    ignored for an hour. Any change of either hash lifts it.
-7. The next message goes when the one before has left, plus 1 s per part. Blocked: what waits is dropped; 10 s after
-   the block ends an ND is sent, unless an equal one was heard in the last 60 s.
+7. The next message goes when the one before has left, plus 1 s per part. Blocked: what waits is dropped; the next
+   hello's ND brings it.
 8. An own visit sends its changed sheet (whole) after 3 s; blocked: as rule 7.
 9. Caps, by the sender name the game gives (not a field of the message): one NI per 60 s and 2 ND per minute have any
-   effect; the same sheet content is sent at most 8 times an hour for one NI or NR sender, and for one table hash
-   carried by NIs (every client counts the NIs and NRs heard, whoever answered).
+   effect; the same sheet content is sent at most 6 times an hour for one sender, and for one table hash
+   carried by NIs: one counter per (name, content) and one per (hash, content),
+   raised for every NI and NR heard that lacks or asks for it, whoever it is addressed to.
 10. A failed send (OnSendFailed) undoes its marks. Guild change stops the object.
 
 ## Window
@@ -174,13 +177,14 @@ Hahrana Ironhide (+2), Feralas 74,43 · ~40s        (new line)
 ```
 
 - The new line has its own hover area; it and the numbers are empty for members.
+- Vendors of a recipe are those of Data.lua's recipe item or of the one in `recipeItems`.
 - The new line shows the trainer, else the vendor. Which of several: the player's map, then the lowest price,
   then name. "(+2)" counts the others. `~` marks a price from guildmates. What this
   account read itself (npcOwn) in the last 30 days is shown instead of the guild's, without `~`; also no `~` when both are equal. Unknown price or position: left out. Limited stock and other
   costs ("5 Merchant's Favor") are said. Too long: cut at the end, hover has all.
 - Hover lists all (at most 12, "and n more") with "seen n days ago", for a vendor the game's tooltip of the recipe
   item (reputation, level, specialisation it asks for), and what `~` means.
-- The skill numbers move from the end of the value or source line, where they would be cut, to the right of the
+- The skill numbers move from the end of the value or profession line (the code that rewrites `d.sub` goes), where they would be cut, to the right of the
   button. Requests (no button) have them at the same place and have no NPC line.
 - The window keeps its size: the crafter list shows 3 rows instead of 4 and scrolls as today; what is
   between the new line and it moves down one line. Same positions for requests.
@@ -214,7 +218,9 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
 - Recipe traffic beside a full answer arrives at most 3 s later than without it, with no other addon sending.
 - Crossing NIs while some registers are 119 days old, and one clock 6 hours off: the traffic stops or stays under 250 kB an hour.
 - All clients blocked 30 % of the time, one holder of 30 sheets: equal within 15 minutes.
-- Forged NI, NR, ND floods: under 300 kB an hour; junk NU every 3 s: a newcomer is complete within 30 minutes.
+- Forged NI, NR, ND floods (honest clients' traffic): under 400 kB an hour; junk NU every 3 s, also with the guild's hash: a newcomer is
+  complete within 30 minutes. A forger of empty tables' NIs may delay a newcomer by an hour *(call)*.
+- One merchant with two costs of one item; costs that differ between visitors.
 - Expiry at the edge with clients that do not log out; alternating visits with two reputations, languages, positions:
   no more than one write per register and 14 days each, except that
   a price may also rise to a higher reading; with a login after each visit; different Data.lua
@@ -241,3 +247,5 @@ File split, hash function, message field names, exact texts, where the probe's l
 - 4 to 5 (readers 7, 8, both with models): npcOwn without realm; sendable defined for entries and head; skill waits for the
   renewal; deterministic order and size of limits; sharing: echo once per sheet and round, refused sheets
   remembered, ND after a block, caps by the game's sender name, bounded wait; targets made exact.
+- 5 to 6 (readers 9, 10, both with models): price rule for other costs, no limit by size and no memory of evictions, names
+  not loaded, postponement only by a useful NU, NR cap, echo only when it adds, hash widths, ND after a block dropped.
