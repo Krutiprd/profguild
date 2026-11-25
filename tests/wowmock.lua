@@ -9,6 +9,10 @@ M.timers = {}
 M.events = {}       -- frames registered per event
 M.sent = {}         -- addon messages sent
 M.chat = {}         -- chat output
+M.throttle = false  -- true: per prefix 10 parts, then 1 per second of mock time, else result 3
+M.loss = 0          -- share (0..1) of parts dropped silently (the call still returns 0)
+M.random = math.random -- the test may replace it with a seeded generator
+M.buckets = {}      -- prefix -> { tokens, at }
 
 local function noop() end
 
@@ -67,6 +71,7 @@ M.tooltipLines = {}
 function M.install()
 	-- a fresh game: timers and event frames of an addon loaded by an earlier test are gone
 	M.timers, M.events = {}, {}
+	M.throttle, M.loss, M.buckets = false, 0, {}
 	-- WoW's Lua passes extra arguments through xpcall; stock Lua 5.1 does not.
 	local rawXpcall = M.rawXpcall or xpcall
 	M.rawXpcall = rawXpcall
@@ -185,7 +190,19 @@ function M.install()
 	_G.TooltipDataProcessor = { AddTooltipPostCall = function(_, fn) M.tooltipPostCall = fn end }
 	_G.C_ChatInfo = {
 		RegisterAddonMessagePrefix = function() return true end,
-		SendAddonMessage = function(prefix, text, chatType) table.insert(M.sent, { prefix = prefix, text = text, chatType = chatType }) return 0 end,
+		SendAddonMessage = function(prefix, text, chatType)
+			if M.throttle then
+				local b = M.buckets[prefix]
+				if not b then b = { tokens = 10, at = M.time }; M.buckets[prefix] = b end
+				b.tokens = math.min(10, b.tokens + (M.time - b.at))
+				b.at = M.time
+				if b.tokens < 1 then return 3 end
+				b.tokens = b.tokens - 1
+			end
+			if M.loss > 0 and M.random() < M.loss then return 0 end
+			table.insert(M.sent, { prefix = prefix, text = text, chatType = chatType })
+			return 0
+		end,
 		InChatMessagingLockdown = function() return false end,
 	}
 end

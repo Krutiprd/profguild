@@ -15,6 +15,10 @@ Comm.PREFIX = "Profguild"
 -- than MAX_SERIALIZED is dropped before it is deserialized and its sender is ignored for
 -- BLOCK_SECONDS, so highly compressible junk cannot be used to stall the game over and over.
 Comm.MAX_TEXT = 24000
+-- NPC data travels on its own prefix, so its bulk never queues behind (or is mistaken for) the
+-- guild protocol; it has its own, smaller, size limit.
+Comm.NPC_PREFIX = "ProfguildNPC"
+Comm.NPC_MAX_TEXT = 6144
 Comm.MAX_SERIALIZED = 262144
 Comm.BLOCK_SECONDS = 600
 Comm.blocked = {} -- sender name -> time until which its messages are ignored
@@ -31,8 +35,8 @@ function Comm.Encode(msg)
 	return LibDeflate:EncodeForWoWAddonChannel(compressed)
 end
 
-function Comm.Decode(text)
-	if type(text) ~= "string" or #text > Comm.MAX_TEXT then return nil end
+function Comm.Decode(text, max)
+	if type(text) ~= "string" or #text > (max or Comm.MAX_TEXT) then return nil end
 	local compressed = LibDeflate:DecodeForWoWAddonChannel(text)
 	if not compressed then return nil end
 	local serialized = LibDeflate:DecompressDeflate(compressed)
@@ -46,6 +50,7 @@ end
 function Comm:Init()
 	if self.ready then return end
 	self:RegisterComm(Comm.PREFIX, "OnCommReceived")
+	self:RegisterComm(Comm.NPC_PREFIX, "OnCommReceived")
 	self.ready = true
 end
 
@@ -77,11 +82,35 @@ function Comm.Send(msg)
 	ns.Debug("sent %s (%d bytes)", tostring(msg.t), #text)
 end
 
+-- Sends an NPC data message. done(ok) is called once: true when the last part has left,
+-- false on the first failed part (or when the message cannot be encoded).
+function Comm.SendNpc(msg, done)
+	local ok, text = pcall(Comm.Encode, msg)
+	if not ok or not text then
+		ns.Debug("npc encode failed: %s", tostring(text))
+		if done then done(false) end
+		return
+	end
+	local finished = false
+	Comm:SendCommMessage(Comm.NPC_PREFIX, text, "GUILD", nil, "BULK", function(_, sent, total, didSend)
+		if finished then return end
+		if didSend == false then
+			finished = true
+			if done then done(false) end
+		elseif sent >= total then
+			finished = true
+			if done then done(true) end
+		end
+	end)
+	ns.Debug("sent npc %s (%d bytes)", tostring(msg.t), #text)
+end
+
 function Comm:OnCommReceived(prefix, text, distribution, sender)
-	if prefix ~= Comm.PREFIX or distribution ~= "GUILD" then return end
+	local isNpc = prefix == Comm.NPC_PREFIX
+	if (prefix ~= Comm.PREFIX and not isNpc) or distribution ~= "GUILD" then return end
 	local now = GetTime()
 	if type(sender) == "string" and (Comm.blocked[sender] or 0) > now then return end
-	local ok, msg, why = pcall(Comm.Decode, text)
+	local ok, msg, why = pcall(Comm.Decode, text, isNpc and Comm.NPC_MAX_TEXT or nil)
 	if not ok or not msg then
 		if why == "too large" and type(sender) == "string" then
 			Comm.blocked[sender] = now + Comm.BLOCK_SECONDS
@@ -89,6 +118,10 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 		else
 			ns.Debug("could not decode a message from %s", tostring(sender))
 		end
+		return
+	end
+	if isNpc then
+		if ns.npcSync then ns.npcSync:OnMessage(msg, sender, #text) end
 		return
 	end
 	-- Remember how the game names the sender: that is the name a whisper needs.
