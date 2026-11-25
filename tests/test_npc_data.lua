@@ -752,22 +752,27 @@ H.test("npc data: pack", function()
 	for name, change in pairs(cases) do H.ok(bad(change), "nil without an error: " .. name) end
 end)
 
+-- Every part full, every value random over its bounds (random values compress worst).
 local function maximumSheet(today)
-	local s = { name = string.rep("\126", 60), nd = today - rnd(119) + 1, map = 100000, x = 100, y = 100,
-		pd = today - rnd(119) + 1, t = {}, v = {} }
 	local function day() return today - rnd(119) + 1 end
-	local function bigID() return 1073741824 + rnd(1073741823) end
-	while count(s.t) < 200 do s.t[bigID()] = { day(), 1000, day(), 9999990000, day() } end
+	local function id() return rnd(2147483647) end
+	local b = {}
+	for i = 1, 60 do
+		local c = 31 + rnd(224)
+		if c == 124 or c == 127 then c = 65 end
+		b[i] = string.char(c)
+	end
+	local s = { name = table.concat(b), nd = day(), map = rnd(100001) - 1, x = rnd(101) - 1, y = rnd(101) - 1,
+		pd = day(), t = {}, v = {} }
+	while count(s.t) < 200 do s.t[id()] = { day(), rnd(1000), day(), rnd(9999990000), day() } end
 	while count(s.v) < 60 do
 		local o = {}
-		for j = 1, 3 do o[j] = { 2, bigID(), 2147483647 } end
+		for j = 1, 3 do o[j] = { rnd(2), id(), rnd(2147483647) } end
 		table.sort(o, costLess)
-		s.v[bigID()] = { day(), price(9999990000, o, 1), day() }
+		s.v[id()] = { day(), price(rnd(9999990001) - 1, o, rnd(2) - 1), day() }
 	end
 	return s
 end
-
-local measured = {}
 
 H.test("npc data: maximum sheet", function()
 	local T = D + 300
@@ -779,7 +784,6 @@ H.test("npc data: maximum sheet", function()
 		if bytes > worst then worst = bytes end
 	end
 	H.ok(worst <= 6144, "maximum sheet in one NU: " .. worst)
-	measured.maximum = worst
 end)
 
 H.test("npc data: full game", function()
@@ -805,17 +809,15 @@ H.test("npc data: full game", function()
 		end
 		sheets[#sheets + 1] = ND.Pack(id, s)
 	end
-	local total, messages, msg = 0, 0, {}
+	local total, msg = 0, {}
 	for i, p in ipairs(sheets) do
 		msg[#msg + 1] = p
 		if i == #sheets or #encode(nu(msg)) >= 1000 then
-			total, messages = total + #encode(nu(msg)), messages + 1
+			total = total + #encode(nu(msg))
 			msg = {}
 		end
 	end
 	H.ok(total <= 60000, "full game: " .. total)
-	print(string.format("    npc data: maximum sheet %s bytes (worst of 20 seeds), full game %d bytes in %d NU",
-		tostring(measured.maximum), total, messages))
 end)
 
 H.test("npc data: load", function()
