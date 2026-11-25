@@ -1,6 +1,6 @@
 # 0.7.0 – Learning trainers and recipe vendors from NPCs (design)
 
-Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 9, after fourteen
+Decisions of the user are marked *(user)*, decisions taken here *(call)*. Revision 10, after fifteen
 independent readers (history at the end).
 
 ## Intent
@@ -82,7 +82,7 @@ saved with the tables: other epochs are ignored and dropped at load. That loses 
 Saved: `ProfguildDB.guilds[key].npc[faction] = { e = EPOCH, s = { [npcID] = sheet } }`, the guild's, and
 `ProfguildDB.npcOwn[faction]` (no realm: its name changes between logins, see Scanner.GuildKey), the same shape: only what was read on this account, always the last known
 reading of each register with its day (local, no traffic). At guild setup every npcOwn register goes into the
-guild's table by the own-visit rules as of its own day (older or equal days change nothing). So nothing learned from guild A
+guild's table by the own-visit rules as of its own day (older days change nothing; at an equal day the greater value stays). So nothing learned from guild A
 reaches guild B. Without a guild the window reads npcOwn. Both tables are validated at load like messages.
 Messages carry the faction, another one is ignored.
 
@@ -195,11 +195,12 @@ Pattern: Azure Silk Vest
 - Both buttons are 146 x 22 px at the place of today's one; without a requests object FIND RECIPE keeps its place. Requests and
   members have neither the button nor the list. FIND RECIPE pressed again, BACK TO REAGENTS or selecting another row goes back. A
   refresh of prices or guild data redraws the list in place and keeps the scroll position, clamped to its length.
-- Rows, 3 visible; the wheel over the list scrolls it (elsewhere the crafters as today): AH (price and age as the source line
-  shows them, else "not seen on the AH"; only when a recipe item exists), then trainers, then vendors, then one row for drop, quest
-  or crafted, without a place. Trainers and vendors each: the player's map, then the lowest price, then name. No sheet of a vendor
-  or trainer that Data.lua says exists: a row "nobody in the guild opened one yet". Nothing known at all: "source not known".
-- `~` marks a price from guildmates. What this account read itself (npcOwn) in the last 30 days is shown instead of the guild's,
+- Rows, 3 visible; the wheel over the list scrolls it (elsewhere the crafters as today): AH (the text of the source line:
+  price, age, pieces, guildmate's name, from one shared function; else "not seen on the AH"; only when a recipe item exists), then trainers, then vendors, then one row for drop, quest
+  or crafted, without a place. Trainers and vendors each: the player's map, then the lowest price, then name; without a copper price last, by name. No
+  sheet where Data.lua says "v": a row "no vendor seen by the guild yet"; where it says there is no recipe item: "probably a trainer,
+  none seen by the guild yet" (Data.lua does not know trainers, nor factions). Nothing known at all: "source not known".
+- `~` marks a trainer's or vendor's price from guildmates (the AH row names the guildmate instead *(call)*). What this account read itself (npcOwn) in the last 30 days is shown instead of the guild's,
   without `~`; also no `~` when both are equal. Unknown price or position: left out. Limited stock and other costs
   ("5 Merchant's Favor") are said.
 - Green frame: the row with the lowest copper price, among at least two with one; rows with other costs do not take part *(call)*.
@@ -209,13 +210,15 @@ Pattern: Azure Silk Vest
   through TomTom when it is there (`TomTom:AddWaypoint`); else, and without a place, the button is hidden.
 - Vendors of a recipe are those of Data.lua's recipe item or of the one in `recipeItems`.
 - The skill numbers move from the end of the value or profession line (the code that rewrites `d.sub` goes) to the right end of
-  the profession line, right-aligned. Requests have them at the same place. The source line stays; the crafter list keeps its 4
+  the profession line, right-aligned; the required level beside the profession is short ("lvl 40") and the line ends before the
+  numbers. Requests have them at the same place; members have none and the full width. The learn skill not above grey: a higher one
+  is ignored and the next source taken. The source line stays; the crafter list keeps its 4
   rows and all other positions.
 - Skill: learn from own or guild trainer sheets (the later day, then greatest; not above grey), else `recipeInfo.m`, else
   Data.lua (> 0); grey from `recipeInfo.g`, else Data.lua; yellow from Data.lua, at most grey; green = floor((yellow
   + grey) / 2). Equal numbers are shown. Learn unknown: three numbers. Learn above yellow: learn and grey only;
   learn at or above grey: learn only.
-- Leveling rows keep showing learn and grey, now with the same fallbacks, also for their order.
+- Leveling rows keep showing learn and grey, now with the same fallbacks, also for their order (the list is rebuilt when a learn skill changes, not at every sheet).
 - en and sk texts. `/pg status` gets a line; `/pg npc` shows counts (NPCs, recipes, skipped names); `/pg npc clear`.
 
 ## Verification
@@ -279,3 +282,6 @@ File split, hash function, message field names, exact texts, where the probe's l
 - 7 to 8 (readers 13, 14): a blocked NU waits instead of being dropped, ND after a block only when something was lost and
   spread (rules 6 and 7 simulated with it: 100 of 100 runs of blocked clients equal within 550 s), NR cap does not mute, bounds and message filling exact, mixed forgers accepted.
 - 8 to 9 (user): FIND RECIPE with map pin and AH price instead of the NPC line; the window keeps its positions.
+- 9 to 10 (reader 15, whole design and plan): neutral texts for what nobody saw, AH row as the source line, short level, sorting without
+  a price, import at equal days. Cutting rules that only serve against hostile members *(user)*: not now, decided after the plan's
+  simulation.

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Lua 5.1, interface 16001, LibSerialize/LibDeflate/AceComm through `Comm.lua`; tests `luajit tests/run.lua` (193 pass before this plan).
 
-**Spec:** `docs/superpowers/specs/2026-11-25-npc-learning-design.md` (revision 9). Where this plan is silent the spec binds; read both.
+**Spec:** `docs/superpowers/specs/2026-11-25-npc-learning-design.md` (revision 10). Where this plan is silent the spec binds; read both.
 
 ## Global Constraints
 
@@ -156,7 +156,7 @@ The reference implementation is `C:\Users\majfr\Documents\Projects\Profguiild\np
 - [ ] **Step 4: Implement** `NpcSync.lua`. An NU is filled to about 1000 bytes; a sheet that would exceed it starts a new message. The next message goes when `done` came, plus 1 s per part (254 bytes).
 - [ ] **Step 5: Run** - Expected: unit tests pass.
 - [ ] **Step 6: Scenario tests.** `run_npc_sim.lua` runs every sharing scenario of the spec's Verification with its target (3 seeds each, `--seeds N`), one line `ok|FAIL name value target` each and exit code 1 on a failure. A short set goes in `run.lua`: 20-client burst of unique sheets, newcomer (complete <= 600 s, <= 60 kB), sole holder with 12 s block period (<= 900 s), quiet 3 h, junk NU with the guild's hash, newcomer reading a trainer 5 s after login. It must add under 30 s.
-- [ ] **Step 7: Run** `luajit tests/run_npc_sim.lua --seeds 3`. Expected: every line `ok`. A failing target is debugged against `r15`, not relaxed.
+- [ ] **Step 7: Run** `luajit tests/run_npc_sim.lua --seeds 3`. Expected: every line `ok`. A failing target is debugged against `r15`, not relaxed. Then measure which rules could go without failing the non-hostile targets and bring the list to the user; cut nothing before that.
 - [ ] **Step 8: Commit** `NpcSync: sharing of NPC sheets`.
 
 ### Task 6: Reading the windows
@@ -179,11 +179,11 @@ The reference implementation is `C:\Users\majfr\Documents\Projects\Profguiild\np
 
 ### Task 7: Wiring into the addon
 
-**Files:** Modify `Profguild/Core.lua` (init near line 98, `ns.Hello` at 617, `ns.SetupGuild` at 623, status at 902, slash), `Locale.lua`, `tests/test_addon_npc.lua`.
+**Files:** Modify `Profguild/Core.lua` (npcOwn created at PLAYER_LOGIN + 5 s before the early return of `SetupGuild`, skipped while the faction is nil and tried again on the next reading or guild event; not in `initDB`, where the faction is not known yet, `ns.Hello` at 617, `ns.SetupGuild` at 623, status at 902, slash), `Locale.lua`, `tests/test_addon_npc.lua`.
 
 **Interfaces:** Consumes Tasks 2-6. Produces: `ns.npc` (the tab shown: guild's, else own), `ns.npcOwn`, `ns.npcSync|nil`, `ns.db.guilds[key].npc[faction]`, `ns.db.npcOwn[faction]`.
 
-- [ ] **Step 1: Write failing tests** on the loaded addon: reading goes into npcOwn and the guild's tab and sends one NU on `ProfguildNPC`; same reading again: none; without a guild only npcOwn; guild change: sync stopped, npcOwn imported into the new guild, nothing received in guild A appears in B; other faction: separate tables; Hello calls `Announce` also when blocked (an ND due while blocked); saved tables survive a reload; `/pg npc` prints counts, `/pg npc clear` empties both tables of the faction; 0.6.0 files from the tag (`git show 0.6.0:Profguild/...` into a temporary directory) in the same mocked channel: no error, nothing received.
+- [ ] **Step 1: Write failing tests** on the loaded addon: reading goes into npcOwn and the guild's tab and sends one NU on `ProfguildNPC`; same reading again: none; without a guild only npcOwn; guild change: sync stopped, npcOwn imported into the new guild, nothing received in guild A appears in B; other faction: separate tables; a faction that is nil at login, and a character without a guild: no error, npcOwn made later; Hello calls `Announce` also when blocked (an ND due while blocked); saved tables survive a reload; `/pg npc` prints counts, `/pg npc clear` empties both tables of the faction; 0.6.0 files from the tag (`git show 0.6.0:Profguild/...` into a temporary directory) in the same mocked channel: no error, nothing received.
   npcOwn is last known reading: a same-day lower price read replaces npcOwn's price (no own-visit rules there) while the guild's keeps the higher.
 - [ ] **Step 2: Run** - Expected: fail.
 - [ ] **Step 3: Implement.** `npcOwn` is written with today's registers directly (merge is not used, the new reading wins); unread registers stay.
@@ -196,35 +196,38 @@ The reference implementation is `C:\Users\majfr\Documents\Projects\Profguiild\np
 
 **Interfaces:** Produces:
 - `NpcView.Skill(recipeID, src) -> { learn=|nil, yellow=, green=, grey=, show={...}|nil }`, `src = { own=tab, guild=tab, info=recipeInfo, data=RecipeData }`; `show` is the list of `{ number, "learn"|"yellow"|"green"|"grey" }` to print.
-- `NpcView.Sources(recipeID, src, where) -> rows`, each `{ kind="ah"|"trainer"|"vendor"|"drop"|"quest"|"crafted"|"missing"|"unknown", id=, name=, map=, x=, y=, copper=, other=, limited=, age=days, approx=bool, best=bool, of="vendor"|"trainer" (missing only) }` in display order; `where = { map=, items={ [itemID]=true }, recipeItem=id|false|nil, letters="vd", ah={ copper=, age= }|nil }`.
+- `NpcView.Sources(recipeID, src, where) -> rows`, each `{ kind="ah"|"trainer"|"vendor"|"drop"|"quest"|"crafted"|"missing"|"unknown", id=, name=, map=, x=, y=, copper=, other=, limited=, age=days, approx=bool, best=bool, of="vendor"|"trainer" (missing only) }` in display order; `where = { map=, items={ [itemID]=true }, recipeItem=id|false|nil, letters="vd", ah={ copper=, text= }|nil }` (only a price of kind "ah" of `Prices.Get`).
 
-- [ ] **Step 1: Write failing tests:** order ah, trainers, vendors, then drop/quest/crafted; within a kind player's map, lowest price, name; recipe item without AH price gives an `ah` row without copper, no recipe item none; own reading of 30 days shown without `approx`, of 31 days not; equal own and guild: no `approx`; vendors of Data.lua's item and of `recipeItems`; letters "v" without a vendor sheet give `missing` of vendor, recipe item `false` without a trainer sheet `missing` of trainer; nothing at all: one `unknown`; `best` only with two copper prices, never on a row with other costs, ties: the first; learn from the later day, then the greatest, not above grey; else `info.m`; else Data.lua > 0; yellow at most grey; green `floor((yellow+grey)/2)`; equal numbers shown; learn unknown: three numbers; learn above yellow: learn and grey; learn at or above grey: learn only; the 19 + 1 odd Data.lua entries give no error and no falling numbers.
+- [ ] **Step 1: Write failing tests:** order ah, trainers, vendors, then drop/quest/crafted; within a kind player's map, lowest price, name; recipe item without AH price gives an `ah` row without copper (kind "vendor" of `Prices.Get` is not one), no recipe item none; own reading of 30 days shown without `approx`, of 31 days not; equal own and guild: no `approx`; vendors of Data.lua's item and of `recipeItems`; letters "v" without a vendor sheet give `missing` of vendor, recipe item `false` without a trainer sheet `missing` of trainer; nothing at all: one `unknown`; a row without copper price last, by name; `best` only with two copper prices, never on a row with other costs, ties: the first; learn from the later day, then the greatest; one above grey is ignored and the next source taken: `info.m`, then Data.lua; yellow, green, grey from `Prices.RecipeSkill` (grey from `info.g` first); equal numbers shown; learn unknown: three numbers; learn above yellow: learn and grey; learn at or above grey: learn only; the 19 + 1 odd Data.lua entries give no error and no falling numbers.
 - [ ] **Step 2: Run** - Expected: fail. **Step 3: Implement. Step 4: Run** - Expected: pass.
 - [ ] **Step 5: Commit** `NpcView: choice of trainer and vendor`.
 
 ### Task 9: FIND RECIPE in the detail pane
 
-**Files:** Modify `Profguild/UI.lua` (`recipeItemText` 376-394, `recipeSkillText` 450, `BuildLevelingRows` 705, detail 1205-1277, price refresh 2147-2163, `DrawDetail` 2220-2260, `ScrollDetail`), `Locale.lua`, `tests/test_addon_npc.lua`.
+**Files:** Modify `Profguild/UI.lua` (`recipeItemText` 376-394, `recipeSkillText` 450, the list key 2341, `BuildLevelingRows` 705, detail 1205-1277, price refresh 2147-2163, `DrawDetail` 2220-2260, `ScrollDetail`), `Locale.lua`, `tests/test_addon_npc.lua`.
 
-**Interfaces:** Consumes Task 8. Produces: `UI:ToggleFind()`, `UI.findOpen`, `UI.findOffset`, `UI.SetMapPin(map, x, y, title) -> bool`, `UI.CanMapPin(map) -> bool`.
+**Interfaces:** Consumes Task 8. Produces: `UI:ToggleFind()`, `UI.findOpen`, `UI.findOffset`, `UI.SetMapPin(map, x, y, title) -> bool`, `UI.CanMapPin(map) -> bool`; `ns.npcSkillRevision` (raised when a learn skill shown changed, in the list key).
 
-- [ ] **Step 1: Write failing tests** (frames of the mock); texts `BTN_FIND` "FIND RECIPE" / "NÁJSŤ RECEPT", `BTN_BACK_REAGENTS` "BACK TO REAGENTS" / "SPÄŤ K REAGENCIÁM", `BTN_MAP` "Map" / "Mapa":
+- [ ] **Step 1: Write failing tests** (frames of the mock); texts `BTN_FIND` "FIND RECIPE" / "NÁJSŤ RECEPT", `BTN_BACK_REAGENTS` "BACK TO REAGENTS" / "SPÄŤ K SUROVINÁM", `BTN_MAP` "Map" / "Mapa", `FIND_NO_VENDOR` "no vendor seen by the guild yet" / "guilda zatiaľ nevidela vendora", `FIND_NO_TRAINER` "probably a trainer, none seen by the guild yet" / "pravdepodobne tréner, guilda zatiaľ žiadneho nevidela", `REQ_LEVEL_SHORT` "lvl %d" / "lvl %d":
   - "opens and closes": ToggleFind hides reagents and cost, shows the rows and the back button, crafters keep 4 rows; again, back, another recipe, another view: closed, reagents back.
   - "rows": every kind's text; `~`, limited stock, "5 Merchant's Favor"; zone only with a place; green frame on the best; 5 sources: 3 visible, wheel reaches the last, wheel over the crafters scrolls them.
   - "live": a guild sheet arriving while open adds its row and keeps the offset; a shrinking list clamps it.
   - "pin": allowed by the client: waypoint with map, x/100, y/100; refused or missing with TomTom: `TomTom:AddWaypoint(map, x/100, y/100, { title = name })`; neither, or no place: button hidden; an error in the API does not escape.
   - "requests and members": no FIND RECIPE; numbers on requests at the same place.
-  - "numbers": `d.sub` never rewritten by a price refresh; Leveling order uses the fallbacks.
+  - "numbers": `d.sub` never rewritten by a price refresh; its width is 250 minus the numbers' `GetStringWidth()` minus 8, 250 for members; numbers hidden for members; Leveling order uses the fallbacks.
+  - "list order": a sheet that changes a learn skill rebuilds the list, 20 sheets that change none do not.
+  - "row fits": name with "~12g 34s 56c" and the Map button do not overlap (by the mock's widths); another cost whose name is not loaded shows `#id`, then its name after `WantItem`.
+  - Change in `test_addon_load.lua` 541-547: 275 and 320 are read from `UI.detail.skillNumbers`, no longer from `detail.value`.
 - [ ] **Step 2: Run** - Expected: fail.
-- [ ] **Step 3: Implement.** Buttons 146 x 22 at TOPLEFT 14,-104 and 168,-104. `d.reagentBody` (new frame with today's reagent and cost regions) and `d.findBody` are shown in turn. Title at -130 as the reagent title, rows with step 36 from -154, back button TOPLEFT 14,-268, 300 x 20. `d.skillNumbers` TOPRIGHT -14,-64, right-aligned; `d.sub` is 140 px wide while numbers are shown. Nothing else moves.
-- [ ] **Step 4: Run** - Expected: all pass, the existing layout tests unchanged except for the request button's width.
+- [ ] **Step 3: Implement.** Buttons 146 x 22 at TOPLEFT 14,-104 and 168,-104. `d.reagentBody` (new frame with today's reagent and cost regions) and `d.findBody` are shown in turn. Title at -130 as the reagent title, rows with step 36 from -154, back button TOPLEFT 14,-268, 300 x 20. `d.skillNumbers` TOPRIGHT -14,-64, right-aligned, child of `recipeBody`; `d.sub` as tested. A FIND row: name and detail line left from 8, Map button 44 x 18 at right -6, price right-aligned ending 6 left of it (at -6 without it), the name's `fitSpec` ends 8 before the price. One function builds the AH text for `recipeItemText` and the AH row. The Slovak request button uses the small font if it does not fit 136 px in the game. Nothing else moves.
+- [ ] **Step 4: Run** - Expected: all pass, the existing layout tests unchanged except for the request button's width and the test named above.
 - [ ] **Step 5: Commit** `Window: FIND RECIPE`.
 
 ### Task 10: Finish
 
 **Files:** Modify `Profguild.toc` (0.7.0), `CHANGELOG.md`, `docs/TESTOVANIE.md`, README if it lists features; build `dist/Profguild-0.7.0.zip`.
 
-- [ ] **Step 1: Mutation check** as for 0.6.0: in NpcData, NpcSync, NpcView change each limit, comparison and day constant by one in a scratch copy; every mutant must fail a test. Add the missing tests.
+- [ ] **Step 1: Mutation check** as for 0.6.0: in NpcData, NpcSync, NpcView change each limit, comparison and day constant by one in a scratch copy; every mutant fails a test or stands in a list of survivors with the reason (equivalent, random delay). Add the missing tests.
 - [ ] **Step 2: Run** `luajit tests/run.lua` and `luajit tests/run_npc_sim.lua --seeds 6`. Expected: 0 failed, every line `ok`.
 - [ ] **Step 3: Independent review** of the branch, at most 4 rounds (user's rule); fix what is found.
 - [ ] **Step 4: Version, changelog, test guide** (section for two players: trainer, vendor, newcomer, combat, FIND RECIPE and the map pin), zip with Python `zipfile`, copy to `_forever_/Interface/AddOns/Profguild`.
