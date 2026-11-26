@@ -98,30 +98,41 @@ local function goesBefore(a, b)
 	return false
 end
 
--- The k items that go first of those each(offer) offers.
+-- The k items that go first of those each(offer, enters) offers, in no particular order. The order
+-- is total (keys differ), so the set is the same whatever the order of offers: clients converge.
+-- A heap of at most k items whose root goes last of them: n log k, not a sort of every item.
+-- enters(seen) is false when an item of that seen cannot enter (the caller skips its hash).
 local function worst(k, each)
-	local low = {}
-	if k > 64 then
-		each(function(...) low[#low + 1] = { ... } end)
-		sort(low, goesBefore)
-		for i = #low, k + 1, -1 do low[i] = nil end
-		return low
+	local low, n, probe = {}, 0, {}
+	local function down(i)
+		while true do
+			local l, r, top = 2 * i, 2 * i + 1, i
+			if l <= n and goesBefore(low[top], low[l]) then top = l end
+			if r <= n and goesBefore(low[top], low[r]) then top = r end
+			if top == i then return end
+			low[i], low[top] = low[top], low[i]
+			i = top
+		end
 	end
-	local probe = {}
+	local function enters(s) return n < k or s <= low[1][1] end
 	each(function(s, h, npc, part, id)
-		local n = #low
-		if n == k then
-			probe[1], probe[2], probe[3], probe[4], probe[5] = s, h, npc, part, id
-			if not goesBefore(probe, low[n]) then return end
+		if n < k then
+			n = n + 1
+			low[n] = { s, h, npc, part, id }
+			local i = n
+			while i > 1 do
+				local p = floor(i / 2)
+				if not goesBefore(low[p], low[i]) then break end
+				low[p], low[i] = low[i], low[p]
+				i = p
+			end
+			return
 		end
-		local item = { s, h, npc, part, id }
-		local i = n == k and n or n + 1
-		while i > 1 and goesBefore(item, low[i - 1]) do
-			low[i] = low[i - 1]
-			i = i - 1
-		end
-		low[i] = item
-	end)
+		probe[1], probe[2], probe[3], probe[4], probe[5] = s, h, npc, part, id
+		if not goesBefore(probe, low[1]) then return end
+		low[1] = { s, h, npc, part, id }
+		down(1)
+	end, enters)
 	return low
 end
 
@@ -131,7 +142,7 @@ local function entryHash(npcHash, part, id) return KeyHash((KeyHash((npcHash + p
 -- tab = NpcData.New(saved, now[, limits]): saved = { e = EPOCH, s = { [npcID] = packed } } is loaded
 -- (other epochs and broken sheets dropped) and kept current at every change; now() gives server
 -- seconds; limits = { t=, v=, entries=, sheets= } replaces the constants (tests).
--- Limits, after every merge, in this order: entries per sheet, entries, sheets. The older goes first
+-- Limits, after every merge (once for all sheets of an NU, MergeAll), in this order: entries per sheet, entries, sheets. The older goes first
 -- (an entry by seen, a sheet by its newest entry), then by a hash of the key.
 -- Expiry runs at load and before anything is read on a new day. Only the sendable part (see cut) is
 -- sent, hashed and counted. Returned sheets and lists are the table's own: do not change them.
@@ -193,11 +204,15 @@ function Table:limit()
 	local over = self.nEntries - self.le
 	if over > 0 then
 		local touched = {}
-		for _, d in ipairs(worst(over, function(offer)
+		for _, d in ipairs(worst(over, function(offer, enters)
 			for npc, s in pairs(sheets) do
 				local nh = KeyHash(npc)
-				for id, e in pairs(s.t) do offer(e[1], entryHash(nh, 1, id), npc, 1, id) end
-				for id, e in pairs(s.v) do offer(e[1], entryHash(nh, 2, id), npc, 2, id) end
+				for id, e in pairs(s.t) do
+					if enters(e[1]) then offer(e[1], entryHash(nh, 1, id), npc, 1, id) end
+				end
+				for id, e in pairs(s.v) do
+					if enters(e[1]) then offer(e[1], entryHash(nh, 2, id), npc, 2, id) end
+				end
 			end
 		end)) do
 			local s = sheets[d[3]]
@@ -301,29 +316,52 @@ end
 
 function Table:SaltedHash(hash, salt) return NpcData.SaltedHash(hash, salt) end
 
--- A received sheet. changed: its sendable content changed; taken: some of its entries are held
--- after the limits.
-function Table:MergeIn(id, sheet)
+-- Received sheets: items = { { id, sheet }, ... } (one NU) are merged, then the table limits are
+-- applied once. Per item: changed[i], its sendable content changed; taken[i], some of its entries
+-- are held after the limits.
+function Table:MergeAll(items)
 	check(self)
-	if not validID(id) then return false, false end
-	local s = NpcData.Valid(sheet, self.day)
-	if not s then return false, false end
-	local before, held = self:Sendable(id), self.sheets[id]
-	local m = NpcData.Merge(held, s)
-	trim(m.t, self.lt)
-	trim(m.v, self.lv)
-	if not held or not deepEqual(m, held) then
-		self:put(id, m)
-		self:limit()
-	end
-	local now, taken = self.sheets[id], false
-	if now then
-		for k in pairs(s.t) do if now.t[k] then taken = true break end end
-		if not taken then
-			for k in pairs(s.v) do if now.v[k] then taken = true break end end
+	local valid, before, merged = {}, {}, false
+	for i = 1, #items do
+		local id = items[i][1]
+		local s = validID(id) and NpcData.Valid(items[i][2], self.day) or nil
+		if s then
+			valid[i] = s
+			if before[id] == nil then before[id] = self:Sendable(id) or false end
+			local held = self.sheets[id]
+			local m = NpcData.Merge(held, s)
+			trim(m.t, self.lt)
+			trim(m.v, self.lv)
+			if not held or not deepEqual(m, held) then
+				self:put(id, m)
+				merged = true
+			end
 		end
 	end
-	return not deepEqual(before, self:Sendable(id)), taken
+	if merged then self:limit() end
+	local changed, taken = {}, {}
+	for i = 1, #items do
+		local s, c, t = valid[i], false, false
+		if s then
+			local id = items[i][1]
+			local now = self.sheets[id]
+			if now then
+				for k in pairs(s.t) do if now.t[k] then t = true break end end
+				if not t then
+					for k in pairs(s.v) do if now.v[k] then t = true break end end
+				end
+			end
+			c = not deepEqual(before[id] or nil, self:Sendable(id))
+		end
+		changed[i], taken[i] = c, t
+	end
+	return changed, taken
+end
+
+-- A received sheet: changed, taken as MergeAll gives them.
+function Table:MergeIn(id, sheet)
+	local changed, taken = self:MergeAll({ { id, sheet } })
+	return changed[1], taken[1]
 end
 
 -- An own reading (see NpcData.Visit); whether the sendable content changed.

@@ -390,9 +390,15 @@ end)
 H.test("sync 4: at most 100 refused sheets are remembered; one taken in part is not", function()
 	local env = newEnv({ random = 0.5, limits = { sheets = 1 } })
 	hold(env, 1001, { 1 })
+	-- in NUs of at most NU_SHEETS sheets, in order
 	local x = {}
-	for i = 1, 101 do x[i] = packed(2000 + i, sheet(2000 + i, { 5 }, DAY - 5)) end
-	incoming(env, "NU", { h = 1, x = x }, "Cid-Realm")
+	for i = 1, 101 do
+		x[#x + 1] = packed(2000 + i, sheet(2000 + i, { 5 }, DAY - 5))
+		if #x == NS.NU_SHEETS or i == 101 then
+			incoming(env, "NU", { h = 1, x = x }, "Cid-Realm")
+			x = {}
+		end
+	end
 	env.run(100)
 	incoming(env, "ND", { h = 777, n = 1 })
 	env.run(100)
@@ -1284,4 +1290,107 @@ H.test("sync bounds: fields at their bounds pass, one beyond is bad", function()
 		incoming(env, "ND", { h = 1, n = 0 }, long(case[1]))
 		H.eq(env.sync.stats.recv.ND, case[2], "sender name of " .. case[1] .. " bytes")
 	end
+end)
+
+-- One NU's work is bounded (C1 of the 0.7.0 QA) ----------------------------------
+
+-- A maximal sheet (200 trained, 60 sold) of today, packed; copies of it with other npc IDs share
+-- its column tables, which LibSerialize writes once.
+local function maximalPacked()
+	local s = { name = "Evil", nd = DAY, map = 1, x = 1, y = 1, pd = DAY, t = {}, v = {} }
+	for i = 1, 200 do s.t[i] = { DAY, 1, DAY, 1, DAY } end
+	for i = 1, 60 do s.v[1000 + i] = { DAY, { c = 1, o = {}, l = 0 }, DAY } end
+	return ND.Pack(1, s)
+end
+local function sharedColumns(k, first)
+	local cols, x = maximalPacked(), {}
+	for i = 1, k do
+		local l = {}
+		for j, v in pairs(cols) do l[j] = v end
+		l[1] = first + i
+		x[i] = l
+	end
+	return x
+end
+local function wire(msg)
+	local _, m = LS:Deserialize(LD:DecompressDeflate(LD:DecodeForWoWAddonChannel(encode(msg))))
+	return m
+end
+-- a table at its entry limit of real sheets
+local function fullEnv()
+	local env = newEnv({ random = 0.5 })
+	for id = 1, 600 do
+		local recipes = {}
+		for i = 1, 34 do recipes[i] = id * 100 + i end
+		hold(env, id, recipes, DAY - 30)
+	end
+	return env
+end
+
+H.test("sync: an NU of more than 40 sheets or 4000 entries is refused unread, its sender ignored 600 s", function()
+	H.eq(NS.NU_SHEETS, 40) H.eq(NS.NU_ENTRIES, 4000) H.eq(NS.BAD_BLOCK, 600)
+	local small = {}
+	for i = 1, 41 do small[i] = packed(5000 + i, sheet(5000 + i, { 7 })) end
+	local env = newEnv({ random = 0.5 })
+	incoming(env, "NU", { h = 1, x = small }, "Evil-Realm")
+	H.eq(env.sync.stats.bad, 1, "41 sheets: bad") H.eq(env.tab:Count(), 0, "nothing merged")
+	H.eq(env.sync.stats.recv.NU, nil)
+	-- ignored for 600 s, whatever it sends
+	env.run(599)
+	table.remove(small)
+	incoming(env, "NU", { h = 1, x = small }, "Evil-Realm")
+	incoming(env, "ND", { h = 5, n = 1 }, "Evil-Realm")
+	H.eq(env.tab:Count(), 0, "blocked") H.eq(env.sync.stats.capped, 2)
+	incoming(env, "NU", { h = 1, x = small }, "Bob-Realm")
+	H.eq(env.tab:Count(), 40, "40 sheets from another sender are taken")
+	env.run(2)
+	incoming(env, "NU", { h = 1, x = { packed(6001, sheet(6001, { 7 })) } }, "Evil-Realm")
+	H.eq(env.tab:Count(), 41, "taken again after 600 s")
+	-- entries: 15 maximal sheets are 3900, 16 are 4160
+	env = newEnv({ random = 0.5 })
+	incoming(env, "NU", { h = 1, x = sharedColumns(16, 7000) }, "Evil-Realm")
+	H.eq(env.sync.stats.bad, 1, "4160 entries: bad") H.eq(env.tab:Count(), 0)
+	incoming(env, "NU", { h = 1, x = sharedColumns(15, 7000) }, "Bob-Realm")
+	H.eq(env.sync.stats.bad, 1, "3900 entries pass") H.eq(env.tab:Count(), 15)
+	-- broken column fields count as no entries, so they cannot dodge the bound or throw
+	env = newEnv({ random = 0.5 })
+	local odd = sharedColumns(3, 8000)
+	odd[1][9], odd[2][15] = "x", 5
+	incoming(env, "NU", { h = 1, x = odd }, "Odd-Realm")
+	H.eq(env.sync.stats.bad, 0) H.eq(env.tab:Count(), 1)
+end)
+
+H.test("sync: the hostile shared-column NU (600 sheets in 1.6 kB) is refused in under 50 ms, real sheets stay", function()
+	local env = fullEnv()
+	local hash = env.tab:Hash()
+	local text = encode({ t = "NU", pv = ND.PROTOCOL, e = ND.EPOCH, f = "Alliance", s = "X", h = 1, x = sharedColumns(600, 900000) })
+	H.ok(#text < 2000, "small on the wire: " .. #text)
+	local _, msg = LS:Deserialize(LD:DecompressDeflate(LD:DecodeForWoWAddonChannel(text)))
+	local c0 = os.clock()
+	env.sync:OnMessage(msg, "Evil-Realm", #text)
+	local dt = os.clock() - c0
+	H.ok(dt < 0.05, ("took %.0f ms"):format(dt * 1000))
+	H.eq(env.sync.stats.bad, 1) H.eq(env.tab:Hash(), hash, "the real sheets stay")
+	print(("       hostile shared-column NU of 600 sheets: refused in %.2f ms"):format(dt * 1000))
+end)
+
+H.test("sync: an NU at the bounds into a full table merges with one limit, in bounded time", function()
+	local env = fullEnv()
+	local msg = wire({ t = "NU", pv = ND.PROTOCOL, e = ND.EPOCH, f = "Alliance", s = "X", h = 1, x = sharedColumns(15, 900000) })
+	local c0 = os.clock()
+	env.sync:OnMessage(msg, "Evil-Realm", 1000)
+	local dt = os.clock() - c0
+	print(("       NU of 15 maximal sheets (3900 entries) into a full table: %.0f ms"):format(dt * 1000))
+	if jit then H.ok(dt < 0.1, ("took %.0f ms"):format(dt * 1000)) end
+	H.ok(env.tab.nEntries <= 20000, "entries") H.eq(env.tab:Count(), 600)
+	for i = 1, 15 do H.ok(env.tab:Get(900000 + i), "newer sheet " .. i .. " taken") end
+end)
+
+H.test("sync 4: a sheet of an NU pushed out by a later one of the same NU is remembered as refused", function()
+	local env = newEnv({ random = 0.5, limits = { sheets = 2 } })
+	hold(env, 1001, { 1 })
+	local old, new = sheet(2001, { 5 }, DAY - 5), sheet(2002, { 6 })
+	incoming(env, "NU", { h = 1, x = { packed(2001, old), packed(2002, new) } }, "Cid-Realm")
+	H.eq(env.tab:Sendable(2001), nil, "the older sheet goes") H.ok(env.tab:Sendable(2002), "the newer stays")
+	H.ok(env.sync.refused[2001], "remembered") H.eq(env.sync.refused[2002], nil)
 end)

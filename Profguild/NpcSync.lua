@@ -61,6 +61,18 @@ NpcSync.PART = 254
 NpcSync.DONE_TIMEOUT = 30         -- no done after this plus 1 s per part: failed
 NpcSync.MAX_LIST = 600            -- IDs or sheets read from one message
 NpcSync.MAX_NAME = 100
+-- The work of one NU, counted before anything is unpacked: its sheets, and its entries (the
+-- lengths of the trained and sold ID columns). An honest NU is filled to NU_FILL by the sizes of its
+-- sheets each sent alone, and no sheet sent alone is under about 75 bytes (one entry, no name): at
+-- most 13 sheets, of at most LIMIT_T + LIMIT_V = 260 entries each (3380). Measured: the simulated
+-- guild (run_npc_sim.lua --seeds 3 --extra) at most 8 sheets and 161 entries per NU; filled with
+-- the most compressible sheets an honest client could hold, 12 sheets of one entry, or 9 sheets of
+-- 260 entries (2340); one realistic full trainer goes alone. A larger NU is refused (stats.bad) and
+-- its sender ignored for BAD_BLOCK seconds, as Comm does with oversized messages: LibSerialize
+-- writes a repeated table once, so 600 sheets sharing their columns took 1.6 kB and 15 s.
+NpcSync.NU_SHEETS = 40
+NpcSync.NU_ENTRIES = 4000
+NpcSync.BAD_BLOCK = 600
 
 local M = 2147483647
 
@@ -131,6 +143,7 @@ function NpcSync.New(adapter, tab)
 		counts = nil,     -- rule 9: { [0] = since, [key] = n }
 		raised = {},      -- rule 9: key -> when its counter last rose
 		refused = {}, refusedList = {}, -- rule 4: ID -> content hash of a sheet the limits refused
+		blocked = {},     -- sender name -> until when its messages are ignored (an NU over the bounds)
 		lastNI = -1e9, lastND = -1e9, lastData = -1e9, lastPrune = 0,
 		push = nil,       -- ID -> { who = NI sender name or nil, since = first attempt }: sheets to send
 		missing = nil,    -- ID -> true: what the last NI showed we lack
@@ -226,6 +239,7 @@ local function prune(self)
 	for k, v in pairs(self.ndSeen) do if v[1] < old then self.ndSeen[k] = nil end end
 	for k, p in pairs(self.pair) do if p.t < old then self.pair[k] = nil end end
 	for k, v in pairs(self.raised) do if v < t - NpcSync.COUNT_EVERY then self.raised[k] = nil end end
+	for k, v in pairs(self.blocked) do if v <= t then self.blocked[k] = nil end end
 	for k, list in pairs(self.nrHeard) do
 		local keep = {}
 		for _, x in ipairs(list) do if x >= old then keep[#keep + 1] = x end end
@@ -625,15 +639,25 @@ local function onNU(self, sender, h, x)
 	R.had = true
 	local tab = self.tab
 	local today, useful, changedAny = tab:Today(), false, false
+	-- all sheets merged at once: the table limits run once per NU, not once per sheet
+	local got, items = {}, {}
 	for i = 1, #x do
 		local id, s, sh = unpackSheet(x[i], today)
 		if s then
-			local changed, taken
 			if tab:SheetHash(id) == sh then
-				changed, taken = false, true
+				got[#got + 1] = { id, sh }
 			else
-				changed, taken = tab:MergeIn(id, s)
+				items[#items + 1] = { id, s }
+				got[#got + 1] = { id, sh, #items }
 			end
+		end
+	end
+	local merged, held = tab:MergeAll(items)
+	for _, g in ipairs(got) do
+		local id, sh, k = g[1], g[2], g[3]
+		do
+			local changed, taken = false, true
+			if k then changed, taken = merged[k], held[k] end
 			if changed then changedAny = true end
 			if not taken then remember(self, id, sh) end
 			local ours = tab:SheetHash(id)
@@ -669,6 +693,14 @@ function Sync:OnMessage(msg, sender, size)
 		return
 	end
 	if self.a.isMe(sender) then return end
+	local blockedTill = self.blocked[sender]
+	if blockedTill then
+		if blockedTill > now(self) then
+			self.stats.capped = self.stats.capped + 1
+			return
+		end
+		self.blocked[sender] = nil
+	end
 	local h, t = msg.h, msg.t
 	if not int(h, 0, M - 1) then
 		self.stats.bad = self.stats.bad + 1
@@ -692,8 +724,18 @@ function Sync:OnMessage(msg, sender, size)
 	elseif t == "NU" then
 		local n = sequence(msg.x, NpcSync.MAX_LIST)
 		parsed = n ~= nil
+		local entries = 0
 		for i = 1, n or 0 do
-			if type(msg.x[i]) ~= "table" then parsed = false break end
+			local l = msg.x[i]
+			if type(l) ~= "table" then parsed = false break end
+			local a, b = l[9], l[15]
+			entries = entries + (type(a) == "table" and #a or 0) + (type(b) == "table" and #b or 0)
+		end
+		if parsed and (n > NpcSync.NU_SHEETS or entries > NpcSync.NU_ENTRIES) then
+			-- more work than any honest NU: refused before anything is unpacked, the sender ignored
+			self.stats.bad = self.stats.bad + 1
+			self.blocked[sender] = now(self) + NpcSync.BAD_BLOCK
+			return
 		end
 	end
 	if not parsed then

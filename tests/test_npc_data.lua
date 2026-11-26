@@ -1054,3 +1054,102 @@ H.test("npc data: the table at its edges: sendable, expiry, the day, import and 
 	w:Write(7, { t = { [1] = { skill = 1, copper = 1 } }, v = {} })
 	H.eq(w:Get(7).t[1][2], 1, "write: skill 1") H.eq(w:Get(7).t[1][4], 1, "write: copper 1")
 end)
+
+-- The entries the table limits drop, by the rule itself: all entries sorted (the older first, then
+-- the higher hash of npc, part, id, then the higher keys), the first `over` of them.
+local function referenceDrop(tab)
+	local KH = ND.KeyHash
+	local function eh(npc, part, id) return KH((KH((KH(npc) + part) % 4294967296) + id) % 4294967296) end
+	local all = {}
+	for npc, s in pairs(tab.sheets) do
+		for id, e in pairs(s.t) do all[#all + 1] = { e[1], eh(npc, 1, id), npc, 1, id } end
+		for id, e in pairs(s.v) do all[#all + 1] = { e[1], eh(npc, 2, id), npc, 2, id } end
+	end
+	table.sort(all, function(a, b)
+		if a[1] ~= b[1] then return a[1] < b[1] end
+		for j = 2, 5 do if a[j] ~= b[j] then return a[j] > b[j] end end
+		return false
+	end)
+	local keep = {}
+	for i = #all - tab.le + 1, #all do
+		if i >= 1 then keep[all[i][3] .. ":" .. all[i][4] .. ":" .. all[i][5]] = true end
+	end
+	return keep
+end
+
+H.test("npc data: the entry limit drops exactly the older entries, then the higher hashes (any number over)", function()
+	local T = D + 300
+	for _, over in ipairs({ 1, 63, 64, 65, 300, 2500 }) do
+		local L = { entries = 3000 }
+		local tab = newTable(T, nil, L)
+		tab.le = math.huge
+		for npc = 1, 30 do
+			local sh = { t = {}, v = {} }
+			for _ = 1, 100 + rnd(60) do sh.t[rnd(400)] = { T - rnd(4), 0, 0, 0, 0 } end
+			for _ = 1, rnd(40) do sh.v[rnd(400)] = { T - rnd(4), false, 0 } end
+			tab:MergeIn(npc * 7, sh)
+		end
+		tab.le = math.max(1, tab.nEntries - over)
+		local keep = referenceDrop(tab)
+		tab:limit()
+		local held = {}
+		for npc, s in pairs(tab.sheets) do
+			for id in pairs(s.t) do held[npc .. ":1:" .. id] = true end
+			for id in pairs(s.v) do held[npc .. ":2:" .. id] = true end
+		end
+		H.ok(deepEq(held, keep), "over " .. over .. ": the kept set is the rule's")
+		H.eq(tab.nEntries, tab.le, "over " .. over)
+	end
+end)
+
+H.test("npc data: MergeAll applies the table limits once, as a merge of all and one limit", function()
+	local T = D + 300
+	local L = { entries = 500 }
+	local items = {}
+	for k = 1, 8 do
+		local sh = { t = {}, v = {} }
+		for _ = 1, 100 do sh.t[rnd(300)] = { T - rnd(6), 0, 0, 0, 0 } end
+		items[k] = { 100 + k, sh }
+	end
+	local a = newTable(T, nil, L)
+	local changed, taken = a:MergeAll(items)
+	local b = newTable(T, nil, L)
+	b.le = math.huge
+	for _, it in ipairs(items) do b:MergeIn(it[1], it[2]) end
+	b.le = 500
+	b:limit()
+	H.eq(a:Hash(), b:Hash(), "one limit at the end")
+	H.ok(deepEq(a.saved, b.saved), "saved the same")
+	for k, it in ipairs(items) do
+		local s = a:Get(it[1])
+		local any = false
+		for id in pairs(it[2].t) do if s and s.t[id] then any = true end end
+		H.eq(taken[k], any, "taken " .. k)
+		H.eq(changed[k], s ~= nil, "changed " .. k)
+	end
+	-- MergeIn is MergeAll of one
+	local c1, t1 = newTable(T):MergeIn(5, items[1][2])
+	H.ok(c1 and t1, "MergeIn")
+	H.eq(#select(1, newTable(T):MergeAll({})), 0, "nothing to merge")
+	local cx, tx = newTable(T):MergeAll({ { 0, items[1][2] }, { 6, "junk" } })
+	H.ok(not cx[1] and not tx[1] and not cx[2] and not tx[2], "a bad ID or sheet: false, false")
+end)
+
+H.test("npc data: a full table takes a new sheet of over 64 entries fast (no sort of all 20000)", function()
+	local T = D + 300
+	local tab = newTable(T)
+	for id = 1, 600 do tab:MergeIn(id, { t = entries(34, T - 30, id * 100), v = {} }) end
+	H.eq(tab.nEntries, 20000)
+	local best = 1e9
+	for rep = 1, 3 do
+		local sh = { t = entries(200, T, 1000000 + rep * 1000), v = entries(60, T, 2000000 + rep * 1000) }
+		local c0 = os.clock()
+		tab:MergeIn(10000 + rep, sh)
+		best = math.min(best, os.clock() - c0)
+	end
+	H.ok(tab.nEntries <= 20000 and tab.nSheets == 600, "within the limits")
+	H.eq(count(tab:Get(10003).t) + count(tab:Get(10003).v), 260, "the new sheet is held whole")
+	-- 30 ms before (all 20000 built and sorted); under real Lua 5.1 only reported
+	if jit then H.ok(best < 0.010, ("MergeIn into the full table took %.1f ms"):format(best * 1000)) end
+	print(("       MergeIn of 260 new entries into the full table: %.1f ms"):format(best * 1000))
+end)
