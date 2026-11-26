@@ -68,11 +68,25 @@ local function int(v, lo, hi)
 	return type(v) == "number" and v >= lo and v <= hi and v == floor(v)
 end
 
+-- The length of a received list that is exactly 1..n (no holes, no other keys), at most max; else
+-- nil. The keys are counted, never taken from # (a list with holes has any border as #).
+local function sequence(list, max)
+	if type(list) ~= "table" then return nil end
+	local n, top = 0, 0
+	for k in pairs(list) do
+		n = n + 1
+		if n > max or not int(k, 1, max) then return nil end
+		if k > top then top = k end
+	end
+	if top ~= n then return nil end -- distinct keys 1..max, as many as the greatest: exactly 1..n
+	return n
+end
+NpcSync.sequence = sequence
+
 -- Sorted IDs from deltas (each at least 1), nil when broken.
 local function fromDeltas(list)
-	if type(list) ~= "table" then return nil end
-	local n = #list
-	if n > NpcSync.MAX_LIST then return nil end
+	local n = sequence(list, NpcSync.MAX_LIST)
+	if not n then return nil end
 	local ids, id = {}, 0
 	for i = 1, n do
 		local d = list[i]
@@ -118,10 +132,10 @@ function NpcSync.New(adapter, tab)
 		raised = {},      -- rule 9: key -> when its counter last rose
 		refused = {}, refusedList = {}, -- rule 4: ID -> content hash of a sheet the limits refused
 		lastNI = -1e9, lastND = -1e9, lastData = -1e9, lastPrune = 0,
-		push = nil,       -- ID -> { who = NI sender name or nil }: sheets to send
+		push = nil,       -- ID -> { who = NI sender name or nil, since = first attempt }: sheets to send
 		missing = nil,    -- ID -> true: what the last NI showed we lack
 		plan = nil,       -- planned NI { h, t0 }
-		sending = false, round = nil, hold = nil, cursor = nil, waitSince = nil,
+		sending = false, round = nil, hold = nil, cursor = nil,
 		dirtyOn = false, ndSeq = 0, settleSeq = 0, laterSeq = 0,
 		sizes = {},       -- "id:hash" -> encoded bytes of an NU of that sheet alone
 		stats = { sent = {}, bytes = {}, recv = {}, capped = 0, muted = 0, dropped = 0, foreign = 0, bad = 0 },
@@ -158,7 +172,8 @@ local function transmit(self, t, msg, done)
 	local function finish(ok)
 		if fired then return end
 		fired = true
-		if done and not self.dead then done(ok and true or false, size) end
+		-- blocked: the failure came while sending was blocked (rule 7), not from the send itself
+		if done and not self.dead then done(ok and true or false, size, not ok and not self.a.canSend()) end
 	end
 	self.a.after(NpcSync.DONE_TIMEOUT + ceil(size / NpcSync.PART), function() finish(false) end)
 	self.a.send(msg, finish)
@@ -271,10 +286,11 @@ end
 function sendND(self, n)
 	if not canSend(self) then return dirty(self) end
 	self.lastND = now(self)
-	transmit(self, "ND", { n = (self.tab:Count()) }, function(ok)
+	transmit(self, "ND", { n = (self.tab:Count()) }, function(ok, _, blocked)
 		if not ok then
+			-- rule 10; again after a block (rule 7), but a send that itself fails is not repeated in a loop
 			self.lastND = -1e9
-			dirty(self)
+			if blocked then dirty(self) end
 		end
 	end)
 	self.ndSeq = self.ndSeq + 1
@@ -320,15 +336,23 @@ function step(self)
 	self.sending = false
 	local t = now(self)
 	if not canSend(self) then
-		if self.push and next(self.push) then
-			self.waitSince = self.waitSince or t
-			if t - self.waitSince < NpcSync.WAIT then return later(self, rnd(self, NpcSync.RETRY)) end
-			self.stats.dropped = self.stats.dropped + 1
+		-- rule 7: each planned sheet waits WAIT seconds from its first attempt, blocked or failed
+		local push, left = self.push, false
+		if push then
+			for id, q in pairs(push) do
+				q.since = q.since or t
+				if t - q.since >= NpcSync.WAIT then
+					push[id] = nil
+					self.stats.dropped = self.stats.dropped + 1
+				else
+					left = true
+				end
+			end
 		end
-		self.waitSince, self.push = nil, nil
+		if left then return later(self, rnd(self, NpcSync.RETRY)) end
+		self.push = nil
 		return dirty(self)
 	end
-	self.waitSince = nil
 	local push = self.push
 	if not push then return end
 	if self.hold and self.hold > t then
@@ -349,12 +373,13 @@ function step(self)
 			if id > self.cursor then rot = i - 1 break end
 		end
 	end
-	local list, sent, bytes = {}, {}, 0
+	local list, sent, since, bytes = {}, {}, {}, 0
 	for i = 1, #ids do
 		local id = ids[(i - 1 + rot) % #ids + 1]
 		local b = sheetSize(self, id)
 		if bytes > 0 and bytes + b > NpcSync.NU_FILL then break end
 		list[#list + 1], sent[#sent + 1] = ns.NpcData.Pack(id, tab:Sendable(id)), id
+		since[id] = push[id].since or t
 		bytes = bytes + b
 		push[id] = nil
 		self.cursor = id
@@ -366,11 +391,22 @@ function step(self)
 	settle(self)
 	transmit(self, "NU", { x = list }, function(ok, size)
 		if not ok then
-			-- rule 10: the sheets go back and wait like blocked ones (rule 7)
+			-- rules 7 and 10: the sheets go back and are tried again until WAIT seconds after their
+			-- first attempt; then they are dropped and an ND brings them later
 			self.sending = false
-			self.push = self.push or {}
-			for _, id in ipairs(sent) do self.push[id] = {} end
-			return later(self, rnd(self, NpcSync.RETRY))
+			local at, dropped = now(self), false
+			for _, id in ipairs(sent) do
+				if at - since[id] < NpcSync.WAIT then
+					self.push = self.push or {}
+					self.push[id] = self.push[id] or { since = since[id] }
+				else
+					dropped = true
+					self.stats.dropped = self.stats.dropped + 1
+				end
+			end
+			if dropped then dirty(self) end
+			if self.push and next(self.push) then return later(self, rnd(self, NpcSync.RETRY)) end
+			return
 		end
 		after(self, ceil(size / NpcSync.PART), function() step(self) end)
 	end)
@@ -424,12 +460,12 @@ local function plan(self, h)
 		for i, id in ipairs(ids) do c[i] = hashes[id] end
 		local R = openRound(self)
 		R.ni, R.mine, R.hNI = true, true, H
-		transmit(self, "NI", { r = salt, i = toDeltas(ids), c = c }, function(ok)
+		transmit(self, "NI", { r = salt, i = toDeltas(ids), c = c }, function(ok, _, blocked)
 			if not ok then
 				self.lastNI = -1e9
 				pr.n = pr.n - 1
 				self.round = nil
-				dirty(self)
+				if blocked then dirty(self) end
 			end
 		end)
 		settle(self)
@@ -514,12 +550,12 @@ local function onNI(self, sender, h, salt, ids, c)
 			self.nrHeard[sender] = list
 			self.lastData = at
 			openRound(self).had = true
-			transmit(self, "NR", { to = sender, i = toDeltas(q) }, function(ok)
+			transmit(self, "NR", { to = sender, i = toDeltas(q) }, function(ok, _, blocked)
 				if not ok then
 					for i = #list, 1, -1 do
 						if list[i] == at then table.remove(list, i) break end
 					end
-					dirty(self)
+					if blocked then dirty(self) end
 				end
 			end)
 			settle(self)
@@ -628,7 +664,7 @@ function Sync:OnMessage(msg, sender, size)
 		parsed = int(msg.n, 0, NpcData.LIMIT_SHEETS)
 	elseif t == "NI" then
 		local ids, c = fromDeltas(msg.i), msg.c
-		parsed = ids and int(msg.r, 0, 65535) and type(c) == "table" and #c == #ids
+		parsed = ids and int(msg.r, 0, 65535) and sequence(c, NpcSync.MAX_LIST) == #ids
 		if parsed then
 			for i = 1, #ids do
 				if not int(c[i], 0, 65535) then parsed = false break end
@@ -639,7 +675,11 @@ function Sync:OnMessage(msg, sender, size)
 		local ids = fromDeltas(msg.i)
 		parsed = ids and type(msg.to) == "string" and #msg.to <= NpcSync.MAX_NAME and ids
 	elseif t == "NU" then
-		parsed = type(msg.x) == "table" and #msg.x <= NpcSync.MAX_LIST
+		local n = sequence(msg.x, NpcSync.MAX_LIST)
+		parsed = n ~= nil
+		for i = 1, n or 0 do
+			if type(msg.x[i]) ~= "table" then parsed = false break end
+		end
 	end
 	if not parsed then
 		self.stats.bad = self.stats.bad + 1
@@ -686,21 +726,18 @@ function Sync:OwnVisit(id, reading)
 	local since
 	local function go()
 		local t = now(self)
-		if not canSend(self) then
-			since = since or t
-			if t - since < NpcSync.WAIT then return after(self, rnd(self, NpcSync.RETRY), go) end
+		since = since or t -- rule 7: WAIT seconds from the first attempt, blocked or failed
+		if t - since >= NpcSync.WAIT then
 			self.stats.dropped = self.stats.dropped + 1
 			return dirty(self)
 		end
+		if not canSend(self) then return after(self, rnd(self, NpcSync.RETRY), go) end
 		local s = tab:Sendable(id)
 		if not s then return end
 		self.lastData = t
 		if not self.round then self.round = { h0 = old, had = false } end
 		transmit(self, "NU", { x = { ns.NpcData.Pack(id, s) } }, function(ok)
-			if not ok then
-				since = since or now(self)
-				after(self, rnd(self, NpcSync.RETRY), go)
-			end
+			if not ok then after(self, rnd(self, NpcSync.RETRY), go) end
 		end)
 		settle(self)
 	end

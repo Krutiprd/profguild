@@ -121,7 +121,12 @@ function Comm:OnCommReceived(prefix, text, distribution, sender)
 		return
 	end
 	if isNpc then
-		if ns.npcSync then ns.npcSync:OnMessage(msg, sender, #text) end
+		-- an unexpected error in the NPC code is recorded (Bugs), not thrown at every message
+		local sync = ns.npcSync
+		if sync then
+			if ns.Bugs then ns.Bugs.Call(sync.OnMessage, sync, msg, sender, #text)
+			else sync:OnMessage(msg, sender, #text) end
+		end
 		return
 	end
 	-- Remember how the game names the sender: that is the name a whisper needs.

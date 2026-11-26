@@ -69,6 +69,19 @@ H.test("received on ProfguildNPC reaches npcSync, with the game's sender name, a
 	H.eq(synced, 0, "sync untouched")
 end)
 
+H.test("an error in npcSync is recorded by Bugs, not thrown", function()
+	local ns = login()
+	ns.npcSync = { OnMessage = function() error("npc boom") end }
+	local got = {}
+	local record = ns.Bugs.Record
+	ns.Bugs.Record = function(msg, stack, ours) got[#got + 1] = msg return true end
+	local ok, err = pcall(ns.Comm.OnCommReceived, ns.Comm, "ProfguildNPC", ns.Comm.Encode({ t = "ND" }), "GUILD", "Ana-Winterborn")
+	ns.Bugs.Record = record
+	H.ok(ok, tostring(err))
+	H.eq(#got, 1, "recorded")
+	H.ok(got[1]:find("npc boom", 1, true) ~= nil, got[1])
+end)
+
 H.test("an NPC message does not write guildDB.names", function()
 	local ns = login()
 	ns.npcSync = fakeNpcSync()

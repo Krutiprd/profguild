@@ -51,7 +51,11 @@ local function newEnv(o)
 			env.sent[#env.sent + 1] = { t = env.t, msg = msg, done = done }
 			local mode = env.fail[msg.t] or env.mode
 			if mode == "ok" then env.at(0, function() done(true) end)
-			elseif mode == "fail" then env.at(0, function() done(false) end) end
+			elseif mode == "fail" then env.at(0, function() done(false) end)
+			elseif mode == "blockfail" then -- the game starts blocking while the message goes out
+				env.blocked = true
+				env.at(0, function() done(false) end)
+			end
 		end,
 		selfGuid = function() return "Player-1-0000000A" end,
 		faction = function() return "Alliance" end,
@@ -642,14 +646,68 @@ end)
 
 -- Rule 10 ---------------------------------------------------------------------
 
-H.test("sync 10: a failed ND is followed by an ND after the poll", function()
+H.test("sync 10: an ND failed by a block is followed by an ND after the block", function()
 	local env = newEnv({ random = 0 })
-	env.fail.ND = "fail"
+	env.fail.ND = "blockfail"
 	env.sync:Announce()
-	env.runTo(30)
+	env.runTo(11)
+	H.eq(#sentOf(env, "ND"), 1, "failed")
+	env.fail.ND = nil
+	env.runTo(40)
+	env.blocked = false
+	env.runTo(80)
 	local nd = sentOf(env, "ND")
 	H.eq(#nd, 2, "again")
-	H.eq(nd[2].t, 25, "5 s poll and 10 s")
+	H.ok(nd[2].t >= 50 and nd[2].t <= 65, "10-20 s after the block (5 s poll): " .. nd[2].t)
+end)
+
+H.test("sync 7, 10: an ND whose send always fails is not repeated in a loop", function()
+	for _, mode in ipairs({ "fail", "never" }) do
+		local env = newEnv({ random = 0.5 })
+		env.fail.ND = mode
+		env.sync:Announce()
+		env.run(600)
+		H.ok(#sentOf(env, "ND") <= 4, mode .. ": " .. #sentOf(env, "ND") .. " NDs in 600 s (1 and 3 repeats of rule 1)")
+	end
+end)
+
+H.test("sync 7, 10: an NU whose send always fails is dropped 30 s after its first attempt", function()
+	for _, mode in ipairs({ "fail", "never" }) do
+		local env = newEnv({ random = 0.5 })
+		hold(env, 1001, { 1 })
+		env.mode = mode
+		ni(env, {}, nil)
+		env.run(600)
+		local n = #sentOf(env, "NU")
+		H.ok(n >= 1 and n <= 16, mode .. ": " .. n .. " NUs in 600 s (every 2 s for 30 s)")
+		H.ok(#sentOf(env, "ND") <= 5, mode .. ": NDs bounded")
+		H.ok(#env.sent <= 25, mode .. ": " .. #env.sent .. " messages in all")
+		-- sending works again: the sheet reaches a peer
+		env.mode = "ok"
+		local from = env.t
+		ni(env, {}, nil, 998, "Cid-Realm")
+		env.run(30)
+		local nu = sentOf(env, "NU", from)
+		H.ok(#nu == 1 and idsOf(nu[1]) == "1001", mode .. ": sent once sending works")
+	end
+end)
+
+H.test("sync 7, 8, 10: an own visit NU whose send always fails is dropped 30 s after its first attempt", function()
+	for _, mode in ipairs({ "fail", "never" }) do
+		local env = newEnv({ random = 0.5 })
+		env.mode = mode
+		env.sync:OwnVisit(1001, reading)
+		env.run(600)
+		local n = #sentOf(env, "NU")
+		H.ok(n >= 1 and n <= 16, mode .. ": " .. n .. " NUs in 600 s")
+		H.ok(#env.sent <= 25, mode .. ": " .. #env.sent .. " messages in all")
+		env.mode = "ok"
+		local from = env.t
+		ni(env, {}, nil, 998, "Cid-Realm")
+		env.run(30)
+		local nu = sentOf(env, "NU", from)
+		H.ok(#nu == 1 and idsOf(nu[1]) == "1001", mode .. ": sent once sending works")
+	end
 end)
 
 H.test("sync 10: a failed NI does not hold back the next one 65 s", function()
@@ -700,10 +758,11 @@ H.test("sync 10: no done in 30 s plus 1 s per part is a failure, a late done is 
 	H.eq(#sentOf(env, "ND"), 1, "still waiting")
 	env.runTo(41.1)
 	env.fail.ND = nil
-	env.runTo(70)
+	-- the failure undid lastND (rule 10): a round ending now may send its ND without the 30 s gap
+	incoming(env, "NU", { h = 1, x = { packed(1001, sheet(1001, { 1 })) } })
+	env.runTo(41.1 + 24.5)
 	local nd = sentOf(env, "ND")
-	H.eq(#nd, 2, "ND after the failure")
-	H.eq(nd[2].t, 41 + 5 + 10, "poll and 10 s")
+	H.eq(#nd, 2, "rule 5 ND after the failure")
 	first.done(true) -- late
 	env.run(100)
 	H.ok(true, "no error")
@@ -782,6 +841,39 @@ H.test("sync: hostile fields give no error", function()
 	env.run(300)
 	H.eq(env.tab:Count(), 1, "table unchanged")
 	H.eq(#sentOf(env, "NU"), 0, "no NU for unknown IDs")
+end)
+
+H.test("sync: lists with holes, other keys and nested junk give no error, also through the wire", function()
+	local env = newEnv({ random = 0.5 })
+	hold(env, 1001, { 1 })
+	local good = packed(1002, sheet(1002, { 2 }))
+	local cases = {
+		{ "NU", { x = { good, good, nil, good } } }, { "NU", { x = { [1] = good, [3] = good } } },
+		{ "NU", { x = { 5, 5, nil, 5, 5, 5, 5, 5 } } }, { "NU", { x = { good, "s", 5 } } },
+		{ "NU", { x = { [0] = good } } }, { "NU", { x = { good, a = good } } }, { "NU", { x = { [1.5] = good } } },
+		{ "NU", { x = { { { {} } }, { 1002, { {} }, { "x" } } } } },
+		{ "NU", { x = { { 1002, "n", 0, false, false, false, false, 20000, { 1, nil, 2 }, { 5, nil, 5 }, { 1 }, 0, 0, 0, {}, {}, {}, 0, 0, {} } } } },
+		{ "NI", { r = 1, i = { 1001, nil, 3 }, c = { 1, nil, 1 } } }, { "NI", { r = 1, i = { 1001 }, c = { [2] = 1 } } },
+		{ "NI", { r = 1, i = { [1] = 1001, [3] = 1 }, c = { 1, 1 } } }, { "NI", { r = 1, i = { 1001, x = 1 }, c = { 1 } } },
+		{ "NI", { r = 1, i = { {} }, c = { {} } } }, { "NI", { r = 1, i = { 1001 }, c = { "1" } } },
+		{ "NR", { to = "Me-Realm", i = { 1001, nil, 1 } } }, { "NR", { to = { "Me-Realm" }, i = { 1001 } } },
+		{ "NR", { to = "Me-Realm", i = { [2] = 1001 } } }, { "NR", { to = "Me-Realm", i = { { 1001 } } } },
+		{ "ND", { n = { 1 } } },
+	}
+	for _, m in ipairs(cases) do
+		local msg = { t = m[1], pv = ND.PROTOCOL, e = ND.EPOCH, f = "Alliance", s = "Player-1-0000000B", h = 7 }
+		for k, v in pairs(m[2]) do msg[k] = v end
+		local ok, wire = LS:Deserialize(LS:Serialize(msg))
+		H.ok(ok, "round trip")
+		for _, x in ipairs({ msg, wire }) do
+			local done, err = pcall(env.sync.OnMessage, env.sync, x, "Evil-Realm", 100)
+			H.ok(done, tostring(err))
+		end
+	end
+	env.run(300)
+	H.eq(env.tab:Count(), 1, "nothing taken")
+	H.eq(#sentOf(env, "NU"), 0, "nothing answered")
+	H.eq(NS.sequence({ 1, 2, 3 }, 600), 3) H.eq(NS.sequence({}, 600), 0) H.eq(NS.sequence({ 1, nil, 3 }, 600), nil)
 end)
 
 H.test("sync: a sheet's packed content hashes the same at the receiver", function()
