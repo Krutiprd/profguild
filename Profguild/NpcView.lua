@@ -7,7 +7,7 @@
 -- NpcView.Skill(recipeID, src) -> { learn=|nil, yellow=, green=, grey=, show = { { number, "learn"|"yellow"|"green"|"grey" }, ... } }
 -- NpcView.Sources(recipeID, src, where) -> rows in display order; where = { map=, items = { [itemID]=true },
 --   recipeItem = id|false|nil, letters = "vd", ah = { copper=, text= }|nil }. A row:
---   { kind = "ah"|"trainer"|"vendor"|"drop"|"quest"|"crafted"|"missing"|"unknown", id=, name=, map=, x=, y=,
+--   { kind = "ah"|"trainer"|"vendor"|"other" (how = { "drop", "quest", "crafted" } present, in that order)|"missing"|"unknown", id=, name=, map=, x=, y=,
 --     copper=, other = { { kind, id, count }, ... }|nil, limited=, age=days, approx=, best=, of="vendor"|"trainer" (missing),
 --     text = where.ah.text (ah) }
 --
@@ -242,9 +242,11 @@ function NpcView.Sources(recipeID, src, where)
 	for _, r in ipairs(vendors) do rows[#rows + 1] = r end
 	if #vendors == 0 and letters:find("v", 1, true) then rows[#rows + 1] = { kind = "missing", of = "vendor" } end
 
+	local how = {}
 	for _, l in ipairs({ "d", "q", "c" }) do
-		if letters:find(l, 1, true) then rows[#rows + 1] = { kind = KIND_OF[l] } end
+		if letters:find(l, 1, true) then how[#how + 1] = KIND_OF[l] end
 	end
+	if #how > 0 then rows[#rows + 1] = { kind = "other", how = how } end
 
 	if #rows == 0 then return { { kind = "unknown" } } end
 
