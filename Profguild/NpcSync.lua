@@ -231,6 +231,10 @@ local function prune(self)
 		for _, x in ipairs(list) do if x >= old then keep[#keep + 1] = x end end
 		self.nrHeard[k] = keep[1] and keep or nil
 	end
+	-- sizes of old contents: cleared when more than twice the sheets a table holds
+	local n = 0
+	for _ in pairs(self.sizes) do n = n + 1 end
+	if n > 2 * ns.NpcData.LIMIT_SHEETS then self.sizes = {} end
 end
 
 -- Rounds ---------------------------------------------------------------------
@@ -389,7 +393,8 @@ function step(self)
 	self.lastData = t
 	openRound(self).had = true
 	settle(self)
-	transmit(self, "NU", { x = list }, function(ok, size)
+	-- an error in transmit (the encoding) must not leave sending set: no NU would go out again
+	local fine, err = pcall(transmit, self, "NU", { x = list }, function(ok, size)
 		if not ok then
 			-- rules 7 and 10: the sheets go back and are tried again until WAIT seconds after their
 			-- first attempt; then they are dropped and an ND brings them later
@@ -410,6 +415,10 @@ function step(self)
 		end
 		after(self, ceil(size / NpcSync.PART), function() step(self) end)
 	end)
+	if not fine then
+		self.sending = false
+		error(err, 0)
+	end
 end
 
 local function plan(self, h)
@@ -449,10 +458,16 @@ local function plan(self, h)
 		local pr = pairOf(self, P.h)
 		pr.n = pr.n + 1
 		local salt = floor(self.a.random() * 65536)
-		local hashes, ids = {}, {}
-		for _, id in ipairs(tab:SendableIDs()) do hashes[id] = tab:SaltedHash(tab:SheetHash(id), salt) end
-		for id, h2 in pairs(self.refused) do
-			if not hashes[id] then hashes[id] = tab:SaltedHash(h2, salt) end
+		local hashes, ids, n = {}, {}, 0
+		for _, id in ipairs(tab:SendableIDs()) do
+			hashes[id], n = tab:SaltedHash(tab:SheetHash(id), salt), n + 1
+		end
+		-- refused sheets, newest first, only while receivers read the list (MAX_LIST IDs)
+		local rl = self.refusedList
+		for i = #rl, 1, -1 do
+			if n >= NpcSync.MAX_LIST then break end
+			local id = rl[i]
+			if not hashes[id] then hashes[id], n = tab:SaltedHash(self.refused[id], salt), n + 1 end
 		end
 		for id in pairs(hashes) do ids[#ids + 1] = id end
 		sort(ids)

@@ -492,9 +492,11 @@ local function unpackSheet(l)
 		s.map, s.x, s.y, s.pd = l[4], l[5], l[6], base - l[7]
 	end
 
+	-- An honest sender trims to the limits before packing: more entries are refused before any work.
 	local ids = l[9]
 	if type(ids) ~= "table" then return nil end
 	local n = #ids
+	if n > NpcData.LIMIT_T then return nil end
 	if not (column(ids, n, 1, NpcData.MAX_ID) and column(l[10], n, 0, NpcData.MAX_SKILL)
 		and column(l[11], n, 0, NpcData.MAX_COPPER) and column(l[12], n, 0, base, true)
 		and column(l[13], n, 0, base, true) and column(l[14], n, 0, base, true)) then
@@ -512,6 +514,7 @@ local function unpackSheet(l)
 	ids = l[15]
 	if type(ids) ~= "table" then return nil end
 	n = #ids
+	if n > NpcData.LIMIT_V then return nil end
 	local costs = l[20]
 	if not (column(ids, n, 1, NpcData.MAX_ID) and column(l[16], n, -1, NpcData.MAX_COPPER)
 		and column(l[17], n, 0, NpcData.MAX_COSTS * 2 + 1) and column(l[18], n, 0, base, true)

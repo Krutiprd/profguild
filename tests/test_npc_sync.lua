@@ -410,6 +410,24 @@ H.test("sync 4: at most 100 refused sheets are remembered; one taken in part is 
 	H.eq(m.c[1], env.tab:SaltedHash(env.tab:SheetHash(3001), m.r), "listed with our content")
 end)
 
+H.test("sync 4: an NI at the sheet limit lists at most 600 IDs, refused ones only up to it", function()
+	local env = newEnv({ random = 0.5 })
+	for i = 1, ND.LIMIT_SHEETS do hold(env, 1000 + i, { 1 }) end
+	local x = {}
+	for i = 1, 5 do x[i] = packed(5000 + i, sheet(5000 + i, { 5 }, DAY - 5)) end
+	incoming(env, "NU", { h = 1, x = x }, "Cid-Realm")
+	H.eq(env.tab:Sendable(5001), nil, "refused")
+	env.run(100)
+	incoming(env, "ND", { h = 777, n = 1 })
+	env.run(100)
+	local m = sentOf(env, "NI")[1].msg
+	H.eq(#m.i, NS.MAX_LIST, "no more IDs than a receiver reads")
+	H.eq(NS.sequence(m.i, NS.MAX_LIST), NS.MAX_LIST, "a receiver reads the list")
+	local id = 0
+	for _, d in ipairs(m.i) do id = id + d end
+	H.eq(id, 1000 + ND.LIMIT_SHEETS, "own sheets listed first")
+end)
+
 -- Rule 5 ----------------------------------------------------------------------
 
 H.test("sync 5: ND 12-24 s after the last message of a round when the hash changed, at most one per 30 s", function()
@@ -768,6 +786,27 @@ H.test("sync 10: no done in 30 s plus 1 s per part is a failure, a late done is 
 	H.ok(true, "no error")
 end)
 
+H.test("sync 10: an NU whose encoding throws does not stop later NUs", function()
+	local env = newEnv({ random = 0.5 })
+	hold(env, 1001, { 1, 2 })
+	local size, calls = env.adapter.size, 0
+	env.adapter.size = function(msg)
+		if msg.t == "NU" then
+			calls = calls + 1
+			if calls == 2 then error("encode") end -- the sheet's size passes, the message's throws
+		end
+		return size(msg)
+	end
+	ni(env, {}, nil)
+	H.ok(not pcall(env.run, 20), "the error reaches the caller")
+	H.eq(#sentOf(env, "NU"), 0, "nothing sent")
+	env.adapter.size = size
+	env.run(100)
+	ni(env, {}, nil, 998, "Dan-Realm")
+	env.run(100)
+	H.eq(#sentOf(env, "NU"), 1, "the next NI is answered")
+end)
+
 H.test("sync 10: after Stop() no timer sends", function()
 	local env = newEnv({ random = 0.5 })
 	hold(env, 1001, { 1 })
@@ -785,6 +824,16 @@ H.test("sync 10: after Stop() no timer sends", function()
 end)
 
 -- Foreign and hostile ---------------------------------------------------------
+
+H.test("sync: the size cache is cleared at a prune once it holds more than twice the sheet limit", function()
+	for _, case in ipairs({ { 2 * ND.LIMIT_SHEETS, true }, { 2 * ND.LIMIT_SHEETS + 1, false } }) do
+		local env = newEnv({ random = 0.5 })
+		for i = 1, case[1] do env.sync.sizes[i .. ":1"] = 100 end
+		env.run(301)
+		incoming(env, "ND", { h = 777, n = 1 })
+		H.eq(next(env.sync.sizes) ~= nil, case[2], case[1] .. " sizes kept")
+	end
+end)
 
 H.test("sync: other protocol, epoch and faction are ignored without changing state", function()
 	local env = newEnv({ random = 0.5 })

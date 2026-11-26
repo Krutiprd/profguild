@@ -696,6 +696,24 @@ H.test("npc data: limits", function()
 	end
 end)
 
+H.test("npc data: unpack refuses parts over the entry limits", function()
+	local T = D + 300
+	local function sheet(nt, nv)
+		local s = { t = entries(nt, T), v = {} }
+		for id = 1, nv do s.v[id] = { T, false, 0 } end
+		return s
+	end
+	local _, s = ND.Unpack(ND.Pack(1, sheet(ND.LIMIT_T, ND.LIMIT_V)), T)
+	H.ok(s ~= nil and count(s.t) == ND.LIMIT_T and count(s.v) == ND.LIMIT_V, "at the limits it unpacks")
+	local id
+	id, s = ND.Unpack(ND.Pack(1, sheet(ND.LIMIT_T + 1, 1)), T)
+	H.eq(id, 1, "trained over: id") H.eq(s, nil, "trained over the limit: no sheet")
+	id, s = ND.Unpack(ND.Pack(1, sheet(1, ND.LIMIT_V + 1)), T)
+	H.eq(id, 1, "sold over: id") H.eq(s, nil, "sold over the limit: no sheet")
+	_, s = ND.Unpack(ND.Pack(1, sheet(80000, 0)), T)
+	H.eq(s, nil, "80 000 trained entries: no sheet")
+end)
+
 H.test("npc data: pack", function()
 	local T = D + 300
 	local n = 0
