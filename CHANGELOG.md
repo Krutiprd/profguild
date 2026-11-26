@@ -20,6 +20,10 @@
 - `/pg npc` shows what is held (NPCs, recipes, readings skipped for an unclear name),
   `/pg npc clear` forgets the data of your faction (the guild sends it again); `/pg status` has a
   line for it.
+- After testing: a FIND RECIPE row names other costs and limited stock before the zone (also on
+  hover), "MAP" says in chat whether the pin was set, a trainer or vendor opened in combat is read
+  when the fight ends, and a hostile or oversized NPC message is refused at once instead of
+  freezing the game.
 
 ## 0.6.0 – 2026-11-25
 
