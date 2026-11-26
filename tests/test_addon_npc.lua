@@ -962,3 +962,50 @@ H.test("find: the name gives way to the price and the Map button; another cost's
 	H.ok(8 + d.findRows[2].name._width + 8 <= 302 - 6 - d.findRows[2].price:GetStringWidth())
 	cleanGame()
 end)
+
+-- ~6 px per character of the small font in the game (the mock measures 5); UTF-8 counted by character
+local function gamePx(text)
+	local s = plain(text):gsub("[\128-\191]", "")
+	return #s * 6
+end
+
+H.test("find: every FIND text fits its row in en and sk (about 6 px per character, no wrap)", function()
+	local ns, UI, d = findWindow()
+	UI:ToggleFind()
+	local function check(lang, what)
+		for i = 1, shownRows(d) do
+			local row = d.findRows[i]
+			H.ok(gamePx(row.name:GetText()) <= row.name._width, lang .. " " .. what .. " name: " .. plain(row.name:GetText())
+				.. " " .. gamePx(row.name:GetText()) .. " > " .. row.name._width)
+			H.ok(gamePx(row.detail:GetText()) <= row.detail._width, lang .. " " .. what .. " detail: " .. plain(row.detail:GetText())
+				.. " " .. gamePx(row.detail:GetText()) .. " > " .. row.detail._width)
+		end
+	end
+	for _, lang in ipairs({ "en", "sk" }) do
+		ns.SetLanguage(lang)
+		SlashCmdList.PROFGUILD("npc clear")
+		-- AH not seen, no vendor seen, drop, quest and crafted
+		ns.RecipeData[RECIPE] = { ITEM, "vdqc", 0, 60, 80 }
+		UI:Refresh()
+		H.eq(shownRows(d), 3)
+		check(lang, "ah/no vendor/other")
+		-- probably a trainer: the second half is the detail line
+		ns.RecipeData[RECIPE] = { false, "", 0, 60, 80 }
+		UI:Refresh()
+		H.eq((rowTexts(d.findRows[1])), ns.T("FIND_NO_TRAINER"))
+		H.eq(select(2, rowTexts(d.findRows[1])), ns.T("FIND_NO_TRAINER_SEEN"))
+		check(lang, "no trainer")
+		ns.RecipeData[RECIPE] = nil
+		UI:Refresh()
+		check(lang, "unknown")
+		-- a limited vendor alone, and a trainer, with a price
+		ns.RecipeData[RECIPE] = { ITEM, "v", 0, 60, 80 }
+		receiveNU(ns, 6501, vendorOf("Maria Lumere", 9500, { l = 1 }, placeOf(nil)))
+		receiveNU(ns, 6502, trainerOf("Georgio Bolero", RECIPE, 50, 4000, placeOf(nil)))
+		M.advance(1)
+		UI:Refresh()
+		check(lang, "vendor and trainer")
+	end
+	ns.SetLanguage("en")
+	cleanGame()
+end)

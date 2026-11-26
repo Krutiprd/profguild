@@ -2464,7 +2464,9 @@ local function findLine(r)
 		for i, h in ipairs(r.how or {}) do how[i] = ns.T(HOW_KEYS[h] or h) end
 		return ns.T("FIND_OTHER", table.concat(how, ", ")), ns.T("FIND_NO_PLACE"), "", true
 	elseif kind == "missing" then
-		return ns.T(r.of == "vendor" and "FIND_NO_VENDOR" or "FIND_NO_TRAINER"), "", "", true
+		if r.of == "vendor" then return ns.T("FIND_NO_VENDOR"), "", "", true end
+		-- two lines: one would not fit the row in Slovak
+		return ns.T("FIND_NO_TRAINER"), ns.T("FIND_NO_TRAINER_SEEN"), "", true
 	end
 	return ns.T("FIND_UNKNOWN"), "", "", true
 end
