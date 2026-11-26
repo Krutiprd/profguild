@@ -29,6 +29,13 @@
   milliseconds per frame (less in combat) instead of all at once. Opening FIND RECIPE no longer
   builds an index first. A logout or `/reload` in the middle saves everything; a flood of NPC
   messages is capped and counted.
+- While the NPC data still loads after a login, FIND RECIPE says "NPC data is loading..." instead
+  of "no vendor seen", and `/pg npc` says it is loading instead of showing partial counts. A new
+  day starting while NPC work is spread over frames no longer stops that work half way. At logout
+  NPC messages from guildmates still waiting are skipped (the next login's sync brings them
+  again); your own readings are always saved. An NPC message that would unpack to more than
+  16 kB is refused after unpacking at most that much, and a refused sender's next messages are
+  not unpacked at all.
 
 ## 0.6.0 – 2026-11-25
 

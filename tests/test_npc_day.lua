@@ -367,3 +367,35 @@ H.test("day: an older table on the same saved one neither writes it nor settles;
 	old:MergeIn(99, { name = "X", nd = DAY, t = { [1] = { DAY, 0, 0, 0, 0 } }, v = {} })
 	H.eq(saved.s[99], nil, "the older table does not write saved")
 end)
+
+H.test("table: a lean table (npcOwn) keeps no sendable parts, and counts, hashes and Sendable equal a full one", function()
+	local T = DAY * 86400 + 3600
+	local clock = function() return T end
+	local rs = 4711
+	local function r(n) rs = (rs * 1103515245 + 12345) % 2147483648 return math.floor(rs / 2147483648 * n) + 1 end
+	local full, lean = ND.New({}, clock), ND.New({}, clock, { lean = true })
+	for step = 1, 300 do
+		local id = r(40)
+		local reading = { name = "N" .. r(3), map = r(3), x = r(9), y = r(9), t = {}, v = {} }
+		for _ = 1, r(6) do reading.t[r(80)] = { skill = r(4) * 10, copper = r(5) * 100 } end
+		for _ = 1, r(3) do reading.v[r(30)] = { price = { c = r(9) * 10, o = {}, l = 0 } } end
+		H.eq(lean:Write(id, reading), full:Write(id, reading), "write " .. step)
+		if r(20) == 1 then T = T + 86400 * r(40) end
+	end
+	local n1, e1 = full:Count()
+	local n2, e2 = lean:Count()
+	H.eq(n2, n1) H.eq(e2, e1) H.eq(lean:Hash(), full:Hash())
+	local kept = 0
+	for id in pairs(full.sheets) do
+		H.eq(lean:SheetHash(id), full:SheetHash(id))
+		local a, b = lean:Sendable(id), full:Sendable(id)
+		H.ok((a == nil) == (b == nil), "sendable " .. id)
+		if a then
+			H.eq(ND.HashSheet(id, a), ND.HashSheet(id, b))
+			H.ok(type(lean.cuts[id]) ~= "table", "not kept")
+			kept = kept + 1
+		end
+	end
+	H.ok(kept > 0)
+	H.eq(#lean:SendableIDs(), #full:SendableIDs())
+end)

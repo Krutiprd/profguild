@@ -112,6 +112,8 @@ založená postava alebo hráč, ktorý sa práve prihlásil. Požiadavky aj cen
 | Tlačidlo „Mapa“ pri trénerovi | Na mape sa objaví špendlík na mieste NPC (alebo TomTom, ak je); v chate „Značka na mape: <meno>“, ak sa nedá, „Značku na mapu sa nepodarilo dať.“ |
 | `/pg status` a `/pg npc` | Riadok o NPC dátach; počty NPC, receptov a preskočených mien |
 | `/pg npc clear` | Dáta frakcie zmiznú lokálne; do pár minút ich guilda pošle späť |
+| Hneď po prihlásení s veľkou tabuľkou (prvé 1–2 s) `/pg npc` a „NÁJSŤ RECEPT“ | `/pg npc` napíše, že sa údaje o NPC ešte načítavajú; riadok namiesto „guilda zatiaľ nevidela vendora“ hovorí „údaje o NPC sa načítavajú...“; o chvíľu sú počty a riadky ako inokedy |
+| Hra beží cez polnoc servera (alebo `/reload` tesne po nej) | Žiadna Lua chyba; `/pg npc` po polnoci ukazuje počty, guilda sa ďalej zhoduje (žiadne opakované posielanie toho istého) |
 
 Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
 

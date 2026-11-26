@@ -671,7 +671,8 @@ function ns.SetupNpc()
 		ns.npcSync, ns.npcGuild = nil, nil
 		if type(ns.db.npcOwn) ~= "table" then ns.db.npcOwn = {} end
 		if type(ns.db.npcOwn[faction]) ~= "table" then ns.db.npcOwn[faction] = {} end
-		ns.npcOwn = NpcData.New(ns.db.npcOwn[faction], npcClock, nil, ns.npcWork)
+		-- lean: npcOwn is never sent, its sendable parts are not kept (only counted)
+		ns.npcOwn = NpcData.New(ns.db.npcOwn[faction], npcClock, { lean = true }, ns.npcWork)
 		npcJob(npcLoaded)
 		ns.npcFaction = faction
 	end
@@ -681,7 +682,10 @@ function ns.SetupNpc()
 		-- loads in slices (NpcWork); the import and NpcSync's work queue behind the loading
 		local tab = NpcData.New(ns.guildDB.npc[faction], npcClock, nil, ns.npcWork)
 		local own = ns.npcOwn
-		npcJob(function() tab:Import(own) end)
+		-- until the import is done the counts are not those of the table (over its limits)
+		local function imported() tab.importing = nil end
+		tab.importing = true
+		ns.npcWork:Run(function() tab:Import(own) imported() end, tab, imported)
 		npcJob(npcLoaded)
 		ns.npcGuild = tab
 		ns.npcSync = NpcSync.New(npcAdapter, tab)
@@ -691,6 +695,13 @@ function ns.SetupNpc()
 	local shown = ns.npc
 	ns.npc = ns.npcGuild or ns.npcOwn
 	if ns.npc ~= shown then ns.NoteNpcSkills() end
+end
+
+-- Whether a table the window shows is still loading (or the guild's still imports npcOwn): what
+-- it lacks may only not be loaded yet, and its counts are not final.
+function ns.NpcLoading()
+	local own, guild = ns.npcOwn, ns.npcGuild
+	return (own and own.loading) or (guild and (guild.loading or guild.importing)) or false
 end
 
 -- ns.npcSkillRevision: raised when a learn skill the window shows could have changed, so that the
@@ -1374,9 +1385,11 @@ local function slash(input)
 		if rest ~= "" and rest ~= "clear" then return ns.Say("NPC_USAGE") end
 		if not ns.npcOwn then return ns.Say("NPC_NO_FACTION") end
 		if rest == "clear" then
-			-- a job: after the loading and merges queued before it
-			local own, guild, sync = ns.npcOwn, ns.npcGuild, ns.npcSync
+			-- a job: after the loading and merges queued before it; on the tables of when it runs
+			-- (a guild key that flickered meanwhile made the guild's table anew)
 			npcJob(function()
+				local own, guild, sync = ns.npcOwn, ns.npcGuild, ns.npcSync
+				if not own then return end
 				own:Clear()
 				if guild then guild:Clear() end
 				-- the guild's comes back from guildmates
@@ -1387,6 +1400,7 @@ local function slash(input)
 			ns.Say("NPC_CLEARED", ns.npcFaction)
 			return
 		end
+		if ns.NpcLoading() then return ns.Say("NPC_LOADING", ns.npcFaction) end
 		local ownSheets, ownEntries = ns.npcOwn:Count()
 		local skipped = ns.npcReader and ns.npcReader.skipped or 0
 		if ns.npcGuild then

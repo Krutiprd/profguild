@@ -197,6 +197,7 @@ end
 
 -- Table ----------------------------------------------------------------------
 -- tab = NpcData.New(saved, now[, limits[, work]]): saved = { e = EPOCH, s = { [npcID] = packed } }
+-- (limits.lean: the sendable parts are not kept, only their counts and hashes; for npcOwn)
 -- is loaded (other epochs and broken sheets dropped, sheets of days after tomorrow held back: see
 -- load) and kept current at every change; now() gives server seconds; limits = { t=, v=, entries=,
 -- sheets= } replaces the constants (tests); work (NpcWork) runs the loading as a job: until it is
@@ -273,7 +274,8 @@ function NpcData.New(saved, now, limits, work)
 	if type(saved) ~= "table" then saved = {} end
 	local tab = setmetatable({ saved = saved, now = now, work = work, skillRev = 0,
 		lt = limits.t or NpcData.LIMIT_T, lv = limits.v or NpcData.LIMIT_V,
-		le = limits.entries or NpcData.LIMIT_ENTRIES, ls = limits.sheets or NpcData.LIMIT_SHEETS }, Table)
+		le = limits.entries or NpcData.LIMIT_ENTRIES, ls = limits.sheets or NpcData.LIMIT_SHEETS,
+		lean = limits.lean or nil }, Table)
 	-- A clock not known yet (0): the saved sheets are left untouched and this session's table
 	-- lives in memory only (tab.detached).
 	local today = tab:Today()
@@ -326,7 +328,8 @@ function Table:recut(id)
 	if s then c, n = cut(s, self.day) end
 	if c then
 		local h = hashSheet(id, c)
-		self.cuts[id], self.hashes[id], self.cn[id] = c, h, n
+		-- lean (npcOwn, never sent): the sendable part is not kept, Sendable cuts it when asked
+		self.cuts[id], self.hashes[id], self.cn[id] = self.lean and true or c, h, n
 		self.nSend, self.sendEntries = self.nSend + 1, self.sendEntries + n
 		self.total = (self.total + h) % M
 	else
@@ -522,9 +525,16 @@ function Table:Get(id)
 	return self.sheets[id]
 end
 
+-- The sendable part as kept, or cut now for a lean table.
+local function cutOf(self, id)
+	local c = self.cuts[id]
+	if c == true then return (cut(self.sheets[id], self.day)) end
+	return c
+end
+
 function Table:Sendable(id)
 	check(self)
-	return self.cuts[id]
+	return cutOf(self, id)
 end
 
 -- Sorted IDs of the sheets with a sendable part.
@@ -574,7 +584,7 @@ function Table:MergeAll(items)
 		local s = validID(id) and NpcData.Valid(items[i][2], self.day) or nil
 		if s then
 			valid[i] = s
-			if before[id] == nil then before[id] = self.cuts[id] or false end
+			if before[id] == nil then before[id] = cutOf(self, id) or false end
 			local held = self.sheets[id]
 			local m = NpcData.Merge(held, s)
 			trim(m.t, self.lt)
@@ -599,7 +609,7 @@ function Table:MergeAll(items)
 					for k in pairs(s.v) do if now.v[k] then t = true break end end
 				end
 			end
-			c = not deepEqual(before[id] or nil, self.cuts[id])
+			c = not deepEqual(before[id] or nil, cutOf(self, id))
 		end
 		changed[i], taken[i] = c, t
 	end
@@ -617,12 +627,12 @@ function Table:OwnVisit(id, reading)
 	check(self)
 	if not validID(id) then return false end
 	pace(self, (self.sizes[id] or 0) + 100, "mergeput")
-	local before = self.cuts[id]
+	local before = cutOf(self, id)
 	local m, changed = NpcData.Visit(self.sheets[id], reading, self.day, { t = self.lt, v = self.lv })
 	if not changed then return false end
 	self:put(id, m)
 	self:limit()
-	return not deepEqual(before, self.cuts[id])
+	return not deepEqual(before, cutOf(self, id))
 end
 
 -- A reading kept as the last known one (npcOwn, no own-visit rules): every register read replaces

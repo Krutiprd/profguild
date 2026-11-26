@@ -2478,6 +2478,8 @@ local function findLine(r)
 		for i, h in ipairs(r.how or {}) do how[i] = ns.T(HOW_KEYS[h] or h) end
 		return ns.T("FIND_OTHER", table.concat(how, ", ")), ns.T("FIND_NO_PLACE"), "", true
 	elseif kind == "missing" then
+		-- not "none seen" while the tables still load: what is missing may only not be loaded yet
+		if ns.NpcLoading and ns.NpcLoading() then return ns.T("FIND_NPC_LOADING"), "", "", true end
 		if r.of == "vendor" then return ns.T("FIND_NO_VENDOR"), "", "", true end
 		-- two lines: one would not fit the row in Slovak
 		return ns.T("FIND_NO_TRAINER"), ns.T("FIND_NO_TRAINER_SEEN"), "", true

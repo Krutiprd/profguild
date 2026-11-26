@@ -1383,3 +1383,37 @@ H.test("npc comm: at logout received texts are dropped and counted, own readings
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 end)
 
+H.test("npc: while the tables load FIND says the data loads (not none seen) and /pg npc says so; then the counts", function()
+	cleanGame()
+	local ns = bootFull()
+	M.fire("TRADE_SKILL_SHOW")
+	M.advance(5)
+	H.ok(ns.NpcLoading(), "still loading")
+	ns.RecipeData[RECIPE] = { ITEM, "v", 0, 60, 80 }
+	local UI = ns.UI
+	UI:Toggle()
+	UI:SetView("recipes")
+	UI:SetCategory(197)
+	H.ok(clickRecipe(UI, RECIPE), "recipe listed")
+	UI:ToggleFind()
+	local d = UI.detail
+	local function texts()
+		local t = {}
+		for i = 1, shownRows(d) do t[#t + 1] = (rowTexts(d.findRows[i])) end
+		return table.concat(t, "|")
+	end
+	H.ok(texts():find(ns.T("FIND_NPC_LOADING"), 1, true), "loading: " .. texts())
+	H.ok(not texts():find(ns.T("FIND_NO_VENDOR"), 1, true), "not none seen")
+	local from = #M.chat
+	SlashCmdList.PROFGUILD("npc")
+	H.ok(chatSince(from):find(ns.T("NPC_LOADING", "Alliance"), 1, true), "/pg npc: " .. chatSince(from))
+	untilDone(ns)
+	H.ok(not ns.NpcLoading(), "loaded")
+	UI:Refresh()
+	H.ok(texts():find(ns.T("FIND_NO_VENDOR"), 1, true), "loaded: " .. texts())
+	from = #M.chat
+	SlashCmdList.PROFGUILD("npc")
+	H.ok(not chatSince(from):find(ns.T("NPC_LOADING", "Alliance"), 1, true), "counts now")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	UI:Toggle()
+end)
