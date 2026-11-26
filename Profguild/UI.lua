@@ -1061,7 +1061,9 @@ local function createFindRow(parent, index)
 	row.mapButton:SetPoint("RIGHT", -6, 0)
 	row.mapButton:SetScript("OnClick", function()
 		local r = row.data
-		if r then UI.SetMapPin(r.map, r.x, r.y, r.name) end
+		if not r then return end
+		-- one chat line says whether it worked (the pin may be on another map than the one open)
+		if UI.SetMapPin(r.map, r.x, r.y, r.name) then ns.Say("MAP_PIN_SET", r.name or "?") else ns.Say("MAP_PIN_FAILED") end
 	end)
 	row.mapButton:HookScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_TOP")
@@ -1093,7 +1095,7 @@ local function createFindRow(parent, index)
 			if self.terms and self.terms ~= "" then GameTooltip:AddLine(self.terms, 1, 1, 1, true) end
 			if self.where and self.where ~= "" then GameTooltip:AddLine(self.where, 1, 1, 1) end
 			if r.age and (r.kind == "trainer" or r.kind == "vendor") then
-				GameTooltip:AddLine(r.age <= 0 and ns.T("FIND_SEEN_TODAY") or ns.T("FIND_SEEN", r.age), C.muted[1], C.muted[2], C.muted[3])
+				GameTooltip:AddLine(r.age <= 0 and ns.T("FIND_SEEN_TODAY") or (r.age == 1 and ns.T("FIND_SEEN_ONE")) or ns.T("FIND_SEEN", r.age), C.muted[1], C.muted[2], C.muted[3])
 			end
 			if r.approx then GameTooltip:AddLine(ns.T("FIND_APPROX"), C.muted[1], C.muted[2], C.muted[3], true) end
 			GameTooltip:Show()

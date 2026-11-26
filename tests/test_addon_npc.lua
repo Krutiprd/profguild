@@ -749,6 +749,12 @@ H.test("find: rows of every kind, ~, limited stock, other costs, zone only with 
 	tip = table.concat(M.tooltipLines, "\n")
 	H.ok(tip:find("Favor Keeper", 1, true) and tip:find("5 Merchant's Favor", 1, true), "other cost in the tooltip: " .. tip)
 	H.ok(not tip:find(ns.T("FIND_APPROX"), 1, true), "no ~ note without copper: " .. tip)
+	-- one day: singular
+	M.tooltipLines = {}
+	d.findRows[3].data.age = 1
+	d.findRows[3]._scripts.OnEnter(d.findRows[3])
+	tip = table.concat(M.tooltipLines, "\n")
+	H.ok(tip:find(ns.T("FIND_SEEN_ONE"), 1, true) and not tip:find(ns.T("FIND_SEEN", 1), 1, true), "one day: " .. tip)
 	d.findRows[3]._scripts.OnLeave(d.findRows[3])
 	UI.findOffset = 0
 	UI:Refresh()
@@ -804,7 +810,9 @@ H.test("find: map pin by the client, else TomTom, else no button; errors stay in
 	local b = d.findRows[2].mapButton
 	H.ok(b:IsShown(), "map button")
 	H.eq(b.text:GetText(), ns.T("BTN_MAP"))
+	local chat0 = #M.chat
 	b._scripts.OnClick(b)
+	H.ok(chatSince(chat0):find(ns.T("MAP_PIN_SET", "Georgio Bolero"), 1, true), "one chat line: " .. chatSince(chat0))
 	H.ok(set and set.m == 1453 and set.x == 43 / 100 and set.y == 74 / 100, "client waypoint")
 	-- refused by the client, TomTom there
 	_G.TomTom = { AddWaypoint = function(self, m, x, y, opts) tt = { self = self, m = m, x = x, y = y, title = opts and opts.title } end }
@@ -834,6 +842,9 @@ H.test("find: map pin by the client, else TomTom, else no button; errors stay in
 	_G.TomTom = { AddWaypoint = function() error("boom") end }
 	ok, r = pcall(UI.SetMapPin, 1455, 1, 1, "x")
 	H.ok(ok and not r, "TomTom failing")
+	chat0 = #M.chat
+	b._scripts.OnClick(b)
+	H.ok(chatSince(chat0):find(ns.T("MAP_PIN_FAILED"), 1, true), "a failed pin is said: " .. chatSince(chat0))
 	UI:Refresh()
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 	cleanGame()
