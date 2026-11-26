@@ -4,10 +4,30 @@
 -- of a few kB can inflate to megabytes and hold a frame for hundreds of ms.
 --
 -- Altered source version of the decompressor of LibDeflate 1.0.2 (Libs/LibDeflate/LibDeflate.lua),
--- (C) 2018-2021 Haoqian He, zlib License (see that file); in turn based on puff.c by Mark Adler.
--- Changes: no preset dictionary; the output is limited (`max` bytes: nil, "too large" when it
--- would be passed); `tick(units)` is called every few hundred symbols (a caller in a coroutine
--- yields there: see Comm); local tables built once. The output equals LibDeflate's for every input.
+-- in turn based on puff.c by Mark Adler. Changes: no preset dictionary; the output is limited
+-- (`max` bytes: nil, "too large" when it would be passed); `tick(units)` is called every few
+-- hundred symbols and at every block (a caller in a coroutine yields there: see Comm); local
+-- tables built once. The output equals LibDeflate's for every input.
+--
+-- LibDeflate's licence (zlib License), as it must stay with this altered source:
+--
+--   (C) 2018-2021 Haoqian He
+--
+--   This software is provided 'as-is', without any express or implied
+--   warranty.  In no event will the authors be held liable for any damages
+--   arising from the use of this software.
+--
+--   Permission is granted to anyone to use this software for any purpose,
+--   including commercial applications, and to alter it and redistribute it
+--   freely, subject to the following restrictions:
+--
+--   1. The origin of this software must not be misrepresented; you must not
+--      claim that you wrote the original software. If you use this software
+--      in a product, an acknowledgment in the product documentation would be
+--      appreciated but is not required.
+--   2. Altered source versions must be plainly marked as such, and must not be
+--      misrepresented as being the original software.
+--   3. This notice may not be removed or altered from any source distribution.
 --
 -- ns.NpcInflate.Inflate(str, max[, tick]) -> string or nil[, error code | "too large"]
 
@@ -355,6 +375,8 @@ function NpcInflate.Inflate(str, max, tick)
 		flushed = 0, max = max or math.huge, tick = tick }
 	local is_last_block
 	while not is_last_block do
+		-- a block costs its header and code tables even when it writes nothing
+		if tick then tick(40) end
 		is_last_block = (ReadBits(1) == 1)
 		local block_type = ReadBits(2)
 		local status

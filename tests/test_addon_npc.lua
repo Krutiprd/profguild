@@ -1417,3 +1417,13 @@ H.test("npc: while the tables load FIND says the data loads (not none seen) and 
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 	UI:Toggle()
 end)
+
+H.test("npc comm: a text that cannot be decoded blocks its sender like an oversized one", function()
+	local ns = boot()
+	M.advance(30)
+	ns.Comm.blocked = {}
+	ns.Comm:OnCommReceived("ProfguildNPC", "not a deflate stream at all", "GUILD", "Junk")
+	M.advance(1)
+	H.ok(ns.Comm.blocked.Junk, "blocked")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+end)

@@ -76,3 +76,34 @@ H.test("inflate: stops at the limit (a bomb), the parts it ticks are few, a stre
 	H.eq(Inflate(LD:CompressDeflate(gen(5, 40000, "text")), 1e9, function() n = n + 1 end), gen(5, 40000, "text"))
 	H.ok(n >= 5, "ticked: " .. n)
 end)
+
+-- A hostile stream of empty dynamic blocks: no output (the limit never fires) and no symbol loop
+-- long enough to tick; each block still costs its code tables.
+local function emptyBlocks(n)
+	local bits, nb = {}, 0
+	local function put(v, k) for _ = 1, k do nb = nb + 1 bits[nb] = v % 2 v = math.floor(v / 2) end end
+	for b = 1, n do
+		put(b == n and 1 or 0, 1)
+		put(2, 2) put(0, 5) put(0, 5) put(14, 4)
+		local L = { 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }
+		for i = 1, 18 do put(L[i], 3) end
+		put(1, 1) put(127, 7) put(1, 1) put(107, 7)
+		put(0, 1) put(0, 1)
+		put(0, 1)
+	end
+	local out = {}
+	for i = 1, nb, 8 do
+		local v = 0
+		for j = 7, 0, -1 do v = v * 2 + (bits[i + j] or 0) end
+		out[#out + 1] = string.char(v)
+	end
+	return table.concat(out)
+end
+
+H.test("inflate: a stream of many empty blocks ticks at every block", function()
+	local s = emptyBlocks(300)
+	H.eq(LD:DecompressDeflate(s), "", "LibDeflate reads it as empty")
+	local ticks = 0
+	H.eq(Inflate(s, 16384, function() ticks = ticks + 1 end), "")
+	H.ok(ticks >= 300, "ticked per block: " .. ticks)
+end)

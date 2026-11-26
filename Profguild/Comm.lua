@@ -142,7 +142,8 @@ end
 -- more than NPC_MAX_SERIALIZED is unpacked: nil, "too large" then.
 Comm.DESER_ITEMS = 1024
 local function decodeNpcBody(text, yield)
-	if type(text) ~= "string" or #text > Comm.NPC_MAX_TEXT then return nil end
+	-- refused before any work (not counted against the sender)
+	if type(text) ~= "string" or #text > Comm.NPC_MAX_TEXT then return nil, "length" end
 	yield(#text, "text")
 	local compressed = LibDeflate:DecodeForWoWAddonChannel(text)
 	if not compressed then return nil end
@@ -236,12 +237,12 @@ local function receiveNpc(text, sender, sync, work, seq, start)
 	local msg, why
 	if work and work:InJob() then msg, why = decodeNpcInJob(text, work) else msg, why = Comm.DecodeNpc(text) end
 	if not msg then
-		if why == "too large" and type(sender) == "string" then
-			Comm.blocked[sender] = GetTime() + Comm.BLOCK_SECONDS
-			ns.Debug("oversized message from %s, ignoring the sender for %d s", sender, Comm.BLOCK_SECONDS)
-		else
-			ns.Debug("could not decode a message from %s", tostring(sender))
-		end
+		-- oversized or broken: the sender is ignored for a while, so that junk cannot cost the
+		-- decoding again and again (an honest client never sends either)
+		if why == "length" then return end
+		if type(sender) == "string" then Comm.blocked[sender] = GetTime() + Comm.BLOCK_SECONDS end
+		ns.Debug("%s message from %s, ignoring the sender for %d s", why == "too large" and "oversized" or "undecodable",
+			tostring(sender), Comm.BLOCK_SECONDS)
 		return
 	end
 	if seq and msg.t == "NU" then
