@@ -34,12 +34,15 @@ return function(H)
 
 	-- Sizes ------------------------------------------------------------------
 	local sizeCache, lastMsg, lastSize = {}, nil, nil
+	local STABLE = { stable = true }
 	local NORMAL_GUID, NORMAL_HASH = "Player-0000-0A1B2C3D", 1234567890
 	function npcsim.size(msg)
 		if msg == lastMsg then return lastSize end
 		local s, h = msg.s, msg.h
 		msg.s, msg.h = NORMAL_GUID, NORMAL_HASH
-		local key = LS:Serialize(msg)
+		-- stable key order: the string keys' order of pairs differs between processes (LuaJIT seeds
+		-- its string hash), which made runs of one seed differ; sizes stay within a few bytes
+		local key = LS:SerializeEx(STABLE, msg)
 		msg.s, msg.h = s, h
 		local n = sizeCache[key]
 		if not n then

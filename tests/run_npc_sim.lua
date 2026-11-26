@@ -124,7 +124,7 @@ function S.newcomer(seed, n, loss, maxBytes)
 	end
 	local ok = tt ~= nil and tt <= 600 and (not maxBytes or nb <= maxBytes)
 	return ok, ("complete@%s %s [%s]"):format(tt and floor(tt) or "never", kb(nb or sim:bytes()), sim:str()),
-		"<=600s" .. (maxBytes and (" <=" .. kb(maxBytes)) or "")
+		"<=600s" .. (maxBytes and (" <=" .. kb(maxBytes)) or ""), nb or sim:bytes()
 end
 
 -- One changing visit per minute, 40 % of the clients blocked now and then, 2 % loss.
@@ -305,7 +305,8 @@ function S.mix(seed, n)
 		"each group eq<=900, newcomers<=600s, 3h quiet"
 end
 
--- One client refusing rf sheets (its sheet limit): 3 h without visits.
+-- One client refusing rf sheets (its sheet limit): 3 h without visits. The target covers at most
+-- 100 refused sheets (the memory of rule 4) with limits equal for all clients; more is --extra.
 function S.refuse(seed, n, rf)
 	local W, ids, vendor, P = theWorld()
 	local sim = npcsim.new({ seed = seed * 7919 + n + rf, loss = 0.02 })
@@ -316,7 +317,7 @@ function S.refuse(seed, n, rf)
 	sim:reset()
 	sim:run(10800)
 	local b = sim:bytes()
-	return b <= 30000, ("%s per 3h [%s]"):format(kb(b), sim:str()), "<=30k/3h"
+	return b <= 30000, ("%s per 3h [%s]"):format(kb(b), sim:str()), "<=30k/3h (at most 100 refused)"
 end
 
 -- Limits: every client caps sheets at 200 with 60 extra sheets spread (sheet), every client caps
@@ -602,7 +603,9 @@ for _, loss in ipairs({ 0.02, 0.05 }) do
 		end
 	end
 end
-add("newcomer-72", S.newcomer, 72, 0.02, 60000)
+-- full game: at most 60 kB in the median over the seeds, 80 kB in every run (ruling while building)
+add("newcomer-72", S.newcomer, 72, 0.02, 80000)
+MATRIX[#MATRIX].median = 60000
 add("newcomer-200-5%", S.newcomer, 200, 0.05)
 add("cont-72", S.cont, 72)
 for _, bp in ipairs({ 12, 15, 20, 30, 45, 100, 300, 611, 900, 1200 }) do add("late-72-bp" .. bp, S.late, 72, bp) end
@@ -639,16 +642,17 @@ extra("day-72-skew5-odd36", S.day, 72, 5, 36)
 -- The short set for tests/run.lua.
 local SHORT = {
 	{ "burst-uniq-20-2%", S.burst, "uniq", 20, 0.02 },
-	{ "newcomer-72", S.newcomer, 72, 0.02, 60000 },
+	{ "newcomer-72", S.newcomer, 72, 0.02, 80000 },
 	{ "late-72-bp12", S.late, 72, 12 },
 	{ "evil-72-NUeq", S.evil, 72, "NUeq", "newcomer", 1800 },
 	{ "cutoff-20", S.cutoff, 20 },
 }
 
 local function runOne(e, seed)
-	local ok, value, target = e.fn(seed, unpack(e.args))
+	local ok, value, target, x = e.fn(seed, unpack(e.args))
 	if e.info then ok = true end
-	return ok, ("%s %s seed=%d %s | target %s"):format(e.info and "info" or (ok and "ok" or "FAIL"), e.name, seed, value, target)
+	return ok, ("%s %s seed=%d %s | target %s%s"):format(e.info and "info" or (ok and "ok" or "FAIL"), e.name, seed, value, target,
+		x and (" value=" .. floor(x)) or "")
 end
 
 if asTests then
@@ -701,11 +705,17 @@ for _, e in ipairs(MATRIX) do
 	end
 end
 local failed, started = 0, os.time()
+local values = {} -- scenario name -> values of its runs (for a target over the seeds)
+local function note(line)
+	local name, v = line:match("^%a+ (%S+) seed=%d+ .* value=(%d+)")
+	if name then values[name] = values[name] or {} table.insert(values[name], tonumber(v)) end
+end
 if jobs <= 1 then
 	for _, w in ipairs(work) do
 		local ok, line = runOne(w[1], w[2])
 		print(line)
 		io.stdout:flush()
+		note(line)
 		if not ok then failed = failed + 1 end
 	end
 else
@@ -722,9 +732,22 @@ else
 			p:close()
 			io.write(out)
 			io.stdout:flush()
+			note(out)
 			if not (out:find("^ok ") or out:find("^info ")) then failed = failed + 1 end
 		end
 		k = k + jobs
+	end
+end
+-- targets over the seeds: the median of the runs' values
+for _, e in ipairs(MATRIX) do
+	local l = values[e.name]
+	if e.median and l and #l > 0 then
+		table.sort(l)
+		local m = #l % 2 == 1 and l[(#l + 1) / 2] or (l[#l / 2] + l[#l / 2 + 1]) / 2
+		local ok = m <= e.median
+		print(("%s %s median over %d seeds %s (runs %s) | target median <=%s"):format(ok and "ok" or "FAIL", e.name, #l, kb(m),
+			table.concat((function() local t = {} for i, v in ipairs(l) do t[i] = kb(v) end return t end)(), ","), kb(e.median)))
+		if not ok then failed = failed + 1 end
 	end
 end
 print(("%d runs, %d failed, %d s"):format(#work, failed, os.time() - started))

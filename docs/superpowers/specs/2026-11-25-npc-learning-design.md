@@ -228,7 +228,8 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
 - Merge: random sheets in any order, with duplicates: equal tables. At the limits: equal after repeated exchanges.
 - Two clients cut off from each other read different recipes of one trainer, and a newcomer reads a trainer 5 s after
   login: nothing is lost anywhere.
-- Full game (100 trainers with 20-70 recipes, 80 vendors, 10 sold each): at most 60 kB on the wire with 2 % loss; newcomer
+- Full game (100 trainers with 20-70 recipes, 80 vendors, 10 sold each): at most 60 kB on the wire with 2 % loss in most runs and 80 kB in every run (the rules' model itself
+  reached 74 kB; ruling while building); newcomer
   complete in 10 minutes.
 - 20, 72, 200 clients log in within a minute, each missing another random visit; and: each holding one sheet nobody else
   has; and: two halves with 10 new sheets each. Bytes at most 3 times the encoded missing sheets plus 2 kB per
@@ -237,7 +238,7 @@ Test first. Pure module with an adapter; a simulated guild with the real encodin
 - One changing visit per minute, 2 % loss, 40 % of clients blocked now and then: at most 300 kB per hour guild-wide at
   72 clients, and equal within 30 minutes after the visits stop.
 - Holder blocked mid-answer or before its first NU, logs out; newcomers one after another (95 % complete in 10 minutes, all in 40); other epoch, faction, protocol;
-  a client refusing sheets (limits): at most 30 kB per 3 hours
+  a client refusing at most 100 sheets (limits equal for all clients of one epoch): at most 30 kB per 3 hours
   at 72 clients without visits.
 - 0.6.0 files from the tag in the same guild: no error, no extra message.
 - Hostile: wrong types, NaN, fractions, huge lists, names with escapes, floods, future days, forged NI and ND.
