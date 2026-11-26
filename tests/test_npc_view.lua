@@ -125,7 +125,9 @@ H.test("view: best frame only among two copper prices, not with other costs, tie
 	for _, r in ipairs(rows) do
 		if r.name == "C" then H.ok(not r.best, "other costs never") end
 	end
-	H.ok(rows[2].best)
+	for _, r in ipairs(rows) do
+		H.eq(r.best == true, r.name == "A", "best is A only")
+	end
 	local one = V.Sources(901, src(nil, newTab()), { items = {}, recipeItem = 500, letters = "", ah = { copper = 5, text = "t" } })
 	H.ok(not one[1].best, "a single price")
 end)
