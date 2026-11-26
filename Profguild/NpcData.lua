@@ -116,7 +116,7 @@ local function copyPrice(p)
 	return { c = p.c, o = o, l = p.l }
 end
 
--- A clean, sorted copy of a price, or nil.
+-- A clean, sorted copy of a price, or nil; and whether the copy equals p (its costs were sorted).
 local function cleanPrice(p)
 	if type(p) ~= "table" or not int(p.c, 0, NpcData.MAX_COPPER) or (p.l ~= 0 and p.l ~= 1) then return nil end
 	local src = p.o
@@ -133,8 +133,12 @@ local function cleanPrice(p)
 		if type(c) ~= "table" or not int(c[1], 1, 2) or not validID(c[2]) or not validID(c[3]) then return nil end
 		o[i] = { c[1], c[2], c[3] }
 	end
+	local same = p.o ~= nil
+	for i = 2, n do
+		if not costLess(o[i - 1], o[i]) then same = false break end
+	end
 	sort(o, costLess)
-	return { c = p.c, o = o, l = p.l }
+	return { c = p.c, o = o, l = p.l }, same
 end
 
 -- Order for dropping entries at equal days: a hash of the key, not the ID (new recipes have the
@@ -161,13 +165,15 @@ local function count(t)
 	return n
 end
 
+-- Drops the entries over limit; whether any went.
 local function trim(entries, limit)
 	local n = count(entries)
-	if n <= limit then return end
+	if n <= limit then return false end
 	local ids = {}
 	for id in pairs(entries) do ids[#ids + 1] = id end
 	sort(ids, keepBefore(entries))
 	for i = limit + 1, #ids do entries[ids[i]] = nil end
+	return true
 end
 
 -- Merge ----------------------------------------------------------------------
@@ -248,44 +254,68 @@ end
 -- A cleaned copy, or nil when no entry is left. Bad registers become unknown, bad entries go,
 -- the sheet stays. Entry registers older than EXPIRE days are dropped; head registers have no
 -- lower age limit; no day may be later than tomorrow.
-function NpcData.Valid(sheet, today)
+-- The cleaned copy and whether it equals sheet (nothing was dropped, cleaned or sorted; extra
+-- fields of sheet aside).
+local function validate(sheet, today)
 	if type(sheet) ~= "table" or not int(today, 0, math.huge) then return nil end
 	local function headDay(d) return int(d, 0, today + 1) end
 	local oldest = today - NpcData.EXPIRE
 	if oldest < 0 then oldest = 0 end
 	local function entryDay(d) return int(d, oldest, today + 1) end
 
-	local s = { t = {}, v = {} }
-	if validName(sheet.name) and headDay(sheet.nd) then s.name, s.nd = sheet.name, sheet.nd end
+	local s, same = { t = {}, v = {} }, true
+	if validName(sheet.name) and headDay(sheet.nd) then s.name, s.nd = sheet.name, sheet.nd
+	elseif sheet.name ~= nil or sheet.nd ~= nil then same = false end
 	if int(sheet.map, 0, NpcData.MAX_MAP) and int(sheet.x, 0, 100) and int(sheet.y, 0, 100) and headDay(sheet.pd) then
 		s.map, s.x, s.y, s.pd = sheet.map, sheet.x, sheet.y, sheet.pd
-	end
+	elseif sheet.map ~= nil or sheet.x ~= nil or sheet.y ~= nil or sheet.pd ~= nil then same = false end
 
 	local n = 0
 	if type(sheet.t) == "table" then
 		for id, e in pairs(sheet.t) do
 			if validID(id) and type(e) == "table" and entryDay(e[1]) and e[1] > 0 then
 				local skill, sd, copper, cd = e[2], e[3], e[4], e[5]
-				if not (int(skill, 1, NpcData.MAX_SKILL) and entryDay(sd)) then skill, sd = 0, 0 end
-				if not (int(copper, 1, NpcData.MAX_COPPER) and entryDay(cd)) then copper, cd = 0, 0 end
+				if not (int(skill, 1, NpcData.MAX_SKILL) and entryDay(sd)) then
+					if skill ~= 0 or sd ~= 0 then same = false end
+					skill, sd = 0, 0
+				end
+				if not (int(copper, 1, NpcData.MAX_COPPER) and entryDay(cd)) then
+					if copper ~= 0 or cd ~= 0 then same = false end
+					copper, cd = 0, 0
+				end
 				s.t[id] = { e[1], skill, sd, copper, cd }
 				n = n + 1
+			else
+				same = false
 			end
 		end
-		trim(s.t, NpcData.LIMIT_T)
-	end
+		if trim(s.t, NpcData.LIMIT_T) then same = false end
+	elseif sheet.t ~= nil then same = false end
 	if type(sheet.v) == "table" then
 		for id, e in pairs(sheet.v) do
 			if validID(id) and type(e) == "table" and entryDay(e[1]) and e[1] > 0 then
-				local p, pd = cleanPrice(e[2]), e[3]
-				if not (p and entryDay(pd)) then p, pd = false, 0 end
+				local p, sorted = cleanPrice(e[2])
+				local pd = e[3]
+				if not (p and entryDay(pd)) then
+					if e[2] ~= false or pd ~= 0 then same = false end
+					p, pd = false, 0
+				elseif not sorted then
+					same = false
+				end
 				s.v[id] = { e[1], p, pd }
 				n = n + 1
+			else
+				same = false
 			end
 		end
-		trim(s.v, NpcData.LIMIT_V)
-	end
+		if trim(s.v, NpcData.LIMIT_V) then same = false end
+	elseif sheet.v ~= nil then same = false end
 	if n == 0 then return nil end
+	return s, same
+end
+
+function NpcData.Valid(sheet, today)
+	local s = validate(sheet, today)
 	return s
 end
 
@@ -547,11 +577,18 @@ local function unpackSheet(l)
 end
 
 -- id (nil when the list has none) and the valid sheet (nil when the list is broken or holds no entry).
-function NpcData.Unpack(list, today)
+-- id, the valid sheet, and whether the list holds exactly that sheet (see validate).
+local function unpackSame(list, today)
 	if type(list) ~= "table" or not validID(list[1]) then return nil, nil end
 	local ok, s = pcall(unpackSheet, list)
 	if not ok or not s then return list[1], nil end
-	return list[1], NpcData.Valid(s, today)
+	local v, same = validate(s, today)
+	return list[1], v, same
+end
+
+function NpcData.Unpack(list, today)
+	local id, s = unpackSame(list, today)
+	return id, s
 end
 
 -- Hashes ---------------------------------------------------------------------
@@ -605,5 +642,6 @@ end
 -- For NpcTable.lua (the table of sheets), not for other callers.
 NpcData.internal = {
 	validID = validID, count = count, trim = trim, copyPrice = copyPrice, deepEqual = deepEqual,
-	priceWrites = priceWrites, makeRoom = makeRoom, EMPTY = EMPTY,
+	priceWrites = priceWrites, makeRoom = makeRoom, EMPTY = EMPTY, unpackSame = unpackSame,
+	compareBytes = compareBytes,
 }
