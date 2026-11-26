@@ -1412,8 +1412,100 @@ local function scheduleTrainer()
 		if not ok then ns.Log("ERROR trainer: %s", tostring(err)) end
 	end)
 end
-function events.TRAINER_SHOW() scheduleTrainer() end
-function events.TRAINER_UPDATE() scheduleTrainer() end
+-- Trainers and recipe vendors read into one reading per NPC (NpcReader). Task 7 connects the
+-- readings to the tables; until then they are only logged.
+local function call(fn, ...)
+	if type(fn) ~= "function" then return nil end
+	return fn(...)
+end
+local npcLines, recipeItems = {}, nil
+local function npcLineOf(name)
+	if npcLines[name] then return npcLines[name] end
+	local lines = {}
+	for _, e in pairs(ns.RecipeData or {}) do lines[e[6]] = true end
+	for line in pairs(ns.catalog and ns.catalog:All() or {}) do lines[line] = true end
+	for line in pairs(lines) do
+		if Scanner.ProfessionName(line) == name then
+			npcLines[name] = line
+			return line
+		end
+	end
+	return nil
+end
+local function npcRecipes(line)
+	local list, seen = {}, {}
+	local function add(recipeID)
+		if seen[recipeID] then return end
+		seen[recipeID] = true
+		local e = ns.RecipeData and ns.RecipeData[recipeID]
+		list[#list + 1] = { id = recipeID, name = Scanner.RecipeName(recipeID), line = line,
+			item = e and (e[1] or false) or nil, grey = e and e[5] or nil }
+	end
+	for recipeID, e in pairs(ns.RecipeData or {}) do
+		if e[6] == line then add(recipeID) end
+	end
+	for recipeID in pairs(ns.catalog and ns.catalog:Get(line) or {}) do add(recipeID) end
+	return list
+end
+ns.npcReader = ns.NpcReader.New({
+	now = function() return GetTime() end,
+	after = function(delay, fn) C_Timer.After(delay, function() ns.Bugs.Call(fn) end) end,
+	inCombat = function() return InCombatLockdown() end,
+	secret = function(v) return type(issecretvalue) == "function" and issecretvalue(v) or false end,
+	npcGUID = function() return UnitGUID("npc") end,
+	npcName = function() return (UnitName("npc")) end,
+	place = function()
+		if not C_Map then return nil end
+		local map = call(C_Map.GetBestMapForUnit, "player")
+		if not map then return nil end
+		local pos = call(C_Map.GetPlayerMapPosition, map, "player")
+		if type(pos) ~= "table" then return map end
+		if type(pos.GetXY) == "function" then return map, pos:GetXY() end
+		return map, pos.x, pos.y
+	end,
+	tradeskillTrainer = function() return type(IsTradeskillTrainer) == "function" and IsTradeskillTrainer() end,
+	numServices = function() return call(GetNumTrainerServices) end,
+	serviceInfo = function(i) return call(GetTrainerServiceInfo, i) end,
+	serviceSkill = function(i) return call(GetTrainerServiceSkillReq, i) end,
+	serviceCost = function(i) return call(GetTrainerServiceCost, i) end,
+	lineOf = npcLineOf,
+	recipes = npcRecipes,
+	numItems = function() return call(GetMerchantNumItems) end,
+	itemInfo = function(i) return C_MerchantFrame and call(C_MerchantFrame.GetItemInfo, i) end,
+	itemID = function(i) return call(GetMerchantItemID, i) end,
+	costCount = function(i) return call(GetMerchantItemCostInfo, i) end,
+	costItem = function(i, j) return call(GetMerchantItemCostItem, i, j) end,
+	itemClass = function(itemID)
+		local c = Scanner.ItemClass(itemID)
+		return c and c.classID
+	end,
+	dataItem = function(itemID)
+		if not recipeItems then
+			recipeItems = {}
+			for _, e in pairs(ns.RecipeData or {}) do
+				if e[1] then recipeItems[e[1]] = true end
+			end
+		end
+		return recipeItems[itemID] == true
+	end,
+}, function(npcID, reading)
+	local nt, nv = 0, 0
+	for _ in pairs(reading.t or {}) do nt = nt + 1 end
+	for _ in pairs(reading.v or {}) do nv = nv + 1 end
+	ns.Log("npc %d %s: %d trained, %d sold, place %s", npcID, tostring(reading.name), nt, nv,
+		reading.map and (reading.map .. " " .. reading.x .. "," .. reading.y) or "unknown")
+end)
+local function npcRead(method)
+	local ok, err = ns.Bugs.Call(ns.npcReader[method], ns.npcReader)
+	if not ok then ns.Log("ERROR npc %s: %s", method, tostring(err)) end
+end
+
+function events.TRAINER_SHOW() scheduleTrainer() npcRead("TrainerShow") end
+function events.TRAINER_UPDATE() scheduleTrainer() npcRead("TrainerUpdate") end
+function events.TRAINER_CLOSED() npcRead("TrainerClosed") end
+function events.MERCHANT_SHOW() npcRead("MerchantShow") end
+function events.MERCHANT_UPDATE() npcRead("MerchantUpdate") end
+function events.MERCHANT_CLOSED() npcRead("MerchantClosed") end
 
 function events.PLAYER_REGEN_ENABLED() flushSoon() end
 function events.PLAYER_ENTERING_WORLD() flushSoon() end
