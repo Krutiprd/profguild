@@ -29,8 +29,11 @@ local function npcs(src, part, key)
 	local seen, list = {}, {}
 	for _, tab in ipairs({ src.guild or false, src.own or false }) do
 		local by = tab and (part == "t" and tab.byT or tab.byV)
-		local set = by and by[key]
-		if set then
+		local part = by and type(key) == "number" and by[key % ns.NpcData.INDEX_PARTS]
+		local set = part and part[key]
+		if type(set) == "number" then
+			if not seen[set] then seen[set] = true list[#list + 1] = set end
+		elseif set then
 			for npc in pairs(set) do
 				if not seen[npc] then seen[npc] = true list[#list + 1] = npc end
 			end

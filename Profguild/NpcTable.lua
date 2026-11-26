@@ -182,6 +182,45 @@ local function worst(k, each)
 	return low
 end
 
+-- The index (byT, byV): key -> the NPC ID of its one sheet, or a set { [npc] = true } of two or
+-- more. A number stored in a table costs the garbage collector nothing more, a new table makes the
+-- (large) index be traversed again at the end of the cycle, in one step: a pause of several ms
+-- inside some frame while full tables load. Most keys are held by one NPC. The index is cut into
+-- INDEX_PARTS tables by key: one of 20000 keys would grow (be rehashed and allocated anew) in one
+-- step of ms, and the collector then pays for the allocation at once.
+local INDEX_PARTS = 64
+NpcData.INDEX_PARTS = INDEX_PARTS
+local function indexAdd(index, k, id)
+	local p = k % INDEX_PARTS
+	local by = index[p]
+	if not by then by = {} index[p] = by end
+	local cur = by[k]
+	if cur == nil then
+		by[k] = id
+	elseif type(cur) == "table" then
+		cur[id] = true
+	elseif cur ~= id then
+		by[k] = { [cur] = true, [id] = true }
+	end
+end
+
+local function indexRemove(index, k, id)
+	local by = index[k % INDEX_PARTS]
+	if not by then return end
+	local cur = by[k]
+	if cur == id then
+		by[k] = nil
+	elseif type(cur) == "table" then
+		cur[id] = nil
+		local a = next(cur)
+		if a == nil then
+			by[k] = nil
+		elseif next(cur, a) == nil then
+			by[k] = a
+		end
+	end
+end
+
 local function entryHash(npcHash, part, id) return KeyHash((KeyHash((npcHash + part) % 4294967296) + id) % 4294967296) end
 
 -- A trained entry's learn skill register as a number (see Table.skillRev).
@@ -215,13 +254,16 @@ end
 -- cuts (the sendable part), hashes, cn (sendable entries), partial (the cut left something out),
 -- keysT/keysV (its keys in byT/byV), skh (its learn skills); for the table: nSheets, nEntries,
 -- nSend, sendEntries, total (the table hash), ids (sorted sendable IDs, built when asked),
--- byT/byV (recipe or item -> { [npc] = true }), skillRev (raised when a learn skill changed).
+-- byT/byV ([key % INDEX_PARTS][recipe or item] -> npc, or { [npc] = true } when more: see
+-- indexAdd), skillRev (raised when a learn skill changed).
 
 local Table = {}
 Table.__index = Table
 
 -- saved table -> the table made on it last (see New): weak both ways, a table no longer used goes
 local owners = setmetatable({}, { __mode = "kv" })
+
+local store -- (see below)
 
 -- Loads the saved sheets src into tab, then swaps them into target (the saved table).
 local function load(tab, target)
@@ -255,7 +297,7 @@ local function load(tab, target)
 				local a = trim(s.t, tab.lt)
 				local b = trim(s.v, tab.lv)
 				-- loaded as it was saved: the saved list stays, it is not packed again
-				tab:put(id, s, same and not a and not b and list or nil)
+				store(tab, id, s, same and not a and not b and list or nil)
 			end
 		end
 	end
@@ -317,17 +359,21 @@ function Table:reset()
 end
 
 -- The sendable part, its hash and the counts of a sheet anew (after a change or a new day).
-function Table:recut(id)
+function Table:recut(id, prep)
 	local old = self.cuts[id]
 	if old then
 		self.nSend, self.sendEntries = self.nSend - 1, self.sendEntries - self.cn[id]
 		self.total = (self.total - self.hashes[id]) % M
 	end
 	local s = self.sheets[id]
-	local c, n
-	if s then c, n = cut(s, self.day) end
+	local c, n, h
+	if prep and prep.day == self.day then
+		c, n, h = prep.c, prep.n, prep.h
+	elseif s then
+		c, n = cut(s, self.day)
+	end
 	if c then
-		local h = hashSheet(id, c)
+		h = h or hashSheet(id, c)
 		-- lean (npcOwn, never sent): the sendable part is not kept, Sendable cuts it when asked
 		self.cuts[id], self.hashes[id], self.cn[id] = self.lean and true or c, h, n
 		self.nSend, self.sendEntries = self.nSend + 1, self.sendEntries + n
@@ -339,37 +385,47 @@ function Table:recut(id)
 	if (old ~= nil) ~= (c ~= nil) then self.ids = nil end
 end
 
+-- A sheet stored by a job in up to three items of work (packed; cut and hashed; then indexed and
+-- committed by put), so that a large sheet does not make one long item. Nothing changes the table
+-- between them (only this job does, and its day stays: see check), so what was prepared holds
+-- when it is committed; the window sees the sheet before or after, never half stored.
+function store(self, id, s, packed)
+	if s and next(s.t) == nil and next(s.v) == nil then s = nil end
+	local prep
+	if s then
+		local n = count(s.t) + count(s.v)
+		if not packed and not self.future[id] and not self.retired then
+			pace(self, n, "pack")
+			packed = NpcData.Pack(id, s)
+		end
+		pace(self, n, "cut")
+		local c, cn = cut(s, self.day)
+		prep = { day = self.day, c = c, n = cn, h = c and hashSheet(id, c) or nil }
+		pace(self, n, "index")
+	else
+		pace(self, (self.sizes[id] or 0) + 1, "index")
+	end
+	self:put(id, s, packed, prep)
+end
+
 -- Stores a sheet (nil or one without entries removes it), keeping counts, caches, the index and
--- saved current; packed: the saved list of exactly s (not packed again).
-function Table:put(id, s, packed)
+-- saved current; packed: the saved list of exactly s (not packed again); prep: its cut and hash
+-- of this day (see store).
+function Table:put(id, s, packed, prep)
 	if s and next(s.t) == nil and next(s.v) == nil then s = nil end
 	local old = self.sizes[id]
 	if old then self.nEntries, self.nSheets = self.nEntries - old, self.nSheets - 1 end
 	self.sheets[id] = s
 	local byT, byV = self.byT, self.byV
-	for _, k in ipairs(self.keysT[id] or EMPTY.t) do
-		local set = byT[k]
-		if set then
-			set[id] = nil
-			if next(set) == nil then byT[k] = nil end
-		end
-	end
-	for _, k in ipairs(self.keysV[id] or EMPTY.v) do
-		local set = byV[k]
-		if set then
-			set[id] = nil
-			if next(set) == nil then byV[k] = nil end
-		end
-	end
+	for _, k in ipairs(self.keysT[id] or EMPTY.t) do indexRemove(byT, k, id) end
+	for _, k in ipairs(self.keysV[id] or EMPTY.v) do indexRemove(byV, k, id) end
 	local sk = 0
 	if s then
 		local n, newest, oldest, kt, kv = 0, 0, HUGE, {}, {}
 		for k, e in pairs(s.t) do
 			n = n + 1
 			kt[#kt + 1] = k
-			local set = byT[k]
-			if not set then set = {} byT[k] = set end
-			set[id] = true
+			indexAdd(byT, k, id)
 			local d = e[1]
 			if d > newest then newest = d end
 			if d < oldest then oldest = d end
@@ -380,9 +436,7 @@ function Table:put(id, s, packed)
 		for k, e in pairs(s.v) do
 			n = n + 1
 			kv[#kv + 1] = k
-			local set = byV[k]
-			if not set then set = {} byV[k] = set end
-			set[id] = true
+			indexAdd(byV, k, id)
 			local d = e[1]
 			if d > newest then newest = d end
 			if d < oldest then oldest = d end
@@ -397,7 +451,7 @@ function Table:put(id, s, packed)
 	self.skh[id] = sk ~= 0 and sk or nil
 	-- a held-back sheet keeps its saved place: what this session holds for that NPC is not saved
 	if not self.future[id] and not self.retired then self.saved.s[id] = s and (packed or NpcData.Pack(id, s)) or nil end
-	self:recut(id)
+	self:recut(id, prep)
 end
 
 -- Applies the table limits (the entry limit per sheet is applied by the caller).
@@ -422,13 +476,16 @@ function Table:limit()
 			if not l then l = {} drop[d[3]] = l end
 			l[#l + 1] = d
 		end
-		-- a sheet is cut and stored in one slice: between slices every sheet agrees with the
+		-- a sheet is cut in a copy and stored (store): between slices every sheet agrees with the
 		-- counts, caches and index (the window reads them)
 		for npc, l in pairs(drop) do
-			pace(self, sizes[npc] or 1, "store")
+			pace(self, sizes[npc] or 1, "check")
 			local s = sheets[npc]
-			for _, d in ipairs(l) do s[d[4] == 1 and "t" or "v"][d[5]] = nil end
-			self:put(npc, s)
+			local m = { name = s.name, nd = s.nd, map = s.map, x = s.x, y = s.y, pd = s.pd, t = {}, v = {} }
+			for k, e in pairs(s.t) do m.t[k] = e end
+			for k, e in pairs(s.v) do m.v[k] = e end
+			for _, d in ipairs(l) do m[d[4] == 1 and "t" or "v"][d[5]] = nil end
+			store(self, npc, m)
 		end
 	end
 	over = self.nSheets - self.ls
@@ -438,8 +495,7 @@ function Table:limit()
 		for _, d in ipairs(worst(over, function(offer)
 			for npc in pairs(sheets) do offer(newest[npc], KeyHash(npc), npc, 0, 0) end
 		end)) do
-			pace(self, sizes[d[3]] or 1, "store")
-			self:put(d[3], nil)
+			store(self, d[3], nil)
 		end
 	end
 end
@@ -590,7 +646,7 @@ function Table:MergeAll(items)
 			trim(m.t, self.lt)
 			trim(m.v, self.lv)
 			if not held or not deepEqual(m, held) then
-				self:put(id, m)
+				store(self, id, m)
 				merged = true
 			end
 		end
@@ -630,7 +686,7 @@ function Table:OwnVisit(id, reading)
 	local before = cutOf(self, id)
 	local m, changed = NpcData.Visit(self.sheets[id], reading, self.day, { t = self.lt, v = self.lv })
 	if not changed then return false end
-	self:put(id, m)
+	store(self, id, m)
 	self:limit()
 	return not deepEqual(before, cutOf(self, id))
 end
@@ -668,7 +724,7 @@ function Table:Write(id, reading)
 	makeRoom(m.t, h.t, self.lt, self.day)
 	makeRoom(m.v, h.v, self.lv, self.day)
 	if held and deepEqual(m, held) then return false end
-	self:put(id, m)
+	store(self, id, m)
 	self:limit()
 	return true
 end
@@ -692,11 +748,11 @@ function Table:Import(own)
 			local ins = ownRegisters(held or EMPTY, o)
 			if held or next(ins.t) or next(ins.v) then
 				local m = NpcData.Merge(held, ins)
+				pace(self, n, "room")
 				makeRoom(m.t, held and held.t or EMPTY.t, self.lt, self.day)
 				makeRoom(m.v, held and held.v or EMPTY.v, self.lv, self.day)
 				if not held or not deepEqual(m, held) then
-					pace(self, count(m.t) + count(m.v), "store")
-					self:put(id, m)
+					store(self, id, m)
 					touched = true
 				end
 			end

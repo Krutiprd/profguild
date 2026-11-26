@@ -45,12 +45,16 @@ NpcWork.RATE = 0.003    -- estimated ms per unit under PUC Lua 5.1 of a kind not
 -- ms per unit of each kind of item under PUC Lua 5.1 with its garbage collector, measured with full
 -- tables (tests/bench_npc.py and the review harness): the start and the floor of what is learned
 NpcWork.RATES = {
-	load = 0.005,     -- an entry of a saved sheet unpacked, trimmed and stored
+	load = 0.003,     -- an entry of a saved sheet unpacked and trimmed
 	scan = 0.002,     -- an entry offered to the limits' heap
-	check = 0.0002,   -- an entry looked at (the import's precheck, what a merge took)
-	merge = 0.002,    -- an entry merged, made room for and compared (the import)
-	mergeput = 0.0045, -- an entry checked, merged and stored (an NU, an own reading)
-	store = 0.0035,   -- an entry of a sheet stored: index, packed, cut and hashed
+	check = 0.0002,   -- an entry looked at (the import's precheck, what a merge took, a copy)
+	merge = 0.002,    -- an entry merged (the import)
+	room = 0.002,     -- an entry made room for and compared (the import)
+	mergeput = 0.003, -- an entry of a received sheet or own reading checked and merged
+	pack = 0.001,     -- an entry of a sheet packed for saved
+	cut = 0.0015,     -- an entry of a sheet cut to its sendable part and hashed
+	index = 0.001,    -- an entry of a sheet indexed and counted
+	store = 0.0035,   -- an entry of a sheet expired and stored at once (Expire)
 	unpack = 0.003,   -- an entry of a received sheet unpacked and hashed
 	hash = 0.001,     -- half a sheet's salted hash compared (NI)
 	encode = 0.006,   -- a byte of a message encoded (serialize and deflate)
