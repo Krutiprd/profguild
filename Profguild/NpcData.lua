@@ -61,7 +61,9 @@ end
 local function validID(v) return int(v, 1, NpcData.MAX_ID) end
 
 local function validName(s)
-	return type(s) == "string" and #s >= 1 and #s <= NpcData.MAX_NAME and not s:find("[%c|]")
+	-- the control bytes spelled out: %c follows the C library's locale under PUC Lua 5.1 and may
+	-- take UTF-8 continuation bytes such as 0x9D (the second byte of "Ý")
+	return type(s) == "string" and #s >= 1 and #s <= NpcData.MAX_NAME and not s:find("[%z\1-\31\127|]")
 end
 
 -- Strings compared as bytes (the < of Lua follows the C locale).

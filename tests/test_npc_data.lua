@@ -1153,3 +1153,43 @@ H.test("npc data: a full table takes a new sheet of over 64 entries fast (no sor
 	if jit then H.ok(best < 0.010, ("MergeIn into the full table took %.1f ms"):format(best * 1000)) end
 	print(("       MergeIn of 260 new entries into the full table: %.1f ms"):format(best * 1000))
 end)
+
+H.test("npc data: a clock behind the saved days or not known leaves the saved sheets untouched", function()
+	local T = D + 300
+	local saved = {}
+	local tab = newTable(T, saved)
+	tab:OwnVisit(5001, { name = "Maria", map = 1453, x = 56, y = 64, t = { [3915] = { skill = 50, copper = 500 } }, v = {} })
+	tab:OwnVisit(5002, { name = "Jormund", t = { [3916] = { skill = 60 } }, v = {} })
+	local copySaved = copy(saved)
+	-- two days back, 0 and nil: saved untouched, the table works in memory
+	for _, clock in ipairs({ (T - 2) * 86400, 0, false }) do
+		local back = ND.New(saved, function() return clock or nil end)
+		H.ok(back.detached, "detached at " .. tostring(clock))
+		H.eq(back:Count(), 0)
+		back:OwnVisit(5003, { name = "Nata", t = { [3917] = { skill = 1 } }, v = {} })
+		H.ok(deepEq(saved, copySaved), "saved untouched at " .. tostring(clock))
+	end
+	-- the right clock again: all there
+	tab = newTable(T, saved)
+	H.ok(not tab.detached and tab:Get(5001) and tab:Get(5002), "loaded with the right clock")
+	-- a minority of sheets from a clock that ran ahead once: loaded, those dropped
+	tab = newTable(T + 3, saved)
+	tab:OwnVisit(5009, { name = "Ahead", t = { [3918] = { skill = 1 } }, v = {} })
+	tab = newTable(T, saved)
+	H.ok(not tab.detached and tab:Get(5001) and not tab:Get(5009), "the one from the future goes")
+	-- clear on a detached table clears the saved one too
+	local back = ND.New(saved, function() return (T - 5) * 86400 end)
+	back:Clear()
+	H.eq(next(saved.s), nil, "cleared")
+end)
+
+H.test("npc data: names with any UTF-8 letters pass, control bytes and | do not (also under PUC Lua)", function()
+	local T = D + 300
+	local function named(n) return ND.Valid({ name = n, nd = T, t = { [1] = { T, 0, 0, 0, 0 } }, v = {} }, T).name end
+	for _, n in ipairs({ "\195\157mir", "J\195\182rmund", "\195\128\195\191", "Bena Winterhoof", "\128\159\160\255" }) do
+		H.eq(named(n), n, "kept: " .. n)
+	end
+	for _, n in ipairs({ "a\0b", "\1x", "x\31", "x\127", "a|cffffffffb", "\n", "\t" }) do
+		H.eq(named(n), nil, "dropped: " .. n:byte(1) .. ":" .. #n)
+	end
+end)

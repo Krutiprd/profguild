@@ -32,14 +32,20 @@ local function fakeNpcSync()
 	return s
 end
 
--- A valid encoded text of exactly `target` bytes (noise does not compress).
+-- A valid encoded text of exactly `target` bytes (noise does not compress). The noise comes from
+-- an own generator (exact in doubles), so LuaJIT and PUC Lua 5.1 find the same text.
 local function textOfSize(ns, target)
-	math.randomseed(7)
-	for n = target, math.floor(target * 1.3) do
-		local t = {}
-		for i = 1, n do t[i] = string.char(math.random(33, 122)) end
-		local text = ns.Comm.Encode({ t = "ND", pad = table.concat(t) })
-		if #text == target then return text end
+	for seed = 7, 60 do
+		local x = seed
+		for n = target, math.floor(target * 1.3) do
+			local t = {}
+			for i = 1, n do
+				x = x * 48271 % 2147483647
+				t[i] = string.char(33 + x % 90)
+			end
+			local text = ns.Comm.Encode({ t = "ND", pad = table.concat(t) })
+			if #text == target then return text end
+		end
 	end
 	error("no text of " .. target .. " bytes")
 end

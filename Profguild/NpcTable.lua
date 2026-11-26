@@ -158,6 +158,17 @@ function NpcData.New(saved, now, limits)
 		le = limits.entries or NpcData.LIMIT_ENTRIES, ls = limits.sheets or NpcData.LIMIT_SHEETS }, Table)
 	local src = saved.s
 	if saved.e ~= NpcData.EPOCH or type(src) ~= "table" then src = {} end
+	-- A clock not known yet (0) or behind the saved days (most saved sheets newer than tomorrow)
+	-- would drop the saved sheets as coming from the future: they are left untouched and this
+	-- session's table lives in memory only (tab.detached).
+	local today, n, ahead = tab:Today(), 0, 0
+	for _, list in pairs(src) do
+		n = n + 1
+		if type(list) == "table" and type(list[8]) == "number" and list[8] > today + 1 then ahead = ahead + 1 end
+	end
+	if today <= 0 or ahead * 2 > n then
+		tab.saved, tab.detached, tab.real, src = {}, true, saved, {}
+	end
 	tab:reset()
 	for key, list in pairs(src) do
 		local id, s = NpcData.Unpack(list, tab.day)
@@ -232,7 +243,10 @@ function Table:limit()
 	end
 end
 
-function Table:Today() return floor(self.now() / 86400) end
+function Table:Today()
+	local t = self.now()
+	return floor((type(t) == "number" and t or 0) / 86400)
+end
 
 local function check(self)
 	if self:Today() ~= self.day then self:Expire() end
@@ -249,7 +263,11 @@ function Table:Expire()
 	self:forget()
 end
 
-function Table:Clear() self:reset() end
+-- Everything goes, also from the saved table a detached table left untouched.
+function Table:Clear()
+	if self.real then self.real.e, self.real.s = NpcData.EPOCH, {} end
+	self:reset()
+end
 
 function Table:Get(id)
 	check(self)
