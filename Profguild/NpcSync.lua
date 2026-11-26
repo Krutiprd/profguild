@@ -73,6 +73,14 @@ NpcSync.MAX_NAME = 100
 NpcSync.NU_SHEETS = 40
 NpcSync.NU_ENTRIES = 4000
 NpcSync.BAD_BLOCK = 600
+-- Received messages wait in order behind the table's work (NpcWork: loading, merges) when it is
+-- busy; at most this many (NUs, the others), the excess is dropped and counted (stats.overflow).
+-- An honest NU takes a few ms under PUC Lua and a frame has 4: a queue only builds while the table
+-- loads (a few seconds), when a guild sends at most a few NUs a second (800 bytes/s per sender).
+-- In the game Comm queues the texts before decoding them (Comm.NPC_QUEUE); this queue serves
+-- callers that hand decoded messages in while the work is busy (tests, the simulation).
+NpcSync.QUEUE_NU = 20
+NpcSync.QUEUE = 200
 
 local M = 2147483647
 
@@ -151,7 +159,9 @@ function NpcSync.New(adapter, tab)
 		sending = false, round = nil, hold = nil, cursor = nil,
 		dirtyOn = false, ndSeq = 0, settleSeq = 0, laterSeq = 0,
 		sizes = {},       -- "id:hash" -> encoded bytes of an NU of that sheet alone
-		stats = { sent = {}, bytes = {}, recv = {}, capped = 0, muted = 0, dropped = 0, foreign = 0, bad = 0 },
+		queued = { NU = 0, other = 0 }, -- received messages waiting for the table's work (NpcWork)
+		stats = { sent = {}, bytes = {}, recv = {}, capped = 0, muted = 0, dropped = 0, foreign = 0, bad = 0,
+			overflow = 0 },
 	}, Sync)
 	return self
 end
@@ -162,8 +172,22 @@ local function now(self) return self.a.now() end
 local function rnd(self, range) return range[1] + (range[2] - range[1]) * self.a.random() end
 local function canSend(self) return not self.dead and self.a.canSend() end
 
+-- Everything NpcSync does runs as a job of the table's scheduler (NpcWork), in order with the
+-- table's own work (loading, expiry): what it reads and sends is never a table half loaded or half
+-- merged. Inside a job, or without a scheduler, fn runs at once.
+local function job(self, fn)
+	local w = self.tab.work
+	if not w or w:InJob() then return fn() end
+	w:Run(function() if not self.dead then fn() end end, self)
+end
+
+local function pace(self, units)
+	local w = self.tab.work
+	if w then w:Pace(units) end
+end
+
 local function after(self, s, fn)
-	self.a.after(s, function() if not self.dead then fn() end end)
+	self.a.after(s, function() if not self.dead then job(self, fn) end end)
 end
 
 local function equalHeard(self, window)
@@ -394,15 +418,19 @@ function step(self)
 	local list, sent, since, bytes = {}, {}, {}, 0
 	for i = 1, #ids do
 		local id = ids[(i - 1 + rot) % #ids + 1]
+		-- an encoding of the sheet alone (cached by content): a few ms under PUC Lua for a large one
+		if not self.sizes[contentKey(self, id)] then pace(self, 4 * ((tab.cn and tab.cn[id]) or 100)) end
 		local b = sheetSize(self, id)
 		if bytes > 0 and bytes + b > NpcSync.NU_FILL then break end
 		list[#list + 1], sent[#sent + 1] = ns.NpcData.Pack(id, tab:Sendable(id)), id
-		since[id] = push[id].since or t
+		since[id] = push[id] and push[id].since or t
 		bytes = bytes + b
 		push[id] = nil
 		self.cursor = id
 	end
 	if not next(push) then self.cursor = nil end
+	-- the encoding of the NU: about 6 ms a kB under PUC Lua, in a frame of its own when needed
+	pace(self, bytes)
 	self.sending = true
 	self.lastData = t
 	openRound(self).had = true
@@ -474,6 +502,7 @@ local function plan(self, h)
 		local salt = floor(self.a.random() * 65536)
 		local hashes, ids, n = {}, {}, 0
 		for _, id in ipairs(tab:SendableIDs()) do
+			pace(self, 2)
 			hashes[id], n = tab:SaltedHash(tab:SheetHash(id), salt), n + 1
 		end
 		-- refused sheets, newest first, only while receivers read the list (MAX_LIST IDs)
@@ -487,6 +516,8 @@ local function plan(self, h)
 		sort(ids)
 		local c = {}
 		for i, id in ipairs(ids) do c[i] = hashes[id] end
+		-- the encoding of the NI (sized, then sent): a few ms under PUC Lua, in a frame of its own
+		pace(self, 4 * #ids)
 		local R = openRound(self)
 		R.ni, R.mine, R.hNI = true, true, H
 		transmit(self, "NI", { r = salt, i = toDeltas(ids), c = c }, function(ok, _, blocked)
@@ -540,6 +571,7 @@ local function onNI(self, sender, h, salt, ids, c)
 	for i, id in ipairs(ids) do held[id] = c[i] end
 	local give = {}
 	for _, id in ipairs(tab:SendableIDs()) do
+		pace(self, 4)
 		local their = held[id]
 		if not their or their ~= tab:SaltedHash(tab:SheetHash(id), salt) then
 			local x = contentKey(self, id)
@@ -650,7 +682,9 @@ local function onNU(self, sender, h, x)
 	-- all sheets merged at once: the table limits run once per NU, not once per sheet
 	local got, items = {}, {}
 	for i = 1, #x do
-		local id, s, sh = unpackSheet(x[i], today)
+		local l = x[i]
+		pace(self, 1 + (type(l[9]) == "table" and #l[9] or 0) + (type(l[15]) == "table" and #l[15] or 0))
+		local id, s, sh = unpackSheet(l, today)
 		if s then
 			if tab:SheetHash(id) == sh then
 				got[#got + 1] = { id, sh }
@@ -691,6 +725,25 @@ local function onNU(self, sender, h, x)
 	end
 	if changedAny and self.a.changed then self.a.changed() end
 	settle(self)
+end
+
+local function receive(self, msg, sender, h, t, parsed)
+	prune(self)
+	-- rule 3: what was planned for the sender is dropped once its hash is ours
+	if self.push and h == self.tab:Hash() then
+		for id, q in pairs(self.push) do
+			if q.who == sender then self.push[id] = nil end
+		end
+	end
+	if t == "ND" then
+		onND(self, sender, h)
+	elseif t == "NI" then
+		onNI(self, sender, h, msg.r, parsed[1], parsed[2])
+	elseif t == "NR" then
+		onNR(self, sender, h, msg.to, parsed)
+	else
+		onNU(self, sender, h, msg.x)
+	end
 end
 
 function Sync:OnMessage(msg, sender, size)
@@ -751,22 +804,21 @@ function Sync:OnMessage(msg, sender, size)
 		return
 	end
 	self.stats.recv[t] = (self.stats.recv[t] or 0) + 1
-	prune(self)
-	-- rule 3: what was planned for the sender is dropped once its hash is ours
-	if self.push and h == self.tab:Hash() then
-		for id, q in pairs(self.push) do
-			if q.who == sender then self.push[id] = nil end
-		end
+	local w = self.tab.work
+	if not w or w:InJob() then return receive(self, msg, sender, h, t, parsed) end
+	-- behind the table's work (loading, merges): a bounded queue, the excess dropped and counted
+	local kind = t == "NU" and "NU" or "other"
+	local cap = t == "NU" and NpcSync.QUEUE_NU or NpcSync.QUEUE
+	local q = self.queued
+	if q[kind] >= cap then
+		self.stats.overflow = self.stats.overflow + 1
+		return
 	end
-	if t == "ND" then
-		onND(self, sender, h)
-	elseif t == "NI" then
-		onNI(self, sender, h, msg.r, parsed[1], parsed[2])
-	elseif t == "NR" then
-		onNR(self, sender, h, msg.to, parsed)
-	else
-		onNU(self, sender, h, msg.x)
-	end
+	q[kind] = q[kind] + 1
+	w:Run(function()
+		q[kind] = q[kind] - 1
+		if not self.dead then receive(self, msg, sender, h, t, parsed) end
+	end, self)
 end
 
 -- Public ---------------------------------------------------------------------
@@ -781,8 +833,24 @@ end
 
 -- Rule 8: an own reading; its changed sheet goes out whole after VISIT_DELAY, waiting like an NU
 -- while blocked. Returns whether the table changed.
+local ownVisit
+
+-- Rule 8 runs as a job of the table's work: while the table loads or merges the reading waits its
+-- turn. The result when it ran at once; nil when it waits.
 function Sync:OwnVisit(id, reading)
 	if self.dead then return false end
+	local w = self.tab.work
+	if not w or w:InJob() then return ownVisit(self, id, reading) end
+	local done, result = false, nil
+	w:Run(function()
+		if not self.dead then result = ownVisit(self, id, reading) end
+		done = true
+	end, self)
+	if done then return result end
+	return nil
+end
+
+function ownVisit(self, id, reading)
 	local tab = self.tab
 	local old = tab:Hash()
 	if not tab:OwnVisit(id, reading) then return false end

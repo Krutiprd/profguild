@@ -116,6 +116,10 @@ function M.install()
 	_G.debugstack = function() return "" end
 
 	_G.GetTime = function() return M.time end
+	-- the ms clock of NpcWork's budget: still unless a test moves it (M.cpu), so that how work is
+	-- sliced does not depend on the speed of the machine
+	M.cpu = 0
+	_G.debugprofilestop = function() return M.cpu end
 	_G.GetFramerate = function() return 60 end
 	_G.GetServerTime = function() return math.floor(1794615000 + M.time) end -- whole seconds
 	_G.GetBuildInfo = function() return "1.60.1", "70685", "Nov 2026", 16001 end

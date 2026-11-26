@@ -84,8 +84,20 @@ end
 
 -- Sends an NPC data message. done(ok) is called once: true when the last part has left,
 -- false on the first failed part (or when the message cannot be encoded).
+-- The last NPC message encoded (NpcSync sizes a message just before it sends it): not encoded twice.
+local lastNpc, lastNpcText = nil, nil
+function Comm.EncodeNpc(msg)
+	if msg ~= lastNpc then
+		lastNpc, lastNpcText = nil, nil
+		lastNpcText = Comm.Encode(msg)
+		lastNpc = msg
+	end
+	return lastNpcText
+end
+
 function Comm.SendNpc(msg, done)
-	local ok, text = pcall(Comm.Encode, msg)
+	local ok, text = pcall(Comm.EncodeNpc, msg)
+	lastNpc, lastNpcText = nil, nil
 	if not ok or not text then
 		ns.Debug("npc encode failed: %s", tostring(text))
 		if done then done(false) end
@@ -105,30 +117,63 @@ function Comm.SendNpc(msg, done)
 	ns.Debug("sent npc %s (%d bytes)", tostring(msg.t), #text)
 end
 
-function Comm:OnCommReceived(prefix, text, distribution, sender)
-	local isNpc = prefix == Comm.NPC_PREFIX
-	if (prefix ~= Comm.PREFIX and not isNpc) or distribution ~= "GUILD" then return end
-	local now = GetTime()
-	if type(sender) == "string" and (Comm.blocked[sender] or 0) > now then return end
-	local ok, msg, why = pcall(Comm.Decode, text, isNpc and Comm.NPC_MAX_TEXT or nil)
+-- Decodes a received text; nil when it cannot be (an oversized one blocks its sender).
+local function decodeFrom(text, sender, max)
+	local ok, msg, why = pcall(Comm.Decode, text, max)
 	if not ok or not msg then
 		if why == "too large" and type(sender) == "string" then
-			Comm.blocked[sender] = now + Comm.BLOCK_SECONDS
+			Comm.blocked[sender] = GetTime() + Comm.BLOCK_SECONDS
 			ns.Debug("oversized message from %s, ignoring the sender for %d s", sender, Comm.BLOCK_SECONDS)
 		else
 			ns.Debug("could not decode a message from %s", tostring(sender))
 		end
-		return
+		return nil
 	end
+	return msg
+end
+
+-- sync: the npcSync of the time the text came (a stopped one, of a guild left meanwhile, reads
+-- nothing)
+local function receiveNpc(text, sender, sync)
+	if not sync then return end
+	if type(sender) == "string" and (Comm.blocked[sender] or 0) > GetTime() then return end
+	local msg = decodeFrom(text, sender, Comm.NPC_MAX_TEXT)
+	if not msg then return end
+	-- an unexpected error in the NPC code is recorded (Bugs), not thrown at every message; inside a
+	-- job NpcWork records it (a job may wait for the next frame, which no pcall may stand between)
+	local work = ns.npcWork
+	if (work and work:InJob()) or not ns.Bugs then sync:OnMessage(msg, sender, #text)
+	else ns.Bugs.Call(sync.OnMessage, sync, msg, sender, #text) end
+end
+
+-- NPC texts are decoded as jobs of the NPC work (ns.npcWork, NpcWork), behind the loading and
+-- merges, so that many arriving in one frame do not hold it up. At most NPC_QUEUE wait; the
+-- excess is dropped and counted (npcSync.stats.overflow). Honest traffic queues a few at most.
+Comm.NPC_QUEUE = 100
+Comm.npcQueued = 0
+
+function Comm:OnCommReceived(prefix, text, distribution, sender)
+	local isNpc = prefix == Comm.NPC_PREFIX
+	if (prefix ~= Comm.PREFIX and not isNpc) or distribution ~= "GUILD" then return end
+	if type(sender) == "string" and (Comm.blocked[sender] or 0) > GetTime() then return end
 	if isNpc then
-		-- an unexpected error in the NPC code is recorded (Bugs), not thrown at every message
+		local work = ns.npcWork
 		local sync = ns.npcSync
-		if sync then
-			if ns.Bugs then ns.Bugs.Call(sync.OnMessage, sync, msg, sender, #text)
-			else sync:OnMessage(msg, sender, #text) end
+		if not work or work:InJob() or type(text) ~= "string" then return receiveNpc(text, sender, sync) end
+		if Comm.npcQueued >= Comm.NPC_QUEUE then
+			if sync then sync.stats.overflow = (sync.stats.overflow or 0) + 1 end
+			return
 		end
+		Comm.npcQueued = Comm.npcQueued + 1
+		work:Run(function()
+			Comm.npcQueued = Comm.npcQueued - 1
+			work:Pace(#text / 2) -- the decoding: about 1 ms a kB of text under PUC Lua
+			receiveNpc(text, sender, sync)
+		end)
 		return
 	end
+	local msg = decodeFrom(text, sender)
+	if not msg then return end
 	-- Remember how the game names the sender: that is the name a whisper needs.
 	if type(msg.s) == "string" and type(sender) == "string" and ns.guildDB then
 		ns.guildDB.names = ns.guildDB.names or {}

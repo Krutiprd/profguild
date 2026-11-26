@@ -5,7 +5,7 @@ local ADDON, ns = ...
 
 local Store, Sync, Scanner, Comm, Reagents, Catalog = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents, ns.Catalog
 local GuildPrices, Requests, Reports = ns.GuildPrices, ns.Requests, ns.Reports
-local NpcData, NpcSync = ns.NpcData, ns.NpcSync
+local NpcData, NpcSync, NpcWork = ns.NpcData, ns.NpcSync, ns.NpcWork
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -603,6 +603,32 @@ end
 -- (ProfguildDB.guilds[key].npc[faction]), shared by ns.npcSync. ns.npc: the table the window shows,
 -- the guild's, else npcOwn. Both are made once the faction is known (it may not be at login).
 
+-- ns.npcWork: the one scheduler of all NPC work (NpcWork): loading both tables, the import, merges,
+-- expiry, own readings and NpcSync's messages run as its jobs, in order, at most a budget of ms
+-- per frame (less in combat). At logout what is left runs to its end before the game saves.
+local function npcClockMs()
+	if type(debugprofilestop) == "function" then return debugprofilestop() end
+	if type(GetTimePreciseSec) == "function" then return GetTimePreciseSec() * 1000 end
+	return os.clock() * 1000
+end
+
+ns.npcWork = NpcWork.New({
+	clock = npcClockMs,
+	frame = function() return GetTime() end,
+	defer = function(fn) C_Timer.After(0, function() ns.Bugs.Call(fn) end) end,
+	budget = function()
+		if type(InCombatLockdown) == "function" and InCombatLockdown() then return NpcWork.COMBAT end
+		return NpcWork.BUDGET
+	end,
+	error = function(err, stack)
+		ns.Bugs.Record(tostring(err), stack, true)
+		ns.Log("ERROR npc work: %s", tostring(err))
+	end,
+})
+
+-- Runs fn as a job of the NPC work (at once when nothing waits ahead of it).
+local function npcJob(fn) ns.npcWork:Run(fn) end
+
 local npcAdapter = {
 	now = function() return GetTime() end,
 	after = function(delay, fn) C_Timer.After(delay, function() ns.Bugs.Call(fn) end) end,
@@ -613,7 +639,7 @@ local npcAdapter = {
 	faction = function() return ns.npcFaction end,
 	changed = function() ns.NoteNpcSkills() ns.OnDataChanged() end,
 	isMe = function(name) return type(name) == "string" and ns.NormalizeName(name) == UnitName("player") end,
-	size = function(msg) return #Comm.Encode(msg) end,
+	size = function(msg) return #Comm.EncodeNpc(msg) end,
 }
 
 local function npcClock() return GetServerTime() end
@@ -623,6 +649,13 @@ local function playerFaction()
 	local ok, faction = pcall(UnitFactionGroup, "player")
 	if ok and type(faction) == "string" and faction ~= "" then return faction end
 	return nil
+end
+
+-- The tables were loaded (or a part of their work is done): the window and the skill revision
+-- follow.
+local function npcLoaded()
+	ns.NoteNpcSkills()
+	ns.OnDataChanged()
 end
 
 -- Makes what is missing: npcOwn of the faction, and with a guild its table and sync (npcOwn imported
@@ -638,14 +671,18 @@ function ns.SetupNpc()
 		ns.npcSync, ns.npcGuild = nil, nil
 		if type(ns.db.npcOwn) ~= "table" then ns.db.npcOwn = {} end
 		if type(ns.db.npcOwn[faction]) ~= "table" then ns.db.npcOwn[faction] = {} end
-		ns.npcOwn = NpcData.New(ns.db.npcOwn[faction], npcClock)
+		ns.npcOwn = NpcData.New(ns.db.npcOwn[faction], npcClock, nil, ns.npcWork)
+		npcJob(npcLoaded)
 		ns.npcFaction = faction
 	end
 	if ns.guildDB and not ns.npcGuild then
 		if type(ns.guildDB.npc) ~= "table" then ns.guildDB.npc = {} end
 		if type(ns.guildDB.npc[faction]) ~= "table" then ns.guildDB.npc[faction] = {} end
-		local tab = NpcData.New(ns.guildDB.npc[faction], npcClock)
-		tab:Import(ns.npcOwn)
+		-- loads in slices (NpcWork); the import and NpcSync's work queue behind the loading
+		local tab = NpcData.New(ns.guildDB.npc[faction], npcClock, nil, ns.npcWork)
+		local own = ns.npcOwn
+		npcJob(function() tab:Import(own) end)
+		npcJob(npcLoaded)
 		ns.npcGuild = tab
 		ns.npcSync = NpcSync.New(npcAdapter, tab)
 		-- made after the login hello (the faction was not known then): its ND need not wait 900 s
@@ -657,56 +694,32 @@ function ns.SetupNpc()
 end
 
 -- ns.npcSkillRevision: raised when a learn skill the window shows could have changed, so that the
--- Leveling list (sorted by it) is rebuilt then and not at every sheet. Cheap rule: the skill
--- registers (recipe, skill, its day) of the trainer entries of the shown tables changed. A sheet's
--- registers are kept per sheet object while its entry count and the table's day stay (the table
--- replaces a changed sheet, and only its limits and expiry edit one in place, which change those).
-local skillSigs = setmetatable({}, { __mode = "k" })
-local skillSeen, skillTables = setmetatable({}, { __mode = "k" }), nil
-
-local function skillSig(tab, id, s)
-	local c = skillSigs[s]
-	local n = tab.sizes and tab.sizes[id]
-	if c and c.n == n and c.day == tab.day then return c.sig end
-	local ids = {}
-	for recipe in pairs(s.t) do ids[#ids + 1] = recipe end
-	table.sort(ids)
-	local parts = {}
-	for i, recipe in ipairs(ids) do
-		local e = s.t[recipe]
-		parts[i] = recipe .. ":" .. tostring(e[2]) .. ":" .. tostring(e[3])
-	end
-	local sig = table.concat(parts, ",")
-	skillSigs[s] = { sig = sig, n = n, day = tab.day }
-	return sig
-end
+-- Leveling list (sorted by it) is rebuilt then and not at every sheet. Each table keeps skillRev,
+-- raised when the skill registers (recipe, skill, its day) of a sheet's trainer entries changed
+-- (NpcTable); so this costs nothing per sheet, also with a full table.
+local skillKey = nil
 
 function ns.NoteNpcSkills()
-	local changed = false
-	local tables = tostring(ns.npc) .. tostring(ns.npcOwn)
-	if tables ~= skillTables then changed, skillTables = true, tables end
+	local key = tostring(ns.npc) .. tostring(ns.npcOwn)
 	for _, tab in ipairs({ ns.npc or false, ns.npcOwn or false }) do
-		if tab and type(tab.sheets) == "table" then
-			local now, old = {}, skillSeen[tab] or {}
-			for id, s in pairs(tab.sheets) do
-				if next(s.t) then
-					now[id] = skillSig(tab, id, s)
-					if old[id] ~= now[id] then changed = true end
-				end
-			end
-			for id in pairs(old) do if not now[id] then changed = true end end
-			skillSeen[tab] = now
-		end
+		if tab then key = key .. ":" .. tostring(tab.skillRev) end
 	end
-	if changed then ns.npcSkillRevision = (ns.npcSkillRevision or 0) + 1 end
+	if key ~= skillKey then
+		skillKey = key
+		ns.npcSkillRevision = (ns.npcSkillRevision or 0) + 1
+	end
 end
 
 -- A reading of a trainer or vendor (NpcReader): npcOwn takes it as the last known reading; the
--- guild's table takes it by the own-visit rules and NpcSync sends what changed.
+-- guild's table takes it by the own-visit rules and NpcSync sends what changed. A job of the NPC
+-- work: while the tables load the reading waits its turn.
 local function onNpcReading(npcID, reading)
 	ns.SetupNpc()
-	if ns.npcOwn and ns.npcOwn:Write(npcID, reading) then ns.NoteNpcSkills() ns.OnDataChanged() end
-	if ns.npcSync then ns.npcSync:OwnVisit(npcID, reading) end
+	local own, sync = ns.npcOwn, ns.npcSync
+	npcJob(function()
+		if own and own == ns.npcOwn and own:Write(npcID, reading) then ns.NoteNpcSkills() ns.OnDataChanged() end
+		if sync and sync == ns.npcSync then sync:OwnVisit(npcID, reading) end
+	end)
 end
 
 -- Name of a guildmate for the window: roster name without the realm, then the sender name.
@@ -1361,13 +1374,17 @@ local function slash(input)
 		if rest ~= "" and rest ~= "clear" then return ns.Say("NPC_USAGE") end
 		if not ns.npcOwn then return ns.Say("NPC_NO_FACTION") end
 		if rest == "clear" then
-			ns.npcOwn:Clear()
-			if ns.npcGuild then ns.npcGuild:Clear() end
-			-- the guild's comes back from guildmates
-			if ns.npcSync then ns.npcSync:Announce() end
+			-- a job: after the loading and merges queued before it
+			local own, guild, sync = ns.npcOwn, ns.npcGuild, ns.npcSync
+			npcJob(function()
+				own:Clear()
+				if guild then guild:Clear() end
+				-- the guild's comes back from guildmates
+				if sync then sync:Announce() end
+				ns.NoteNpcSkills()
+				ns.OnDataChanged()
+			end)
 			ns.Say("NPC_CLEARED", ns.npcFaction)
-			ns.NoteNpcSkills()
-			ns.OnDataChanged()
 			return
 		end
 		local ownSheets, ownEntries = ns.npcOwn:Count()
@@ -1452,6 +1469,12 @@ function events.ADDON_LOADED(name)
 	Comm:Init()
 	if ns.Tooltip then ns.Tooltip:Init() end
 	frame:UnregisterEvent("ADDON_LOADED")
+end
+
+-- The game saves after this: NPC work still queued runs to its end now (a half loaded table, or
+-- a reading waiting for the loading, would else be left out of the saved data).
+function events.PLAYER_LOGOUT()
+	ns.npcWork:Flush()
 end
 
 function events.PLAYER_LOGIN()

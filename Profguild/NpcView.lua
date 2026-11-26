@@ -11,9 +11,8 @@
 --     copper=, other = { { kind, id, count }, ... }|nil, limited=, age=days, approx=, best=, of="vendor"|"trainer" (missing),
 --     text = where.ah.text (ah) }
 --
--- Finding sheets by recipe or item: the table has no such lookup, so an index (recipe -> NPCs, item -> NPCs) is
--- built per table and rebuilt when the table's hash, sheet count or entry count changes (Hash is cached
--- by the table), never walked on every redraw.
+-- Finding sheets by recipe or item: the table keeps an index (byT: recipe -> NPCs, byV: item -> NPCs),
+-- kept current sheet by sheet at every change (NpcTable), so opening the window walks no table.
 
 local _, ns = ...
 ns = ns or {}
@@ -25,41 +24,19 @@ local OWN_DAYS = 30 -- an own reading of the last 30 days is shown instead of th
 local floor, min = math.floor, math.min
 local pairs, ipairs, type, sort = pairs, ipairs, type, table.sort
 
--- The index ------------------------------------------------------------------------------
-
-local indexes = setmetatable({}, { __mode = "k" })
-
-local function indexOf(tab)
-	local key = tab:Hash() .. ":" .. tab.nSheets .. ":" .. tab.nEntries
-	local ix = indexes[tab]
-	if ix and ix.key == key then return ix end
-	ix = { key = key, t = {}, v = {} }
-	for npc, s in pairs(tab.sheets) do
-		for id in pairs(s.t) do
-			local l = ix.t[id]
-			if not l then l = {} ix.t[id] = l end
-			l[#l + 1] = npc
-		end
-		for id in pairs(s.v) do
-			local l = ix.v[id]
-			if not l then l = {} ix.v[id] = l end
-			l[#l + 1] = npc
-		end
-	end
-	indexes[tab] = ix
-	return ix
-end
-
--- NPC IDs of both tables holding the key in part ("t" or "v"), each once.
+-- NPC IDs of both tables holding the key in part ("t" or "v"), each once, sorted.
 local function npcs(src, part, key)
 	local seen, list = {}, {}
 	for _, tab in ipairs({ src.guild or false, src.own or false }) do
-		if tab then
-			for _, npc in ipairs(indexOf(tab)[part][key] or {}) do
+		local by = tab and (part == "t" and tab.byT or tab.byV)
+		local set = by and by[key]
+		if set then
+			for npc in pairs(set) do
 				if not seen[npc] then seen[npc] = true list[#list + 1] = npc end
 			end
 		end
 	end
+	sort(list)
 	return list
 end
 
