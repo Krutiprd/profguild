@@ -399,3 +399,27 @@ H.test("table: a lean table (npcOwn) keeps no sendable parts, and counts, hashes
 	H.ok(kept > 0)
 	H.eq(#lean:SendableIDs(), #full:SendableIDs())
 end)
+
+H.test("table: the index holds the NPC itself for one holder, a set for more, in parts by key", function()
+	local clock = function() return DAY * 86400 + 3600 end
+	local tab = ND.New({}, clock)
+	local P = ND.INDEX_PARTS
+	local function at(k) local p = tab.byT[k % P] return p and p[k] end
+	local function sheet(keys)
+		local s = { name = "N", nd = DAY, t = {}, v = {} }
+		for _, k in ipairs(keys) do s.t[k] = { DAY, 0, 0, 0, 0 } end
+		return s
+	end
+	tab:MergeIn(1, sheet({ 100, 164, 7 }))
+	H.eq(at(100), 1) H.eq(at(164), 1) H.eq(at(7), 1)
+	H.ok(tab.byT[100 % P] == tab.byT[164 % P], "keys of one part share it")
+	tab:MergeIn(2, sheet({ 100 }))
+	H.ok(type(at(100)) == "table" and at(100)[1] and at(100)[2], "a set for two")
+	tab:MergeIn(3, sheet({ 100 }))
+	tab:put(1, nil)
+	H.ok(type(at(100)) == "table" and at(100)[2] and at(100)[3] and not at(100)[1])
+	tab:put(3, nil)
+	H.eq(at(100), 2, "back to the one holder") H.eq(at(7), nil) H.eq(at(164), nil)
+	tab:put(2, nil)
+	H.eq(at(100), nil)
+end)
