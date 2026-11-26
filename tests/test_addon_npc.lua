@@ -1058,3 +1058,12 @@ H.test("find: every FIND text fits its row in en and sk (about 6 px per characte
 	ns.SetLanguage("en")
 	cleanGame()
 end)
+
+H.test("npc: the end of combat lets the reader read windows opened in combat", function()
+	local ns = boot()
+	local called = 0
+	ns.npcReader.CombatEnded = function() called = called + 1 end
+	M.fire("PLAYER_REGEN_ENABLED")
+	H.eq(called, 1, "CombatEnded at PLAYER_REGEN_ENABLED")
+	ns.npcReader.CombatEnded = nil
+end)

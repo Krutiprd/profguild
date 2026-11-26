@@ -1660,7 +1660,7 @@ function events.MERCHANT_SHOW() npcRead("MerchantShow") end
 function events.MERCHANT_UPDATE() npcRead("MerchantUpdate") end
 function events.MERCHANT_CLOSED() npcRead("MerchantClosed") end
 
-function events.PLAYER_REGEN_ENABLED() flushSoon() end
+function events.PLAYER_REGEN_ENABLED() flushSoon() npcRead("CombatEnded") end
 function events.PLAYER_ENTERING_WORLD() flushSoon() end
 function events.ZONE_CHANGED_NEW_AREA() flushSoon() end
 

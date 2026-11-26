@@ -577,3 +577,63 @@ H.test("NpcReader bounds (mutation check): grey equal to the skill, 0.5 s, the l
 	g.run(0.5)
 	H.eq(g.readings[1].r.v[6377].price, nil, "four other costs: seen only")
 end)
+
+H.test("NpcReader: a window opened or due in combat is read when combat ends, if still open", function()
+	-- trainer opened in combat
+	local g = newGame()
+	alchemy(g)
+	g.combat = true
+	openTrainer(g)
+	g.run(1)
+	H.eq(#g.readings, 0, "nothing in combat")
+	g.combat = false
+	g.reader:CombatEnded()
+	g.run(1)
+	H.eq(#g.readings, 1, "read after combat")
+	g.reader:CombatEnded()
+	g.run(1)
+	H.eq(#g.readings, 1, "once")
+	-- combat began between the show and the read
+	g = newGame()
+	alchemy(g)
+	openTrainer(g)
+	g.combat = true
+	g.run(1)
+	H.eq(#g.readings, 0)
+	g.reader:CombatEnded()
+	g.run(1)
+	H.eq(#g.readings, 0, "still in combat: nothing")
+	g.combat = false
+	g.reader:CombatEnded()
+	g.run(1)
+	H.eq(#g.readings, 1, "read after combat")
+	-- closed in combat: nothing
+	g = newGame()
+	alchemy(g)
+	g.combat = true
+	openTrainer(g)
+	g.reader:TrainerClosed()
+	g.combat = false
+	g.reader:CombatEnded()
+	g.run(1)
+	H.eq(#g.readings, 0, "closed meanwhile")
+	-- merchant
+	g = newGame()
+	nata(g)
+	g.combat = true
+	openMerchant(g)
+	g.run(1)
+	g.combat = false
+	g.reader:CombatEnded()
+	g.run(2)
+	H.eq(#g.readings, 1, "merchant read after combat")
+	g = newGame()
+	nata(g)
+	g.combat = true
+	openMerchant(g)
+	g.reader:MerchantClosed()
+	g.combat = false
+	g.reader:CombatEnded()
+	g.run(2)
+	H.eq(#g.readings, 0, "merchant closed meanwhile")
+end)

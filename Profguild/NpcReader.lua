@@ -1,8 +1,9 @@
 -- Profguild: NpcReader
 -- Turns the profession trainer and merchant windows into readings, one per NPC (design "Reading").
 -- All WoW calls go through the api, so tests inject a fake game. Nothing in either window is
--- changed (no filter, no selection), nothing is read in combat, and a reading that met a value the
--- game marks secret is dropped whole.
+-- changed (no filter, no selection), nothing is read in combat (a window opened or due to be read
+-- in combat is read when combat ends, CombatEnded, if it is still open), and a reading that met a
+-- value the game marks secret is dropped whole.
 --
 -- reading = { name=, map=, x=, y=, t = { [recipeID] = { skill=, copper= } }, v = { [itemID] = { price= } } }
 --   place: uiMapID and the player's position in whole percent (rounded down), absent when unknown;
@@ -30,7 +31,8 @@ ns.NpcReader = NpcReader
 
 local floor, pairs, ipairs, next, select, sort, type, tostring = math.floor, pairs, ipairs, next, select, table.sort, type, tostring
 
-NpcReader.DEBOUNCE = 0.5      -- a window is read this long after its last event
+NpcReader.DEBOUNCE = 0.5      -- a window is read this long after the first event of a burst; the
+                              -- events meanwhile are covered by that read (a throttle, not a debounce)
 NpcReader.NAME_RETRY = 60     -- services of a profession with a nameless recipe are matched again then
 NpcReader.ITEM_RETRY = 1      -- a merchant entry without its item or cost ID is read again then ...
 NpcReader.ITEM_TRIES = 5      -- ... at most this many times
@@ -140,6 +142,7 @@ function NpcReader.New(api, onReading)
 		held = {},                    -- [npcID] = { head, services } waiting for recipe names
 		final = false,                -- the second try is over: nameless recipes are left out
 		firstTry = nil, retrying = false,
+		waiting = {},                 -- kind -> true: opened or due in combat, read when it ends
 	}, Reader)
 end
 
@@ -198,7 +201,11 @@ end
 -- Opens a window: the NPC and its place are taken now, the content DEBOUNCE seconds later.
 function Reader:open(kind)
 	self[kind] = nil
-	if self:busy() then return nil end
+	self.waiting[kind] = nil
+	if self:busy() then
+		self.waiting[kind] = true -- opened in combat: read when it ends
+		return nil
+	end
 	self.tainted = false
 	local id = self:npcID()
 	if not id or self.tainted then return nil end
@@ -213,11 +220,24 @@ function Reader:schedule(kind, st, delay, read)
 	st.pending = true
 	self.api.after(delay, function()
 		st.pending = false
-		if self[kind] ~= st or self:busy() then return end
+		if self[kind] ~= st then return end
+		if self:busy() then
+			self[kind], self.waiting[kind] = nil, true -- read when combat ends
+			return
+		end
 		self.tainted = false
 		if self:npcID() ~= st.id or self.tainted then return end
 		read(self, st)
 	end)
+end
+
+-- PLAYER_REGEN_ENABLED: a window opened or due to be read in combat and not closed since is opened
+-- anew (the NPC, its place and the content are taken as at a show).
+function Reader:CombatEnded()
+	if self:busy() then return end
+	local w = self.waiting
+	if w.trainer then self:TrainerShow() end
+	if w.merchant then self:MerchantShow() end
 end
 
 -- Trainer ---------------------------------------------------------------------
@@ -231,7 +251,7 @@ function Reader:TrainerUpdate()
 	self:schedule("trainer", self.trainer, NpcReader.DEBOUNCE, Reader.readTrainer)
 end
 
-function Reader:TrainerClosed() self.trainer = nil end
+function Reader:TrainerClosed() self.trainer, self.waiting.trainer = nil, nil end
 
 function Reader:readTrainer(st)
 	if not self:get("tradeskillTrainer") or self.tainted then return end -- a class trainer
@@ -321,7 +341,7 @@ function Reader:MerchantUpdate()
 	self:schedule("merchant", self.merchant, NpcReader.DEBOUNCE, Reader.readMerchant)
 end
 
-function Reader:MerchantClosed() self.merchant = nil end
+function Reader:MerchantClosed() self.merchant, self.waiting.merchant = nil, nil end
 
 local function costLess(a, b)
 	if a[1] ~= b[1] then return a[1] < b[1] end
