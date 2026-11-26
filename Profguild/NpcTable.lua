@@ -140,7 +140,8 @@ local function entryHash(npcHash, part, id) return KeyHash((KeyHash((npcHash + p
 
 -- Table ----------------------------------------------------------------------
 -- tab = NpcData.New(saved, now[, limits]): saved = { e = EPOCH, s = { [npcID] = packed } } is loaded
--- (other epochs and broken sheets dropped) and kept current at every change; now() gives server
+-- (other epochs and broken sheets dropped, sheets of days after tomorrow held back: see New) and
+-- kept current at every change; now() gives server
 -- seconds; limits = { t=, v=, entries=, sheets= } replaces the constants (tests).
 -- Limits, after every merge (once for all sheets of an NU, MergeAll), in this order: entries per sheet, entries, sheets. The older goes first
 -- (an entry by seen, a sheet by its newest entry), then by a hash of the key.
@@ -158,32 +159,43 @@ function NpcData.New(saved, now, limits)
 		le = limits.entries or NpcData.LIMIT_ENTRIES, ls = limits.sheets or NpcData.LIMIT_SHEETS }, Table)
 	local src = saved.s
 	if saved.e ~= NpcData.EPOCH or type(src) ~= "table" then src = {} end
-	-- A clock not known yet (0) or behind the saved days (most saved sheets newer than tomorrow)
-	-- would drop the saved sheets as coming from the future: they are left untouched and this
-	-- session's table lives in memory only (tab.detached).
-	local today, n, ahead = tab:Today(), 0, 0
-	for _, list in pairs(src) do
-		n = n + 1
-		if type(list) == "table" and type(list[8]) == "number" and list[8] > today + 1 then ahead = ahead + 1 end
-	end
-	if today <= 0 or ahead * 2 > n then
-		tab.saved, tab.detached, tab.real, src = {}, true, saved, {}
-	end
+	-- A clock not known yet (0): the saved sheets are left untouched and this session's table
+	-- lives in memory only (tab.detached).
+	local today = tab:Today()
+	if today <= 0 then tab.saved, tab.detached, tab.real, src = {}, true, saved, {} end
 	tab:reset()
+	-- A saved sheet whose newest day is after tomorrow (the clock is behind the day it was saved)
+	-- and that is valid as of that day is held back: it stays in saved as it is, is not held,
+	-- counted or sent, no later write replaces it (Clear drops it), and it loads at a login whose
+	-- clock allows it.
+	local future = {}
 	for key, list in pairs(src) do
-		local id, s = NpcData.Unpack(list, tab.day)
-		if s and id == key then
-			trim(s.t, tab.lt)
-			trim(s.v, tab.lv)
-			tab:put(id, s)
+		local base = type(list) == "table" and list[8]
+		if type(base) == "number" and base > today + 1 and base == floor(base) then
+			local id, s = NpcData.Unpack(list, base)
+			if s and id == key then future[key] = list end
 		end
 	end
+	for key, list in pairs(src) do
+		if future[key] then
+			tab.saved.s[key] = list
+		else
+			local id, s = NpcData.Unpack(list, tab.day)
+			if s and id == key then
+				trim(s.t, tab.lt)
+				trim(s.v, tab.lv)
+				tab:put(id, s)
+			end
+		end
+	end
+	tab.future = future
 	tab:limit()
 	return tab
 end
 
 function Table:reset()
 	self.saved.e, self.saved.s = NpcData.EPOCH, {}
+	self.future = {}
 	self.sheets, self.sizes, self.newest = {}, {}, {}
 	self.nSheets, self.nEntries = 0, 0
 	self.day = self:Today()
@@ -205,7 +217,8 @@ function Table:put(id, s)
 		self.sizes[id], self.newest[id] = n, newest
 		self.nEntries, self.nSheets = self.nEntries + n, self.nSheets + 1
 	end
-	self.saved.s[id] = s and NpcData.Pack(id, s) or nil
+	-- a held-back sheet keeps its saved place: what this session holds for that NPC is not saved
+	if not self.future[id] then self.saved.s[id] = s and NpcData.Pack(id, s) or nil end
 	self.cuts[id], self.hashes[id], self.total, self.ids = nil, nil, nil, nil
 end
 

@@ -1156,31 +1156,64 @@ end)
 
 H.test("npc data: a clock behind the saved days or not known leaves the saved sheets untouched", function()
 	local T = D + 300
+	local function n(t) local k = 0 for _ in pairs(t) do k = k + 1 end return k end
+	local reading = function(name, r) return { name = name, map = 1453, x = 56, y = 64, t = { [r] = { skill = 50, copper = 500 } }, v = {} } end
+	-- 10 sheets 10 days old, 3 of today (rereview clock_partial)
 	local saved = {}
-	local tab = newTable(T, saved)
-	tab:OwnVisit(5001, { name = "Maria", map = 1453, x = 56, y = 64, t = { [3915] = { skill = 50, copper = 500 } }, v = {} })
-	tab:OwnVisit(5002, { name = "Jormund", t = { [3916] = { skill = 60 } }, v = {} })
+	local tab = newTable(T - 10, saved)
+	for i = 1, 10 do tab:OwnVisit(5000 + i, reading("Old" .. i, 3915)) end
+	tab = newTable(T, saved)
+	for i = 1, 3 do tab:OwnVisit(6000 + i, reading("New" .. i, 3916)) end
+	H.eq(n(saved.s), 13)
+	local fresh = {}
+	for i = 1, 3 do fresh[i] = copy(saved.s[6000 + i]) end
+	-- two days back: the 3 of the future stay saved byte for byte, not held, counted or sent
+	local back = newTable(T - 2, saved)
+	H.ok(not back.detached, "not detached")
+	H.eq(n(saved.s), 13, "none dropped")
+	for i = 1, 3 do
+		H.ok(deepEq(saved.s[6000 + i], fresh[i]), "kept untouched " .. i)
+		H.eq(back:Get(6000 + i), nil, "not held " .. i)
+	end
+	H.eq((back:Count()), 10, "the 10 others")
+	for _, id in ipairs(back:SendableIDs()) do H.ok(id < 6000, "not sent " .. id) end
+	-- later writes keep them: an own visit, a received sheet, a write of the same NPC, the limits,
+	-- expiry on a new day
+	back:OwnVisit(7001, reading("Other", 3917))
+	back:MergeIn(6001, { name = "Mate", nd = T - 2, t = { [3916] = { T - 2, 0, 0, 0, 0 } }, v = {} })
+	back:Write(6002, reading("Written", 3916))
+	back:OwnVisit(6003, reading("Visited", 3916))
+	local other = copy(saved)
+	local lim = ND.New(other, function() return (T - 2) * 86400 end, { sheets = 2 })
+	H.eq((lim:Count()), 2)
+	for i = 1, 3 do H.ok(deepEq(other.s[6000 + i], fresh[i]), "kept by the limits " .. i) end
+	back:Expire()
+	for i = 1, 3 do H.ok(deepEq(saved.s[6000 + i], fresh[i]), "still untouched " .. i) end
+	-- the right clock again: all of them load
+	tab = newTable(T, saved)
+	for i = 1, 3 do H.ok(tab:Get(6000 + i), "loaded again " .. i) end
+	H.ok(tab:Get(5001), "old ones too")
+	-- a broken sheet of the future is dropped as before
+	saved.s[6009] = { 6009, "x", 0, false, false, false, false, T + 5, "junk" }
+	newTable(T, saved)
+	H.eq(saved.s[6009], nil, "broken: dropped")
+	-- clock 0 and nil: detached, saved untouched, the table works in memory
 	local copySaved = copy(saved)
-	-- two days back, 0 and nil: saved untouched, the table works in memory
-	for _, clock in ipairs({ (T - 2) * 86400, 0, false }) do
-		local back = ND.New(saved, function() return clock or nil end)
-		H.ok(back.detached, "detached at " .. tostring(clock))
-		H.eq(back:Count(), 0)
-		back:OwnVisit(5003, { name = "Nata", t = { [3917] = { skill = 1 } }, v = {} })
+	for _, clock in ipairs({ 0, false }) do
+		local x = ND.New(saved, function() return clock or nil end)
+		H.ok(x.detached, "detached at " .. tostring(clock))
+		H.eq(x:Count(), 0)
+		x:OwnVisit(5003, { name = "Nata", t = { [3917] = { skill = 1 } }, v = {} })
 		H.ok(deepEq(saved, copySaved), "saved untouched at " .. tostring(clock))
 	end
-	-- the right clock again: all there
-	tab = newTable(T, saved)
-	H.ok(not tab.detached and tab:Get(5001) and tab:Get(5002), "loaded with the right clock")
-	-- a minority of sheets from a clock that ran ahead once: loaded, those dropped
-	tab = newTable(T + 3, saved)
-	tab:OwnVisit(5009, { name = "Ahead", t = { [3918] = { skill = 1 } }, v = {} })
-	tab = newTable(T, saved)
-	H.ok(not tab.detached and tab:Get(5001) and not tab:Get(5009), "the one from the future goes")
-	-- clear on a detached table clears the saved one too
-	local back = ND.New(saved, function() return (T - 5) * 86400 end)
+	-- Clear drops the held-back sheets too, also on a detached table
+	back = newTable(T - 2, saved)
 	back:Clear()
 	H.eq(next(saved.s), nil, "cleared")
+	tab = newTable(T, saved)
+	tab:OwnVisit(5001, reading("Maria", 3915))
+	ND.New(saved, function() return 0 end):Clear()
+	H.eq(next(saved.s), nil, "cleared while detached")
 end)
 
 H.test("npc data: names with any UTF-8 letters pass, control bytes and | do not (also under PUC Lua)", function()
