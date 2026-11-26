@@ -344,3 +344,10 @@ H.test("VersionNewer compares three numbers and ignores what is no version", fun
 	H.ok(not Store.VersionNewer(nil, "0.1.13"))
 	H.ok(not Store.VersionNewer(5, "0.1.13"))
 end)
+
+H.test("Validate keeps every UTF-8 letter of a name (also under PUC Lua), strips the control bytes", function()
+	for _, n in ipairs({ "\195\157rsa", "J\195\182rmund", "\195\128\195\191", "\128\159\160\255" }) do
+		H.eq(Store.Validate({ g = "G", v = 1, n = n, p = {} }).n, n, "kept: " .. n)
+	end
+	H.eq(Store.Validate({ g = "G", v = 1, n = "a\0b\1c\31d\127e|f", p = {} }).n, "abcdef", "control bytes and | go")
+end)

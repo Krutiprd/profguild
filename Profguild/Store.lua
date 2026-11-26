@@ -34,7 +34,9 @@ end
 -- UI escape sequences ("|T" texture, "|c" color, "|H" link) or control characters.
 local function cleanName(s)
 	if not shortStr(s, L.maxStr) then return "?" end
-	s = s:gsub("[|%c]", "")
+	-- the control bytes spelled out: %c follows the locale under PUC Lua 5.1 and may take UTF-8
+	-- bytes such as 0x9D (the second byte of "Ý")
+	s = s:gsub("[%z\1-\31\127|]", "")
 	return s ~= "" and s or "?"
 end
 
