@@ -27,6 +27,8 @@ be directly inside `AddOns\Profguild\`). Then open each of your professions once
 | `/pg sync` | Ask the guild for updates |
 | `/pg scan` | Read the open profession window now |
 | `/pg catalog clear [profession]` | Forget the recipe catalog (one profession or all) |
+| `/pg npc` | What the guild has learned from trainers and vendors (NPCs, recipes, skipped names) |
+| `/pg npc clear` | Forget the trainer and vendor data of your faction (the guild sends it again) |
 | `/pg status` | Database size, guildmates seen, queue, traffic, last error |
 | `/pg debug` | Print what the game API returns (saved to `ProfguildDB.debug`) |
 | `/pg debug on` / `off` | Verbose logging in chat |

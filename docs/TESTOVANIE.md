@@ -5,7 +5,7 @@ Postup pre prvý test v guilde. Treba aspoň 2 ľudí, ideálne 3.
 ## 1. Inštalácia
 
 1. Zatvor hru.
-2. Rozbaľ `Profguild-0.6.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
+2. Rozbaľ `Profguild-0.7.0.zip` do `World of Warcraft\_forever_\Interface\AddOns\`.
    Správne je `AddOns\Profguild\Profguild.toc`, nie `AddOns\Profguild\Profguild\Profguild.toc`.
 3. Spusti hru, v zozname addonov musí byť Profguild zapnutý a bez „Out of date“.
 4. Odporúčané: zapni zobrazovanie Lua chýb (`/console scriptErrors 1`).
@@ -92,7 +92,37 @@ Treba 2–3 hráčov s Profguildom 0.4.0.
 | C sa prihlási neskôr | Do minúty vidí tie isté požiadavky v tom istom stave |
 | `/pg status` | Riadok „Požiadavky: N otvorených, M prevzatých …“ |
 
-## 6. Hlásenie chyby
+## 6. Trainery a predajcovia (0.7.0)
+
+Treba 2 hráčov s Profguildom 0.7.0 v jednej guilde a rovnakej frakcii; A je skúsený, B práve
+založená postava alebo hráč, ktorý sa práve prihlásil. Požiadavky aj ceny z 0.3.0–0.6.0 fungujú ako predtým.
+
+| Krok | Očakávaný výsledok |
+| --- | --- |
+| A otvorí trénera povolania a zavrie okno | Žiadna Lua chyba, okno trénera sa nezmenilo (filtre ostali). `/pg npc` ukáže +1 NPC a počet receptov |
+| B po ~1 minúte otvorí v `/pg` recept, ktorý ten tréner učí, a dá „NÁJSŤ RECEPT“ | Riadok „Tréner: <meno>“ so zónou, polohou a cenou so `~` (cena od spoluhráča); hover ukáže „videné pred n dňami“ |
+| A otvorí predajcu receptov (recept s cenou, s „obmedzené množstvo“) | `/pg npc` ukáže predajcu; u B riadok „Vendor: …“ s cenou, „obmedzené množstvo“ |
+| A znova otvorí toho istého trénera s iným filtrom (napr. skryté známe recepty) | Nič sa nestratí: u B ostanú všetky recepty z predošlého čítania |
+| Nová postava C sa prihlási a hneď (do 5 s) otvorí trénera | Dáta od A a B ostanú, C dostane tabuľku guildy do pár minút (`/pg npc` rastie) |
+| A otvorí trénera v boji (alebo B v boji otvorí predajcu) | Nič sa nezapíše, žiadna chyba; po boji a opätovnom otvorení sa zapíše |
+| A vidí vlastnú cenu iného dňa | Vlastná cena z posledných 30 dní je bez `~`, cena guildy so `~` |
+| Recept bez trénera aj predajcu | „zdroj nie je známy“ / „pravdepodobne tréner, guilda zatiaľ žiadneho nevidela“ / „guilda zatiaľ nevidela vendora“, aukcia ak recept má predmet |
+| Zelený rám | Má ho riadok s najnižšou cenou (aspoň dva riadky s cenou) |
+| Tlačidlo „NÁJSŤ RECEPT“ znova, „SPÄŤ K SUROVINÁM“, iný recept, iná karta | Návrat k surovinám, žiadna Lua chyba, kolieskom sa posúva zoznam |
+| Tlačidlo „Mapa“ pri trénerovi | Na mape sa objaví špendlík na mieste NPC (alebo TomTom, ak je) |
+| `/pg status` a `/pg npc` | Riadok o NPC dátach; počty NPC, receptov a preskočených mien |
+| `/pg npc clear` | Dáta frakcie zmiznú lokálne; do pár minút ich guilda pošle späť |
+
+Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
+
+- Špendlík na mape (`Mapa`): ukáže sa, v správnom meste a na správnom mieste? Bez TomTom aj s ním.
+- Predajca s inou menou (žetóny, odznaky, predmet namiesto zlata): cena a „iná cena“ v riadku.
+- Obmedzený počet pri predajcovi: riadok hovorí „obmedzené množstvo“.
+- Dve reputácie: tá istá cena pri inej reputácii (zľava) nerobí zmätok; po čase zostane základná cena.
+- Tréner s ponechanými všetkými filtrami (zobraziť aj nedostupné/známe): recepty sa prečítajú, žiadne dvojité.
+- Neanglické názvy povolaní a receptov (klient v inom jazyku): recepty sa priradia, `/pg npc` nehlási veľa preskočených mien.
+
+## 7. Hlásenie chyby
 
 Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
 
@@ -116,7 +146,7 @@ sa ukáže „Hlásenie ide autorovi cez guildu…“ a neskôr „Tvoje hlásen
 | Autor: `/pg bug inbox` | Posledné hlásenia s menom, časom, verziou a textom |
 | `/pg status` | Riadok „Nesené hlásenia chýb: …, autor v guilde: áno“ |
 
-## 7. Čo poslať späť
+## 8. Čo poslať späť
 
 - Výstup `/pg debug` a `/pg status` od každého testera.
 - Každú Lua chybu (screenshot alebo text z BugSack); Profguild si ich pamätá aj sám (`errors`).

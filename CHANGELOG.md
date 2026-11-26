@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0 – 2026-11-26
+
+- The guild learns where recipes are had. Whoever opens a profession trainer or a vendor of
+  recipes feeds the guild's table: which recipes the NPC teaches or sells, from which skill, for
+  how much (also other costs and limited stock), and where the NPC stands. Nobody has to do
+  anything for it; nothing in the trainer or merchant window is changed. Data is merged entry by
+  entry with the day it was read, so a partial reading never wipes a fuller one, and entries
+  nobody reads again expire after 120 days.
+- The data travels on its own channel (`ProfguildNPC`) in small, throttled messages, behind
+  recipes, prices and requests; 0.6.0 clients ignore it and are not disturbed. Only the faction's
+  data is shared, and only inside the guild.
+- "FIND RECIPE" beside "REQUEST CRAFT" shows where the recipe is had: the auction house, the
+  trainers and vendors the guild has seen (price, zone and position, limited stock, other costs;
+  `~` marks a price from guildmates) and a row for drop, quest or crafted. "MAP" sets the game's map
+  pin at the NPC (or a TomTom waypoint when TomTom is there). "BACK TO REAGENTS" returns.
+- Skill numbers (learn, yellow, green, grey) sit at the right end of the profession line and use
+  the trainer's data when the guild knows it; Leveling uses the same numbers.
+- `/pg npc` shows what is held (NPCs, recipes, readings skipped for an unclear name),
+  `/pg npc clear` forgets the data of your faction (the guild sends it again); `/pg status` has a
+  line for it.
+
 ## 0.6.0 – 2026-11-25
 
 - Recipe groups collapse and open with a click on their header; the choice is remembered. A
