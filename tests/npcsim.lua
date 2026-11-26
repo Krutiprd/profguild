@@ -10,13 +10,17 @@
 --   c = sim:client{ name=, sheets={ [id]=sheet } | packed=, block=fn(t), faction=, offset=, limits=, ns= }
 --   sim:login(c) / sim:logout(c) / sim:run(seconds) / sim:equal(list) / sim:bytes(type|nil)
 --   sim.cut = { [a] = b }: a's messages do not reach b
+--   npcsim.work = true (run_npc_sim.lua --work): every client runs its table's work and NpcSync's
+--     messages on its own NpcWork, as the game does: frames of 1/60 s, a budget of BUDGET units
+--     (one unit an entry); npcsim.workStats = { queued = most messages waiting, overflow = dropped
+--     by the full queue, errors = jobs ended in an error } for the last sim made
 return function(H)
 	H.loadLibs()
 	local LS, LD = LibStub("LibSerialize"), LibStub("LibDeflate")
 	local floor, ceil, random, min, max = math.floor, math.ceil, math.random, math.min, math.max
 
 	local function loadNs(epoch)
-		local ns = H.newNamespace({ "NpcData.lua", "NpcTable.lua" })
+		local ns = H.newNamespace({ "NpcWork.lua", "NpcData.lua", "NpcTable.lua" })
 		if epoch then ns.NpcData.EPOCH, ns.NpcData.PROTOCOL = epoch, epoch end
 		H.loadAddonFile(ns, "NpcSync.lua")
 		-- NPCSIM_SET="NI_EVERY=0,SEND_CAP=1e9": NpcSync constants changed, to measure a rule's worth
@@ -129,8 +133,11 @@ return function(H)
 	local Sim = {}
 	Sim.__index = Sim
 
+	npcsim.BUDGET = 1333 -- units per frame: NpcWork.BUDGET (4 ms) at NpcWork.RATE (0.003 ms a unit)
+
 	function npcsim.new(o)
 		o = o or {}
+		npcsim.workStats = { queued = 0, overflow = 0, errors = 0 }
 		if o.seed then math.randomseed(o.seed) end
 		local sim = setmetatable({ t = 0, q = {}, n = 0, seq = 0, clients = {}, byName = {},
 			bytesBy = {}, countBy = {}, evil = 0, loss = o.loss or 0.02, load = o.load or 0,
@@ -187,7 +194,13 @@ return function(H)
 			for _, o in ipairs(self.clients) do
 				if o ~= c and o.online and o.sync and not (self.cut and self.cut[c] == o)
 					and (self.loss == 0 or random() < p) then
-					o.sync:OnMessage(msg, c.name, size)
+					local sync = o.sync
+					local before = sync.stats.overflow or 0
+					sync:OnMessage(msg, c.name, size)
+					local ws = npcsim.workStats
+					local q = sync.queued and (sync.queued.NU + sync.queued.other) or 0
+					if q > ws.queued then ws.queued = q end
+					ws.overflow = ws.overflow + (sync.stats.overflow or 0) - before
 				end
 			end
 		end)
@@ -245,7 +258,21 @@ return function(H)
 			tok = 10, tt = 0, av = 4000, at = 0, online = false, sess = 0, evil = o.evil, group = o.group or 1 }
 		if not o.evil then
 			local saved = { e = ns.NpcData.EPOCH, s = o.packed or (o.sheets and npcsim.pack(o.sheets)) or {} }
-			c.tab = ns.NpcData.New(saved, function() return self.clock0 + floor(self.t + c.offset) end, o.limits)
+			if npcsim.work then
+				local sim, units = self, 0
+				c.work = ns.NpcWork.New({
+					clock = function() return units end,
+					frame = function() return floor(sim.t * 60) end,
+					defer = function(fn) sim:at(1 / 60, fn) end,
+					budget = function() return npcsim.BUDGET end,
+					rate = 1, spend = function(u) units = units + u end,
+					error = function(e, stack)
+						npcsim.workStats.errors = npcsim.workStats.errors + 1
+						print("work error: " .. tostring(stack or e))
+					end,
+				})
+			end
+			c.tab = ns.NpcData.New(saved, function() return self.clock0 + floor(self.t + c.offset) end, o.limits, c.work)
 		end
 		self.clients[#self.clients + 1] = c
 		self.byName[c.name] = c

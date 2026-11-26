@@ -1101,3 +1101,161 @@ H.test("npc: a sync made after the login hello (faction known late) announces it
 	H.ok(ns.npcSync, "made")
 	H.ok(#sentNpc(ns, from, "ND") >= 1, "ND within 30 s, not at the next 900 s hello")
 end)
+
+-- Full tables loading in slices (NpcWork) ------------------------------------------------------
+
+-- A saved table of n sheets of per trainer entries, NPC IDs from base.
+local function fullSaved(ns, n, per, base)
+	local ND = ns.NpcData
+	local today = math.floor(GetServerTime() / 86400)
+	local s = {}
+	for id = base + 1, base + n do
+		local sh = { name = "Npc " .. id, nd = today, t = {}, v = {} }
+		for i = 1, per do
+			local d = today - (i % 20)
+			sh.t[id * 100 + i] = { d, 10, d, 0, 0 }
+		end
+		s[id] = ND.Pack(id, sh)
+	end
+	return { e = ND.EPOCH, s = s }
+end
+
+local function deepCopy(v)
+	if type(v) ~= "table" then return v end
+	local c = {}
+	for k, x in pairs(v) do c[k] = deepCopy(x) end
+	return c
+end
+
+local function same(a, b)
+	if a == b then return true end
+	if type(a) ~= "table" or type(b) ~= "table" then return false end
+	for k, v in pairs(a) do if not same(v, b[k]) then return false end end
+	for k in pairs(b) do if a[k] == nil then return false end end
+	return true
+end
+
+-- Logged in on saved large tables (290 sheets of 30 entries in npcOwn and in the guild's: with the
+-- import within the limits, so that no sheet of the test goes), still loading.
+local function bootFull()
+	local ns = boot()
+	ProfguildDB.npcOwn.Alliance = fullSaved(ns, 290, 30, 50000)
+	ProfguildDB.guilds[ns.guildKey].npc.Alliance = fullSaved(ns, 290, 30, 60000)
+	ns = boot(nil, true)
+	H.ok(ns.npcWork:Busy(), "still loading after the login")
+	return ns
+end
+
+local function npcText(ns, t, fields)
+	local msg = { t = t, pv = ns.NpcData.PROTOCOL, e = ns.NpcData.EPOCH, f = "Alliance", s = ANA, h = 12345 }
+	for k, v in pairs(fields) do msg[k] = v end
+	return ns.Comm.Encode(msg)
+end
+
+local function untilDone(ns)
+	local n = 0
+	while ns.npcWork:Busy() and n < 2000 do M.advance(0.5) n = n + 1 end
+	H.ok(not ns.npcWork:Busy(), "the work ended")
+end
+
+H.test("npc: while full tables load, the window, FIND, /pg npc, /pg status, a reading and ND NI NR NU work; nothing lost", function()
+	cleanGame()
+	local ns = bootFull()
+	H.ok(ns.npc.loading or ns.npcOwn.loading, "a table half loaded")
+	local recorded, record = {}, ns.Bugs.Record
+	ns.Bugs.Record = function(msg, ...) recorded[#recorded + 1] = tostring(msg) return record(msg, ...) end
+	-- the window, FIND RECIPE and the Leveling list
+	M.fire("TRADE_SKILL_SHOW")
+	M.advance(5)
+	H.ok(ns.npcWork:Busy(), "still loading")
+	ns.RecipeData[RECIPE] = { ITEM, "v", 0, 60, 80 }
+	local UI = ns.UI
+	UI:Toggle()
+	UI:SetView("recipes")
+	UI:SetCategory(197)
+	H.ok(clickRecipe(UI, RECIPE), "recipe listed")
+	UI:ToggleFind()
+	H.ok(UI.findOpen, "FIND open while loading")
+	UI:SetView("leveling")
+	-- the commands
+	local from = #M.chat
+	SlashCmdList.PROFGUILD("npc")
+	SlashCmdList.PROFGUILD("status")
+	H.ok(#M.chat > from, "they answer")
+	-- an own reading and messages of every kind
+	ns.npcReader.onReading(5001, trainerReading())
+	receiveNU(ns, 7001, vendorReading(2000))
+	ns.Comm:OnCommReceived("ProfguildNPC", npcText(ns, "ND", { n = 3 }), "GUILD", "Ana")
+	ns.Comm:OnCommReceived("ProfguildNPC", npcText(ns, "NI", { r = 5, i = { 50001 }, c = { 7 } }), "GUILD", "Bob")
+	ns.Comm:OnCommReceived("ProfguildNPC", npcText(ns, "NR", { to = "Frost", i = { 60001 } }), "GUILD", "Cid")
+	H.ok(ns.Comm.npcQueued > 0, "received texts wait for the loading")
+	H.ok(ns.npcWork:Busy(), "still loading")
+	untilDone(ns)
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	H.eq(#recorded, 0, table.concat(recorded, " | "))
+	H.ok(ns.npcOwn:Get(5001) and ns.npc:Get(5001), "the reading taken by both tables")
+	H.ok(ns.npc:Get(7001), "the NU merged")
+	H.ok(ns.npc:Get(60001) and ns.npc:Get(50001), "both loaded, npcOwn imported")
+	H.eq(ns.npcSync.stats.recv.ND, 1) H.eq(ns.npcSync.stats.recv.NI, 1) H.eq(ns.npcSync.stats.recv.NR, 1)
+	H.eq(ns.npcSync.stats.overflow, 0)
+	H.ok(ProfguildDB.guilds[ns.guildKey].npc.Alliance.s[7001], "saved")
+	UI:SetView("recipes")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	cleanGame()
+end)
+
+H.test("npc: a guild change while full tables load gives no error; the new guild gets npcOwn", function()
+	local ns = bootFull()
+	local keyA = ns.guildKey
+	ns.npcReader.onReading(5001, trainerReading())
+	-- an NU of guild A that waits for the loading
+	receiveNU(ns, 7003, vendorReading(3000))
+	H.ok(ns.Comm.npcQueued > 0, "waits")
+	_G.GetGuildInfo = function() return "Red Dawn", "Member", 3, nil end
+	M.fire("PLAYER_GUILD_UPDATE", "player")
+	M.advance(3)
+	H.ok(ns.guildKey ~= keyA, "guild changed")
+	receiveNU(ns, 7002, vendorReading(2000))
+	untilDone(ns)
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	H.ok(ns.npc:Get(5001) and ns.npc:Get(50001), "npcOwn and the reading imported into the new guild")
+	H.ok(ns.npc:Get(7002), "the new guild's NU")
+	H.ok(ProfguildDB.guilds[keyA].npc.Alliance.s[60001], "A's saved table kept")
+	H.eq(ns.npc:Get(60001), nil, "nothing of A in B")
+	H.eq(ns.npc:Get(7003), nil, "A's NU that waited does not reach B")
+end)
+
+H.test("npc: saved data stays valid at a /reload mid-load; logout runs the work to its end", function()
+	local ns = bootFull()
+	local key = ns.guildKey
+	local original = deepCopy(ProfguildDB.guilds[key].npc.Alliance)
+	H.ok(same(ProfguildDB.guilds[key].npc.Alliance, original), "the guild's saved table untouched while it loads")
+	-- the game ends without finishing (a crash, a forced quit): the next login loads all of it
+	ns = boot(nil, true)
+	untilDone(ns)
+	H.eq(ns.npcOwn.nSheets, 290, "every sheet of npcOwn held")
+	H.eq(ns.npc.nSheets, 580, "every sheet of the guild's and npcOwn imported")
+	-- a reading during loading, then logout: the work ends before the game saves
+	ns = boot(nil, true)
+	ns.npcReader.onReading(5001, trainerReading())
+	H.ok(ns.npcWork:Busy(), "the reading waits")
+	M.fire("PLAYER_LOGOUT")
+	H.ok(not ns.npcWork:Busy(), "done at logout")
+	H.ok(ProfguildDB.npcOwn.Alliance.s[5001], "the reading saved in npcOwn")
+	H.ok(ProfguildDB.guilds[key].npc.Alliance.s[5001], "and in the guild's table")
+	H.ok(ProfguildDB.guilds[key].npc.Alliance.s[60290], "the guild's sheets saved")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+end)
+
+H.test("npc: a flood of NPC texts while the work is busy is bounded; the excess is counted", function()
+	local ns = bootFull()
+	-- the clock of the budget moves (1 ms a reading), so that the frame's budget is spent
+	_G.debugprofilestop = function() M.cpu = M.cpu + 1 return M.cpu end
+	local text = npcText(ns, "ND", { n = 1 })
+	for i = 1, ns.Comm.NPC_QUEUE + 50 do ns.Comm:OnCommReceived("ProfguildNPC", text, "GUILD", "Evil" .. i) end
+	H.eq(ns.Comm.npcQueued, ns.Comm.NPC_QUEUE, "the queue full")
+	H.eq(ns.npcSync.stats.overflow, 50, "the excess counted")
+	untilDone(ns)
+	H.eq(ns.Comm.npcQueued, 0, "drained")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+end)

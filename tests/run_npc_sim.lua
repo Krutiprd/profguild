@@ -1,9 +1,12 @@
 -- The sharing scenarios of the design's Verification, each against its target, on the simulated
 -- guild (tests/npcsim.lua). Ported from npcsim/r15/run.lua.
---   luajit tests/run_npc_sim.lua [--seeds N] [--jobs N] [--only pattern] [--skip pattern] [--extra] [--short]
+--   luajit tests/run_npc_sim.lua [--seeds N] [--jobs N] [--only pattern] [--skip pattern] [--extra] [--short] [--work]
 -- (from the repository root; --jobs runs that many scenario processes at once). NPCSIM_SET="NAME=v,..."
 -- overrides NpcSync constants (tests/npcsim.lua), to measure what a rule is worth.
 -- prints one line "ok|FAIL name value target" per scenario and seed; exit code 1 on a failure.
+-- --work: every client runs its work in frames (NpcWork, see tests/npcsim.lua); each line then
+-- tells the most messages that waited and how many the full queue dropped, which fails a
+-- scenario without forged traffic (evil-*), as does a job that ended in an error.
 -- Loaded by tests/run.lua (with the harness as argument) it registers the short set as tests.
 local H = ...
 local asTests = type(H) == "table"
@@ -47,7 +50,8 @@ local function visit(sim, c, ids, vendor, W)
 		local id, r = npcsim.visitReading(ids, vendor, W)
 		local changed
 		if c.sync then changed = c.sync:OwnVisit(id, r) else changed = c.tab:OwnVisit(id, r) end
-		if changed then return id end
+		-- nil: it waits for the client's work (--work), as one visit
+		if changed or changed == nil then return id end
 	end
 end
 
@@ -650,6 +654,11 @@ local SHORT = {
 
 local function runOne(e, seed)
 	local ok, value, target, x = e.fn(seed, unpack(e.args))
+	if npcsim.work then
+		local ws = npcsim.workStats
+		value = ("%s queued<=%d overflow=%d errors=%d"):format(value, ws.queued, ws.overflow, ws.errors)
+		if ws.errors > 0 or (ws.overflow > 0 and not e.name:find("^evil")) then ok = false end
+	end
 	if e.info then ok = true end
 	return ok, ("%s %s seed=%d %s | target %s%s"):format(e.info and "info" or (ok and "ok" or "FAIL"), e.name, seed, value, target,
 		x and (" value=" .. floor(x)) or "")
@@ -677,6 +686,8 @@ while arg[i] do
 	elseif arg[i] == "--one" then one = { arg[i + 1], tonumber(arg[i + 2]) } i = i + 2
 	elseif arg[i] == "--extra" then
 		for _, e in ipairs(EXTRA) do MATRIX[#MATRIX + 1] = e end
+	elseif arg[i] == "--work" then
+		npcsim.work = true
 	elseif arg[i] == "--short" then
 		MATRIX = {}
 		for _, s in ipairs(SHORT) do add(s[1], s[2], select(3, unpack(s))) end
@@ -725,7 +736,8 @@ else
 		local batch = {}
 		for j = k, math.min(#work, k + jobs - 1) do
 			local w = work[j]
-			batch[#batch + 1] = io.popen(('luajit "%s" --one "%s" %d 2>&1'):format(self, w[1].name, w[2]))
+			batch[#batch + 1] = io.popen(('luajit "%s" --one "%s" %d%s 2>&1'):format(self, w[1].name, w[2],
+				npcsim.work and " --work" or ""))
 		end
 		for _, p in ipairs(batch) do
 			local out = p:read("*a")
