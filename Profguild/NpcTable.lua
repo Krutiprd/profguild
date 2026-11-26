@@ -338,6 +338,43 @@ function Table:OwnVisit(id, reading)
 	return not deepEqual(before, self:Sendable(id))
 end
 
+-- A reading kept as the last known one (npcOwn, no own-visit rules): every register read replaces
+-- the held one with today's day, whatever its value; what was not read stays. New entries enter a
+-- sheet at its entry limit only where an entry older than RENEW days makes room. Whether the sheet
+-- changed.
+function Table:Write(id, reading)
+	check(self)
+	if not validID(id) then return false end
+	local fresh = NpcData.Visit(nil, reading, self.day, { t = self.lt, v = self.lv })
+	if not fresh then return false end
+	local held = self.sheets[id]
+	local h = held or EMPTY
+	local m = { name = h.name, nd = h.nd, map = h.map, x = h.x, y = h.y, pd = h.pd, t = {}, v = {} }
+	for k, e in pairs(h.t) do m.t[k] = { e[1], e[2], e[3], e[4], e[5] } end
+	for k, e in pairs(h.v) do m.v[k] = { e[1], copyPrice(e[2]), e[3] } end
+	if fresh.name then m.name, m.nd = fresh.name, fresh.nd end
+	if fresh.map then m.map, m.x, m.y, m.pd = fresh.map, fresh.x, fresh.y, fresh.pd end
+	for k, e in pairs(fresh.t) do
+		local r = m.t[k] or { 0, 0, 0, 0, 0 }
+		r[1] = e[1]
+		if e[2] ~= 0 then r[2], r[3] = e[2], e[3] end
+		if e[4] ~= 0 then r[4], r[5] = e[4], e[5] end
+		m.t[k] = r
+	end
+	for k, e in pairs(fresh.v) do
+		local r = m.v[k] or { 0, false, 0 }
+		r[1] = e[1]
+		if e[2] then r[2], r[3] = e[2], e[3] end
+		m.v[k] = r
+	end
+	makeRoom(m.t, h.t, self.lt, self.day)
+	makeRoom(m.v, h.v, self.lv, self.day)
+	if held and deepEqual(m, held) then return false end
+	self:put(id, m)
+	self:limit()
+	return true
+end
+
 -- The registers of own table own (npcOwn) enter by the own-visit rules as of their own days (older
 -- days change nothing; at an equal day the greater value stays), then merge. Idempotent.
 function Table:Import(own)

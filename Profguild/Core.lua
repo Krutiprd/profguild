@@ -5,6 +5,7 @@ local ADDON, ns = ...
 
 local Store, Sync, Scanner, Comm, Reagents, Catalog = ns.Store, ns.Sync, ns.Scanner, ns.Comm, ns.Reagents, ns.Catalog
 local GuildPrices, Requests, Reports = ns.GuildPrices, ns.Requests, ns.Reports
+local NpcData, NpcSync = ns.NpcData, ns.NpcSync
 
 ns.Config = {
 	staleDays = 30,          -- hide members who have not logged in for this many days
@@ -596,6 +597,69 @@ function ns.CheckReports()
 	end
 end
 
+-- Trainers and vendors (NpcData, NpcSync) ------------------------------------------------
+-- ns.npcOwn: what this account read itself, per faction (ProfguildDB.npcOwn[faction]), the last
+-- known reading of every register. ns.npcGuild: the guild's table of the faction
+-- (ProfguildDB.guilds[key].npc[faction]), shared by ns.npcSync. ns.npc: the table the window shows,
+-- the guild's, else npcOwn. Both are made once the faction is known (it may not be at login).
+
+local npcAdapter = {
+	now = function() return GetTime() end,
+	after = function(delay, fn) C_Timer.After(delay, function() ns.Bugs.Call(fn) end) end,
+	random = function() return math.random() end,
+	canSend = function() return ns.guildKey ~= nil and ns.SendBlockReason() == nil end,
+	send = function(msg, done) Comm.SendNpc(msg, done) end,
+	selfGuid = function() return UnitGUID("player") end,
+	faction = function() return ns.npcFaction end,
+	changed = function() ns.OnDataChanged() end,
+	isMe = function(name) return type(name) == "string" and ns.NormalizeName(name) == UnitName("player") end,
+	size = function(msg) return #Comm.Encode(msg) end,
+}
+
+local function npcClock() return GetServerTime() end
+
+local function playerFaction()
+	if type(UnitFactionGroup) ~= "function" then return nil end
+	local ok, faction = pcall(UnitFactionGroup, "player")
+	if ok and type(faction) == "string" and faction ~= "" then return faction end
+	return nil
+end
+
+-- Makes what is missing: npcOwn of the faction, and with a guild its table and sync (npcOwn imported
+-- into it, so nothing learned in another guild comes in). Called at login, at guild events and
+-- readings; does nothing while the faction is unknown.
+function ns.SetupNpc()
+	if not ns.db then return end
+	local faction = playerFaction()
+	if not faction then return end
+	if ns.npcFaction ~= faction then
+		-- first time, or the faction changed (a pandaren chose one): the other faction's tables go
+		if ns.npcSync then ns.npcSync:Stop() end
+		ns.npcSync, ns.npcGuild = nil, nil
+		if type(ns.db.npcOwn) ~= "table" then ns.db.npcOwn = {} end
+		if type(ns.db.npcOwn[faction]) ~= "table" then ns.db.npcOwn[faction] = {} end
+		ns.npcOwn = NpcData.New(ns.db.npcOwn[faction], npcClock)
+		ns.npcFaction = faction
+	end
+	if ns.guildDB and not ns.npcGuild then
+		if type(ns.guildDB.npc) ~= "table" then ns.guildDB.npc = {} end
+		if type(ns.guildDB.npc[faction]) ~= "table" then ns.guildDB.npc[faction] = {} end
+		local tab = NpcData.New(ns.guildDB.npc[faction], npcClock)
+		tab:Import(ns.npcOwn)
+		ns.npcGuild = tab
+		ns.npcSync = NpcSync.New(npcAdapter, tab)
+	end
+	ns.npc = ns.npcGuild or ns.npcOwn
+end
+
+-- A reading of a trainer or vendor (NpcReader): npcOwn takes it as the last known reading; the
+-- guild's table takes it by the own-visit rules and NpcSync sends what changed.
+local function onNpcReading(npcID, reading)
+	ns.SetupNpc()
+	if ns.npcOwn and ns.npcOwn:Write(npcID, reading) then ns.OnDataChanged() end
+	if ns.npcSync then ns.npcSync:OwnVisit(npcID, reading) end
+end
+
 -- Name of a guildmate for the window: roster name without the realm, then the sender name.
 function ns.MemberName(guid)
 	if guid == UnitGUID("player") then return UnitName("player") end
@@ -617,21 +681,30 @@ function ns.Hello(force)
 	if sent and ns.guildPrices then ns.guildPrices:Announce() end
 	if sent and ns.requests then ns.requests:Announce() end
 	if sent and ns.reports then ns.reports:Announce() end
+	-- also while sending is blocked: NpcSync sends a due ND once the block ends
+	if sent and ns.npcSync then ns.npcSync:Announce() end
 	return sent
 end
 
 -- (Re)creates the store and sync for the current guild. Called on login and guild changes.
 function ns.SetupGuild()
 	local key, guildName, realm = Scanner.GuildKey()
-	if key == ns.guildKey then return end
+	if key == ns.guildKey then
+		-- npcOwn (and the guild's table) wait for the faction; a guild event tries again
+		ns.SetupNpc()
+		return
+	end
 	ns.guildKey, ns.guildName = key, guildName
 	-- the old guild's prices must not reach the new guild (its timers may still run)
 	if ns.guildPrices then ns.guildPrices:Stop() end
 	if ns.requests then ns.requests:Stop() end
 	if ns.reports then ns.reports:Stop() end
+	if ns.npcSync then ns.npcSync:Stop() end
+	ns.npcSync, ns.npcGuild = nil, nil
 	receiverSeen.at, receiverSeen.value = -1e9, false
 	if not key then
 		ns.store, ns.sync, ns.guildDB, ns.guildPrices, ns.requests, ns.reports = nil, nil, nil, nil, nil, nil
+		ns.SetupNpc()
 		ns.OnDataChanged()
 		return
 	end
@@ -662,6 +735,8 @@ function ns.SetupGuild()
 	ns.reports:Prune()
 	ns.reports:TakeHeld()
 	ns.CheckReports()
+	-- trainers and vendors of this guild and faction, npcOwn imported (NpcData, NpcSync)
+	ns.SetupNpc()
 	if not ns.Prices.StartSharing() then
 		-- Auctionator may still be setting up its database
 		C_Timer.After(10, function() ns.Prices.StartSharing() end)
@@ -674,6 +749,7 @@ function ns.SetupGuild()
 end
 
 function ns.OnRosterUpdate()
+	ns.SetupNpc()
 	-- the author may be in a roster that was not read yet at login: read again (at most every
 	-- 5 s; an event inside that time is looked at when it ends). ReceiverInGuild sends what waits.
 	if not receiverSeen.value and not receiverSeen.recheck then
@@ -898,6 +974,13 @@ function ns.Status()
 		local s4 = ns.reports.stats
 		ns.Say("STATUS_REPORTS", ns.reports:HeldCount(), ns.reports:MarkCount(),
 			ns.ReceiverInGuild() and ns.T("YES") or ns.T("NO"), s4.sentU, s4.sentD, s4.sentR, s4.recvU, s4.recvD, s4.recvR)
+	end
+	if ns.npc then
+		local sheets, entries = ns.npc:Count()
+		local s5 = ns.npcSync and ns.npcSync.stats or { sent = {}, recv = {} }
+		local function n(list, t) return list[t] or 0 end
+		ns.Say("STATUS_NPC", sheets, entries, n(s5.sent, "ND"), n(s5.sent, "NI"), n(s5.sent, "NR"), n(s5.sent, "NU"),
+			n(s5.recv, "ND"), n(s5.recv, "NI"), n(s5.recv, "NR"), n(s5.recv, "NU"))
 	end
 	if ns.guildPrices then
 		local gp, s2 = ns.guildPrices, ns.guildPrices.stats
@@ -1220,6 +1303,28 @@ local function slash(input)
 		end
 		ns.Say("CATALOG_CLEARED", cleared)
 		ns.OnDataChanged()
+	elseif cmd == "npc" then
+		-- /pg npc: what is known of trainers and vendors; /pg npc clear: forget it for this faction
+		ns.SetupNpc()
+		if rest ~= "" and rest ~= "clear" then return ns.Say("NPC_USAGE") end
+		if not ns.npcOwn then return ns.Say("NPC_NO_FACTION") end
+		if rest == "clear" then
+			ns.npcOwn:Clear()
+			if ns.npcGuild then ns.npcGuild:Clear() end
+			-- the guild's comes back from guildmates
+			if ns.npcSync then ns.npcSync:Announce() end
+			ns.Say("NPC_CLEARED", ns.npcFaction)
+			ns.OnDataChanged()
+			return
+		end
+		local ownSheets, ownEntries = ns.npcOwn:Count()
+		local skipped = ns.npcReader and ns.npcReader.skipped or 0
+		if ns.npcGuild then
+			local sheets, entries = ns.npcGuild:Count()
+			ns.Say("NPC_COUNTS_GUILD", ns.npcFaction, sheets, entries, ownSheets, ownEntries, skipped)
+		else
+			ns.Say("NPC_COUNTS_OWN", ns.npcFaction, ownSheets, ownEntries, skipped)
+		end
 	elseif cmd == "scan" then
 		-- reads the open profession window now, without waiting for an event of the game
 		Scanner.lastListInfo = nil
@@ -1412,8 +1517,7 @@ local function scheduleTrainer()
 		if not ok then ns.Log("ERROR trainer: %s", tostring(err)) end
 	end)
 end
--- Trainers and recipe vendors read into one reading per NPC (NpcReader). Task 7 connects the
--- readings to the tables; until then they are only logged.
+-- Trainers and recipe vendors read into one reading per NPC (NpcReader), kept by onNpcReading.
 local function call(fn, ...)
 	if type(fn) ~= "function" then return nil end
 	return fn(...)
@@ -1494,6 +1598,7 @@ ns.npcReader = ns.NpcReader.New({
 	for _ in pairs(reading.v or {}) do nv = nv + 1 end
 	ns.Log("npc %d %s: %d trained, %d sold, place %s", npcID, tostring(reading.name), nt, nv,
 		reading.map and (reading.map .. " " .. reading.x .. "," .. reading.y) or "unknown")
+	onNpcReading(npcID, reading)
 end)
 local function npcRead(method)
 	local ok, err = ns.Bugs.Call(ns.npcReader[method], ns.npcReader)
