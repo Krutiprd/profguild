@@ -199,7 +199,7 @@ H.test("day: a read inside a job never changes the table; the next job settles t
 	H.eq(tab:Hash(), freshHash(tab, clock))
 end)
 
-H.test("day: an expiry cut short by an error is finished by the next job (the day is not lost)", function()
+H.test("day: an expiry cut short by an error is finished by the next job; only the sheet that threw is skipped", function()
 	local T = DAY * 86400 + 3600
 	local clock = function() return T end
 	local w = work(50)
@@ -222,10 +222,12 @@ H.test("day: an expiry cut short by an error is finished by the next job (the da
 	H.eq(#w.errors, 1)
 	H.eq(tab.expiring, nil, "finished")
 	for id, s in pairs(tab.sheets) do H.ok(not s.t[1001], "expired in sheet " .. id) end
-	H.eq(tab:Hash(), freshHash(tab, clock), "equal to a table cut on that day")
-	-- and to the table a synchronous client holds on that day
-	local sync0 = ND.New(savedTable(40, function() return DAY * 86400 + 3600 end, 118), clock)
-	H.eq(tab:Hash(), sync0:Hash(), "equal to synchronous")
+	-- every sheet but the one whose store threw (skipped, not tried forever) as cut on that day
+	local fresh = ND.New({}, clock)
+	for id, sh in pairs(tab.sheets) do fresh:MergeIn(id, sh) end
+	local differ = 0
+	for id in pairs(tab.sheets) do if tab:SheetHash(id) ~= fresh:SheetHash(id) then differ = differ + 1 end end
+	H.ok(differ <= 1, "sheets cut otherwise: " .. differ)
 end)
 
 H.test("day: a step that ends in an error leaves no planned sheet without a step", function()
@@ -422,4 +424,51 @@ H.test("table: the index holds the NPC itself for one holder, a set for more, in
 	H.eq(at(100), 2, "back to the one holder") H.eq(at(7), nil) H.eq(at(164), nil)
 	tab:put(2, nil)
 	H.eq(at(100), nil)
+end)
+
+H.test("table: the limits group the entries to drop in paced parts (no long item for thousands)", function()
+	local clock = function() return DAY * 86400 + 3600 end
+	local w = work(1e9)
+	local tab = ND.New({}, clock, { entries = 100, t = 300, v = 300 }, w)
+	w.pump()
+	local kinds = {}
+	local pace = w.Pace
+	w.Pace = function(self, u, k) kinds[k or "?"] = (kinds[k or "?"] or 0) + 1 return pace(self, u, k) end
+	local items = {}
+	for id = 1, 12 do
+		local s = { name = "N", nd = DAY, t = {}, v = {} }
+		for k = 1, 200 do s.t[id * 1000 + k] = { DAY - (k % 50), 0, 0, 0, 0 } end
+		items[id] = { id, s }
+	end
+	w:Run(function() tab:MergeAll(items) end)
+	w.pump()
+	w.Pace = nil
+	H.eq(tab.nEntries, 100)
+	H.ok((kinds.group or 0) >= math.floor((2400 - 100) / 256), "grouped in parts: " .. tostring(kinds.group))
+end)
+
+H.test("day: a sheet whose expiry throws is skipped once; every later job runs its own code", function()
+	local day = DAY
+	local clock = function() return day * 86400 + 3600 end
+	local w = work(50)
+	local tab = ND.New({}, clock, nil, w)
+	w:Run(function()
+		for id = 1, 20 do tab:MergeIn(id, { name = "N", nd = day, t = { [100 + id] = { day - 25, 0, 0, 0, 0 } }, v = {} }) end
+	end)
+	w.pump()
+	local put = tab.put
+	tab.put = function(self, id, ...) if id == 7 and self.expiring then error("poison sheet 7") end return put(self, id, ...) end
+	day = day + 100
+	local ran = 0
+	for _ = 1, 5 do
+		w:Run(function() ran = ran + 1 end)
+		w.pump()
+	end
+	tab.put = nil
+	H.eq(ran, 5, "every job ran its code")
+	H.eq(#w.errors, 1, "recorded once: " .. table.concat(w.errors, " | "))
+	H.eq(tab.expiring, nil, "the expiry ended")
+	local left = 0
+	for id, s in pairs(tab.sheets) do if s.t[100 + id] then left = left + 1 end end
+	H.ok(left <= 1, "every other sheet expired: " .. left)
 end)

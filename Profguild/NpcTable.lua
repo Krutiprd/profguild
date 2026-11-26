@@ -472,6 +472,8 @@ function Table:limit()
 				end
 			end
 		end)) do
+			-- thousands of entries may go (a guild change): grouped in parts of 256
+			if _ % 256 == 0 then pace(self, 256, "group") end
 			local l = drop[d[3]]
 			if not l then l = {} drop[d[3]] = l end
 			l[#l + 1] = d
@@ -552,6 +554,8 @@ function Table:Expire()
 	local gone, list = day - NpcData.EXPIRE, ex.list
 	while ex.i <= #list do
 		local id = list[ex.i]
+		-- raised first: a sheet whose expiry throws is skipped by the next try, not tried forever
+		ex.i = ex.i + 1
 		local s = self.sheets[id]
 		if s then
 			pace(self, self.sizes[id], "store")
@@ -562,9 +566,18 @@ function Table:Expire()
 				self:recut(id)
 			end
 		end
-		ex.i = ex.i + 1
 	end
 	self.expiring = nil
+end
+
+-- Settle ended in an error (NpcWork recorded it; the job runs on): the next job goes on after the
+-- sheet that threw; a second failure of the same expiry gives it up (the day stays, later days
+-- recut again).
+function Table:SettleFailed()
+	local ex = self.expiring
+	if not ex then return end
+	ex.fails = (ex.fails or 0) + 1
+	if ex.fails >= 2 then self.expiring = nil end
 end
 
 -- Everything goes, also from the saved table a detached table left untouched.

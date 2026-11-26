@@ -54,6 +54,7 @@ NpcWork.RATES = {
 	pack = 0.001,     -- an entry of a sheet packed for saved
 	cut = 0.0015,     -- an entry of a sheet cut to its sendable part and hashed
 	index = 0.001,    -- an entry of a sheet indexed and counted
+	group = 0.002,    -- an entry the limits drop, grouped by sheet
 	store = 0.0035,   -- an entry of a sheet expired and stored at once (Expire)
 	unpack = 0.003,   -- an entry of a received sheet unpacked and hashed
 	hash = 0.001,     -- half a sheet's salted hash compared (NI)
@@ -140,11 +141,34 @@ end
 function Work:Watch(obj) self.watched[obj] = true end
 
 -- At the start of a job, inside its coroutine (it may pace): every watched object settles (the
--- list is taken first: a table made in a window between two slices may be added meanwhile).
+-- list is taken first: a table made in a window between two slices may be added meanwhile). Each
+-- Settle runs in a coroutine of its own (self.sub, where Pace works as in the job): an error in it
+-- is recorded and the job's own code still runs (a job that never ran would leave its queue
+-- counters up); obj:SettleFailed() lets the object go past what failed.
 function Work:settle()
 	local list = {}
 	for obj in pairs(self.watched) do list[#list + 1] = obj end
-	for i = 1, #list do list[i]:Settle() end
+	for i = 1, #list do
+		local obj = list[i]
+		local co = create(function() obj:Settle() end)
+		self.sub = co
+		local ok, err = resume(co)
+		while ok and status(co) == "suspended" do
+			-- its Pace waits for the next frame: the job waits with it
+			self.sub = nil
+			yield()
+			self.sub = co
+			ok, err = resume(co)
+		end
+		self.sub = nil
+		if not ok then
+			self.stats.errors = self.stats.errors + 1
+			local a = self.a
+			local stack = debug and debug.traceback and debug.traceback(co, tostring(err)) or nil
+			if a.error then pcall(a.error, err, stack) end
+			if obj.SettleFailed then pcall(obj.SettleFailed, obj, err) end
+		end
+	end
 end
 
 function Work:Flushing() return self.unlimited end
@@ -157,7 +181,9 @@ end
 
 function Work:InJob()
 	local job = self.cur
-	return job ~= nil and running() == job.co
+	if job == nil then return false end
+	local co = running()
+	return co == job.co or (co ~= nil and co == self.sub)
 end
 
 -- ms per unit of a kind: fixed by the adapter, else learned (never under RATES[kind]).
@@ -183,7 +209,9 @@ end
 
 function Work:Pace(units, kind)
 	local job = self.cur
-	if not job or running() ~= job.co or self.unlimited then return end
+	if not job or self.unlimited then return end
+	local co = running()
+	if co ~= job.co and (co == nil or co ~= self.sub) then return end
 	units = units or 1
 	kind = kind or "other"
 	local a = self.a
