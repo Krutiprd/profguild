@@ -82,7 +82,7 @@ function NpcView.Skill(recipeID, src)
 	local dataLearn, dataYellow, _, dataGrey = nil, nil, nil, nil
 	local P = ns.Prices
 	if P and P.RecipeSkill then dataLearn, dataYellow, _, dataGrey = P.RecipeSkill(recipeID) end
-	local grey = type(info.g) == "number" and info.g or dataGrey
+	local grey = type(info.g) == "number" and info.g > 0 and info.g or dataGrey
 	local yellow = dataYellow
 	if yellow and grey then yellow = min(yellow, grey) end
 	local green = yellow and grey and floor((yellow + grey) / 2) or nil
@@ -186,7 +186,7 @@ local function vendorRows(src, now, items)
 			if p then
 				r.limited = p.l == 1 or nil
 				if #p.o > 0 then r.other = p.o end
-				r.copper = (p.c > 0 or #p.o == 0) and p.c or nil
+				r.copper = p.c > 0 and p.c or nil -- 0 means no copper price
 			else
 				r.approx = nil
 			end

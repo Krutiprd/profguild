@@ -191,3 +191,20 @@ H.test("view: odd Data.lua entries give no error and no falling numbers", functi
 	end
 	H.ok(odd >= 1, "found the odd ones: " .. odd)
 end)
+
+H.test("view: a vendor price of 0 copper without other costs is no copper price", function()
+	local g = newTab()
+	vendor(g, 1, "Free", 1, 500, price(0))
+	vendor(g, 2, "Paid", 1, 500, price(70))
+	local rows = V.Sources(901, src(nil, g), { map = 1, items = { [500] = true }, recipeItem = 500, letters = "v",
+		ah = { copper = 90, text = "t" } })
+	H.eq(kinds(rows), "ah,vendor:Paid,vendor:Free")
+	H.eq(rows[3].copper, nil, "0 means none")
+	H.ok(rows[2].best, "Paid is the cheapest, not the 0")
+end)
+
+H.test("view: info.g of 0 is not a grey", function()
+	local _, _, _, gy = ns.Prices.RecipeSkill(3866)
+	local r = V.Skill(3866, src(nil, nil, { g = 0 }))
+	H.eq(r.grey, gy, "Data.lua's grey")
+end)
