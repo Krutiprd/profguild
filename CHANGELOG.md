@@ -24,6 +24,11 @@
   hover), "MAP" says in chat whether the pin was set, a trainer or vendor opened in combat is read
   when the fight ends, and a hostile or oversized NPC message is refused at once instead of
   freezing the game.
+- The NPC data never holds up the game, even with a full table (600 NPCs, 20000 entries): loading
+  it at login, merging what guildmates send, the daily expiry and the messages run a few
+  milliseconds per frame (less in combat) instead of all at once. Opening FIND RECIPE no longer
+  builds an index first. A logout or `/reload` in the middle saves everything; a flood of NPC
+  messages is capped and counted.
 
 ## 0.6.0 – 2026-11-25
 
