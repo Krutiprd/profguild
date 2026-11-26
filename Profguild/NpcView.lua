@@ -187,6 +187,7 @@ local function vendorRows(src, now, items)
 				r.limited = p.l == 1 or nil
 				if #p.o > 0 then r.other = p.o end
 				r.copper = p.c > 0 and p.c or nil -- 0 means no copper price
+				r.approx = r.copper and r.approx or nil -- ~ is said of a copper price only
 			else
 				r.approx = nil
 			end

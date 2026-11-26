@@ -1040,7 +1040,7 @@ end
 
 -- One source of FIND RECIPE: name and a detail line from the left, the price right-aligned, and
 -- the Map button at the right end; the green frame marks the cheapest. Hover: the recipe item's
--- tooltip (vendor, AH), where, how old, what ~ means.
+-- tooltip (vendor, AH), other costs and limited stock, where, how old, what ~ means.
 local function createFindRow(parent, index)
 	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(DETAIL_W - 28, FIND_STEP - 2)
@@ -1074,11 +1074,14 @@ local function createFindRow(parent, index)
 	row:SetScript("OnMouseWheel", function(_, delta) UI:ScrollFind(delta) end)
 	row:SetScript("OnEnter", function(self)
 		self.bg:SetColorTexture(unpack(C.hover))
-		local r = self.data
-		if not r then return end
-		local item = (r.kind == "vendor" or r.kind == "ah") and type(self.item) == "number" and self.item or nil
+		local first = self.data
+		if not first then return end
+		local item = (first.kind == "vendor" or first.kind == "ah") and type(self.item) == "number" and self.item or nil
 		if item then ns.Scanner.WantItem(item, true) end
 		showTooltip(self, function()
+			-- the row as drawn now (DrawFind redraws a hovered row's tooltip after a scroll or refresh)
+			local r = self.data
+			if not r then return hideTooltip() end
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 			if item then
 				if ns.Tooltip then ns.Tooltip.suppress = true end
@@ -1087,6 +1090,7 @@ local function createFindRow(parent, index)
 				GameTooltip:AddLine(" ")
 			end
 			GameTooltip:AddLine(self.title or "", C.gold[1], C.gold[2], C.gold[3])
+			if self.terms and self.terms ~= "" then GameTooltip:AddLine(self.terms, 1, 1, 1, true) end
 			if self.where and self.where ~= "" then GameTooltip:AddLine(self.where, 1, 1, 1) end
 			if r.age and (r.kind == "trainer" or r.kind == "vendor") then
 				GameTooltip:AddLine(r.age <= 0 and ns.T("FIND_SEEN_TODAY") or ns.T("FIND_SEEN", r.age), C.muted[1], C.muted[2], C.muted[3])
@@ -2444,6 +2448,14 @@ local function otherCostText(c)
 	return count .. " " .. (name or ("#" .. id))
 end
 
+-- "5 Merchant's Favor, limited stock": the other costs and limited stock of a row; "" without.
+local function termsText(r)
+	local parts = {}
+	for _, c in ipairs(r.other or {}) do parts[#parts + 1] = otherCostText(c) end
+	if r.limited then parts[#parts + 1] = ns.T("FIND_LIMITED") end
+	return table.concat(parts, ", ")
+end
+
 local HOW_KEYS = { drop = "SRC_DROP", quest = "SRC_QUEST", crafted = "SRC_CRAFT" }
 
 -- The texts of one source row: name, detail line, price, whether the name is muted.
@@ -2453,11 +2465,11 @@ local function findLine(r)
 	if kind == "ah" then
 		return ns.T("FIND_AH"), (r.text and r.text ~= "") and r.text or (r.copper and "" or ns.T("FIND_AH_NONE")), price
 	elseif kind == "trainer" or kind == "vendor" then
+		-- the costs first: a long line is cut at its end, and the place is also in the tooltip
 		local parts = {}
-		local place = placeText(r)
+		local terms, place = termsText(r), placeText(r)
+		if terms ~= "" then parts[#parts + 1] = terms end
 		if place ~= "" then parts[#parts + 1] = place end
-		for _, c in ipairs(r.other or {}) do parts[#parts + 1] = otherCostText(c) end
-		if r.limited then parts[#parts + 1] = ns.T("FIND_LIMITED") end
 		return ns.T(kind == "trainer" and "FIND_TRAINER" or "FIND_VENDOR", r.name or "?"), table.concat(parts, ", "), price
 	elseif kind == "other" then
 		local how = {}
@@ -2506,23 +2518,35 @@ function UI:DrawFind(s)
 		if r then
 			local name, detail, price, muted = findLine(r)
 			row.title, row.where, row.item = name, placeText(r), recipeItem
+			row.terms = (r.kind == "trainer" or r.kind == "vendor") and termsText(r) or nil
 			row.name:SetText(muted and (HEX_MUTED .. name .. "|r") or name)
 			row.detail:SetText(detail)
 			row.price:SetText(price)
 			local pin = (r.kind == "trainer" or r.kind == "vendor") and r.map and r.x and r.y and UI.CanMapPin(r.map)
 			setPill(row.mapButton, ns.T("BTN_MAP"), false)
 			showIf(row.mapButton, pin)
-			-- the price ends 6 left of the Map button (at -6 without it), the name 8 before the price
+			-- the price on the name's line ends 6 left of the Map button (at -6 without it), the name 8
+			-- before the price; the detail line below runs to 8 before the Map button (or the price's end)
 			row.priceRight = pin and 56 or 6
 			row.price:ClearAllPoints()
-			row.price:SetPoint("RIGHT", -row.priceRight, 0)
+			row.price:SetPoint("TOPRIGHT", -row.priceRight, -4)
 			local free = rowW - 8 - row.priceRight - (price ~= "" and (row.price:GetStringWidth() or 0) or 0) - 8
 			row.name:SetWidth(math.max(40, free))
-			row.detail:SetWidth(math.max(40, free))
+			local detailW = rowW - 8 - row.priceRight - 8
+			row.detail:SetWidth(detailW)
+			-- costs, stock and place too long for the line: the place goes (the tooltip and Map have it)
+			if row.terms and row.terms ~= "" and row.where ~= "" and (row.detail:GetStringWidth() or 0) > detailW then
+				row.detail:SetText(row.terms)
+			end
 			showIf(row.bestFrame, r.best)
 			row:Show()
 		else
 			row:Hide()
+		end
+		-- a tooltip shown over this row follows what the row shows now
+		local t = tooltipShown
+		if t and t.owner == row then
+			if r and row:IsShown() then row:GetScript("OnEnter")(row) else hideTooltip() end
 		end
 	end
 end

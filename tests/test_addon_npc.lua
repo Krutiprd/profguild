@@ -698,7 +698,7 @@ H.test("find: rows of every kind, ~, limited stock, other costs, zone only with 
 	H.ok(not d.findRows[1].bestFrame:IsShown() and not d.findRows[3].bestFrame:IsShown(), "only there")
 	name, detail, price = rowTexts(d.findRows[3])
 	H.eq(name, ns.T("FIND_VENDOR", "Maria Lumere"))
-	H.eq(detail, "Stormwind 56,64, " .. ns.T("FIND_LIMITED"))
+	H.eq(detail, ns.T("FIND_LIMITED") .. ", Stormwind 56,64", "costs and stock before the place")
 	H.eq(price, "~" .. plain(ns.Prices.Format(9500)))
 	H.eq(d.findCount:GetText(), "1-3 / 5")
 	-- the wheel over the list reaches the last row and no further
@@ -738,7 +738,20 @@ H.test("find: rows of every kind, ~, limited stock, other costs, zone only with 
 	local tip = table.concat(M.tooltipLines, "\n")
 	H.eq(itemShown, ITEM, "the recipe item's tooltip for a vendor")
 	H.ok(tip:find("Stormwind", 1, true) and tip:find(ns.T("FIND_SEEN_TODAY"), 1, true) and tip:find(ns.T("FIND_APPROX"), 1, true), tip)
+	H.ok(tip:find(ns.T("FIND_LIMITED"), 1, true), "limited stock in the tooltip: " .. tip)
+	-- scrolled under the mouse: the tooltip follows the row (Jormund, then Favor Keeper's other cost)
+	M.tooltipLines = {}
+	d.findRows[3]._scripts.OnMouseWheel(d.findRows[3], -1)
+	tip = table.concat(M.tooltipLines, "\n")
+	H.ok(tip:find("Jormund", 1, true) and not tip:find("Maria", 1, true), "redrawn after a scroll: " .. tip)
+	M.tooltipLines = {}
+	d.findRows[3]._scripts.OnMouseWheel(d.findRows[3], -1)
+	tip = table.concat(M.tooltipLines, "\n")
+	H.ok(tip:find("Favor Keeper", 1, true) and tip:find("5 Merchant's Favor", 1, true), "other cost in the tooltip: " .. tip)
+	H.ok(not tip:find(ns.T("FIND_APPROX"), 1, true), "no ~ note without copper: " .. tip)
 	d.findRows[3]._scripts.OnLeave(d.findRows[3])
+	UI.findOffset = 0
+	UI:Refresh()
 	-- other kinds: drop and quest, no vendor seen, no trainer seen, nothing known
 	ns.RecipeData[RECIPE] = { ITEM, "vdq", 0, 60, 80 }
 	SlashCmdList.PROFGUILD("npc clear")
@@ -1005,6 +1018,31 @@ H.test("find: every FIND text fits its row in en and sk (about 6 px per characte
 		M.advance(1)
 		UI:Refresh()
 		check(lang, "vendor and trainer")
+		-- with a place, the Map button, another cost and limited stock: the detail line gets the
+		-- row but the Map button, the price stays on the name's line
+		C_Map.CanSetUserWaypointOnMap = function() return true end
+		C_Map.SetUserWaypoint = function() end
+		_G.UiMapPoint = { CreateFromCoordinates = function(m, x, y) return { m, x, y } end }
+		local realInfo = C_Item.GetItemInfo
+		C_Item.GetItemInfo = function(id)
+			if id == 8888 then return "Merchant's Favor" end
+			return realInfo(id)
+		end
+		SlashCmdList.PROFGUILD("npc clear")
+		receiveNU(ns, 6601, vendorOf("Maria Lumere", 9500, { l = 1, o = { { 2, 8888, 5 } } }, placeOf(1453, 56, 64)))
+		M.advance(1)
+		UI:Refresh()
+		local row
+		for i = 1, shownRows(d) do
+			if plain(d.findRows[i].name:GetText()):find("Maria", 1, true) then row = d.findRows[i] end
+		end
+		H.ok(row and row.mapButton:IsShown(), lang .. ": the vendor row with its Map button")
+		local detail = plain(row.detail:GetText())
+		H.eq(detail, "5 Merchant's Favor, " .. ns.T("FIND_LIMITED"), lang .. ": costs and stock kept, the place left to the tooltip")
+		H.eq(row.detail._width, 302 - 8 - 56 - 8, lang .. ": the detail line runs to the Map button")
+		check(lang, "place, Map button, other cost, limited stock")
+		C_Item.GetItemInfo = realInfo
+		_G.UiMapPoint = nil
 	end
 	ns.SetLanguage("en")
 	cleanGame()
