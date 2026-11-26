@@ -8,16 +8,19 @@
 --          frame() -> a value that changes from one frame to the next (GetTime() in the game),
 --          defer(fn) runs fn in a later frame, budget() -> milliseconds this frame may spend,
 --          error(err, stack) records an error of a job (the job is dropped, the others go on),
---          rate (optional) -> estimated milliseconds of one unit of work (default RATE).
+--          rate (optional): milliseconds of one unit of work of every kind, fixed (tests: a
+--          deterministic cost model); without it each kind starts at RATES[kind] and learns.
 --
 -- work:Run(fn[, owner[, fail]]) queues fn as a job behind the jobs queued before it (fail(err) runs
 --   when it ends in an error). When nothing waits
 --   ahead of it and the frame has budget left it starts at once, in the caller's frame; small work
 --   is then done before Run returns, as without a scheduler.
--- work:Pace(units) is called by a job before an item of about `units` units of work (a sheet
---   entry is one). When the item would take the frame past its budget, the job waits for the next
---   frame first; the first slice of a frame does at least one item. Outside a job it does nothing.
---   No pcall may stand between a job and its Pace (PUC Lua 5.1 cannot yield across it).
+-- work:Pace(units[, kind]) is called by a job before an item of about `units` units of work of a
+--   kind (a sheet entry is one; kinds: RATES). When the item would take the frame past its budget,
+--   the job waits for the next frame first; the first slice of a frame does at least one item.
+--   Outside a job it does nothing. No pcall may stand between a job and its Pace (PUC Lua 5.1
+--   cannot yield across it). The time an item took (the clock from its Pace to the next) teaches
+--   the estimate of its kind: ms per unit, quick to rise, slow to fall, never under RATES[kind].
 -- work:InJob(): the caller runs inside a job (then everything it does is in order already).
 -- work:Busy([owner]): jobs are queued or half done (of that owner).
 -- work:Flush(): runs every job to its end now, whatever the budget (logout: the game is leaving).
@@ -38,8 +41,24 @@ ns.NpcWork = NpcWork
 
 NpcWork.BUDGET = 4      -- ms per frame; one item may go past it (the largest, a sheet, about 1-2 ms)
 NpcWork.COMBAT = 3      -- ms per frame in combat
-NpcWork.RATE = 0.003    -- estimated ms per unit under PUC Lua 5.1 (an entry merged, packed, hashed); the
-                        -- clock decides when an item takes longer, the estimate when the clock is coarse
+NpcWork.RATE = 0.003    -- estimated ms per unit under PUC Lua 5.1 of a kind not in RATES
+-- ms per unit of each kind of item under PUC Lua 5.1 with its garbage collector, measured with full
+-- tables (tests/bench_npc.py and the review harness): the start and the floor of what is learned
+NpcWork.RATES = {
+	load = 0.005,     -- an entry of a saved sheet unpacked, trimmed and stored
+	scan = 0.002,     -- an entry offered to the limits' heap
+	check = 0.0002,   -- an entry looked at (the import's precheck, what a merge took)
+	merge = 0.002,    -- an entry merged, made room for and compared (the import)
+	mergeput = 0.0045, -- an entry checked, merged and stored (an NU, an own reading)
+	store = 0.0035,   -- an entry of a sheet stored: index, packed, cut and hashed
+	unpack = 0.003,   -- an entry of a received sheet unpacked and hashed
+	hash = 0.001,     -- half a sheet's salted hash compared (NI)
+	encode = 0.006,   -- a byte of a message encoded (serialize and deflate)
+	text = 0.0001,    -- a character of a received text decoded to bytes (Comm)
+	inflate = 0.0007, -- a symbol inflated (NpcInflate: units of symbols and bytes)
+	deserialize = 0.0004, -- a value deserialized (LibSerialize)
+}
+local RISE, FALL, JUMP = 0.5, 0.05, 4 -- learning: weights up and down, at most JUMP times at once
 
 local create, resume, yield, running, status = coroutine.create, coroutine.resume, coroutine.yield,
 	coroutine.running, coroutine.status
@@ -50,7 +69,7 @@ Work.__index = Work
 function NpcWork.New(adapter)
 	return setmetatable({ a = adapter, q = {}, cur = nil, slicing = false, deferred = false,
 		frame = nil, spent = 0, t0 = 0, left = 0, items = 0, est = 0, unlimited = false,
-		rate = adapter.rate or NpcWork.RATE, watched = setmetatable({}, { __mode = "k" }),
+		rate = adapter.rate, rates = {}, item = nil, watched = setmetatable({}, { __mode = "k" }),
 		stats = { jobs = 0, slices = 0, maxMs = 0, errors = 0 } }, Work)
 end
 
@@ -90,7 +109,7 @@ function Work:slice()
 		end
 		self.cur = job
 		local ok, err = resume(job.co)
-		self.cur = nil
+		self.cur, self.item = nil, nil
 		if not ok then
 			table.remove(q, 1)
 			self.stats.errors = self.stats.errors + 1
@@ -137,24 +156,52 @@ function Work:InJob()
 	return job ~= nil and running() == job.co
 end
 
-function Work:Pace(units)
+-- ms per unit of a kind: fixed by the adapter, else learned (never under RATES[kind]).
+function Work:Rate(kind)
+	if self.rate then return self.rate end
+	return self.rates[kind] or NpcWork.RATES[kind] or NpcWork.RATE
+end
+
+function Work:learn(kind, units, ms)
+	if self.rate or self.unlimited or ms < 0 then return end
+	local base = NpcWork.RATES[kind] or NpcWork.RATE
+	local cur = self.rates[kind] or base
+	local r = ms / units
+	if r > cur then
+		if r > cur * JUMP then r = cur * JUMP end -- one pause of the garbage collector teaches little
+		cur = cur + (r - cur) * RISE
+	else
+		cur = cur + (r - cur) * FALL
+	end
+	if cur < base then cur = base end
+	self.rates[kind] = cur
+end
+
+function Work:Pace(units, kind)
 	local job = self.cur
 	if not job or running() ~= job.co or self.unlimited then return end
 	units = units or 1
+	kind = kind or "other"
+	local a = self.a
+	-- the item before (in this slice): its time teaches the estimate of its kind
+	local it = self.item
+	if it then self:learn(it[1], it[2], a.clock() - it[3]) end
+	self.item = nil
 	-- checked again after the wait: the job may be resumed in a later slice of a frame that has
 	-- spent part of its budget
 	-- the time of the slice so far: measured, or the estimate of its items when more (a clock
 	-- that stands still, as in tests, or one coarser than an item)
-	local cost = units * self.rate
+	local cost = units * self:Rate(kind)
 	while self.items > 0 and not self.unlimited do
-		local used = self.a.clock() - self.t0
+		local used = a.clock() - self.t0
 		if self.est > used then used = self.est end
 		if used + cost <= self.left then break end
 		yield()
 	end
 	self.items = self.items + 1
 	self.est = self.est + cost
-	if self.a.spend then self.a.spend(units) end
+	if units > 0 then self.item = { kind, units, a.clock() } end
+	if a.spend then a.spend(units) end
 end
 
 function Work:Busy(owner)
@@ -177,6 +224,6 @@ function Work:Flush()
 end
 
 -- For callers that may run without a scheduler (tests, the simulation): pace when there is one.
-function NpcWork.Pace(work, units)
-	if work then work:Pace(units) end
+function NpcWork.Pace(work, units, kind)
+	if work then work:Pace(units, kind) end
 end

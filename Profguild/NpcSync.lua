@@ -185,9 +185,9 @@ end
 
 -- Paces the work of a job (NpcWork); true when the session was stopped meanwhile (logout, guild
 -- left): the job then ends, it must not send or plan for a guild left.
-local function pace(self, units)
+local function pace(self, units, kind)
 	local w = self.tab.work
-	if w then w:Pace(units) end
+	if w then w:Pace(units, kind) end
 	return self.dead
 end
 
@@ -436,7 +436,7 @@ function step(self)
 		local key = contentKey(self, id)
 		-- an encoding of the sheet alone (cached by content): a few ms under PUC Lua for a large one
 		if key and not self.sizes[key] then
-			if pace(self, 4 * ((tab.cn and tab.cn[id]) or 100)) then return end
+			if pace(self, 4 * ((tab.cn and tab.cn[id]) or 100), "encode") then return end
 		end
 		-- a sheet left without a sendable part meanwhile is not sent (a read never changes the
 		-- table, so this is only a guard)
@@ -456,7 +456,7 @@ function step(self)
 	if not next(push) then self.cursor = nil end
 	if #list == 0 then return end
 	-- the encoding of the NU: about 6 ms a kB under PUC Lua, in a frame of its own when needed
-	if pace(self, bytes) then return end
+	if pace(self, bytes, "encode") then return end
 	self.sending = true
 	self.lastData = t
 	openRound(self).had = true
@@ -526,7 +526,7 @@ local function plan(self, h)
 		local salt = floor(self.a.random() * 65536)
 		local hashes, ids, n = {}, {}, 0
 		for _, id in ipairs(tab:SendableIDs()) do
-			if pace(self, 2) then return end
+			if pace(self, 2, "hash") then return end
 			local sh = tab:SheetHash(id)
 			if sh then hashes[id], n = tab:SaltedHash(sh, salt), n + 1 end
 		end
@@ -542,7 +542,7 @@ local function plan(self, h)
 		local c = {}
 		for i, id in ipairs(ids) do c[i] = hashes[id] end
 		-- the encoding of the NI (sized, then sent): a few ms under PUC Lua, in a frame of its own
-		if pace(self, 4 * #ids) then return end
+		if pace(self, 4 * #ids, "encode") then return end
 		-- counted only now that the NI goes out (rule 6: an NI never sent does not mute the pair)
 		self.lastNI, self.lastData = t, t
 		local pr = pairOf(self, P.h)
@@ -600,7 +600,7 @@ local function onNI(self, sender, h, salt, ids, c)
 	for i, id in ipairs(ids) do held[id] = c[i] end
 	local give = {}
 	for _, id in ipairs(tab:SendableIDs()) do
-		if pace(self, 4) then return end
+		if pace(self, 4, "hash") then return end
 		local their, sh = held[id], tab:SheetHash(id)
 		if sh and (not their or their ~= tab:SaltedHash(sh, salt)) then
 			local x = contentKey(self, id)
@@ -715,7 +715,7 @@ local function onNU(self, sender, h, x)
 	local got, items = {}, {}
 	for i = 1, #x do
 		local l = x[i]
-		if pace(self, 1 + (type(l[9]) == "table" and #l[9] or 0) + (type(l[15]) == "table" and #l[15] or 0)) then
+		if pace(self, 1 + (type(l[9]) == "table" and #l[9] or 0) + (type(l[15]) == "table" and #l[15] or 0), "unpack") then
 			return
 		end
 		local id, s, sh = unpackSheet(l, today)
@@ -780,8 +780,27 @@ local function receive(self, msg, sender, h, t, parsed)
 	end
 end
 
+-- Whether the sender's messages are ignored now (an NU over the bounds): Comm asks before it
+-- decodes a text.
+function Sync:Blocked(sender)
+	local till = self.blocked[sender]
+	return till ~= nil and till > now(self)
+end
+
+-- At logout (the scheduler flushes) a received message is dropped and counted (stats.flushed):
+-- the next login's sync brings it again; only this client's own changes must reach the save.
+local function flushing(self)
+	local w = self.tab.work
+	if w and w.Flushing and w:Flushing() then
+		self.stats.flushed = (self.stats.flushed or 0) + 1
+		return true
+	end
+	return false
+end
+
 function Sync:OnMessage(msg, sender, size)
 	if self.dead or type(msg) ~= "table" or type(sender) ~= "string" or #sender > NpcSync.MAX_NAME then return end
+	if flushing(self) then return end
 	local NpcData = ns.NpcData
 	if msg.pv ~= NpcData.PROTOCOL or msg.e ~= NpcData.EPOCH or msg.f ~= self.a.faction() then
 		self.stats.foreign = self.stats.foreign + 1
@@ -851,7 +870,7 @@ function Sync:OnMessage(msg, sender, size)
 	q[kind] = q[kind] + 1
 	w:Run(function()
 		q[kind] = q[kind] - 1
-		if not self.dead then receive(self, msg, sender, h, t, parsed) end
+		if not self.dead and not flushing(self) then receive(self, msg, sender, h, t, parsed) end
 	end, self)
 end
 

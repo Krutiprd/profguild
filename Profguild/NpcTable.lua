@@ -23,9 +23,9 @@ local RENEW, M, HUGE = NpcData.RENEW, NpcData.HASH_MOD, math.huge
 
 -- Inside a job of the table's scheduler: waits for the next frame when an item of `units` units
 -- would take this one past its budget (see NpcWork). Without a scheduler, or outside a job, nothing.
-local function pace(self, units)
+local function pace(self, units, kind)
 	local w = self.work
-	if w then w:Pace(units) end
+	if w then w:Pace(units, kind) end
 end
 
 -- The sendable part: entries seen at most SEND days ago with their registers of at most SEND days,
@@ -219,12 +219,16 @@ end
 local Table = {}
 Table.__index = Table
 
--- saved table -> the table made on it last (see New, Settle)
-local owners = setmetatable({}, { __mode = "k" })
+-- saved table -> the table made on it last (see New): weak both ways, a table no longer used goes
+local owners = setmetatable({}, { __mode = "kv" })
 
 -- Loads the saved sheets src into tab, then swaps them into target (the saved table).
-local function load(tab, target, src)
+local function load(tab, target)
 	local today = tab.day
+	-- read when the loading starts, not when the table was made: a job before it (/pg npc clear,
+	-- the loading of an older table on the same saved one) may have changed saved meanwhile
+	local src = target.s
+	if target.e ~= NpcData.EPOCH or type(src) ~= "table" then src = {} end
 	-- A saved sheet whose newest day is after tomorrow (the clock is behind the day it was saved)
 	-- and that is valid as of that day is held back: it stays in saved as it is, is not held,
 	-- counted or sent, no later write replaces it (Clear drops it), and it loads at a login whose
@@ -233,7 +237,7 @@ local function load(tab, target, src)
 	for key, list in pairs(src) do
 		local base = type(list) == "table" and list[8]
 		if type(base) == "number" and base > today + 1 and base == floor(base) then
-			pace(tab, 1 + listEntries(list))
+			pace(tab, 1 + listEntries(list), "load")
 			local id, s = NpcData.Unpack(list, base)
 			if s and id == key then future[key] = list end
 		end
@@ -244,7 +248,7 @@ local function load(tab, target, src)
 		if future[key] then
 			out[key] = list
 		else
-			pace(tab, 1 + (type(list) == "table" and listEntries(list) or 0))
+			pace(tab, 1 + (type(list) == "table" and listEntries(list) or 0), "load")
 			local id, s, same = unpackSame(list, today)
 			if s and id == key then
 				local a = trim(s.t, tab.lt)
@@ -255,8 +259,12 @@ local function load(tab, target, src)
 		end
 	end
 	tab:limit()
-	target.e, target.s = NpcData.EPOCH, tab.saved.s
-	tab.saved = target
+	-- an older table on a saved table a newer one was made on (a guild key that flickered) keeps
+	-- what it loaded in memory only: the newer one loads and keeps saved
+	if not tab.retired then
+		target.e, target.s = NpcData.EPOCH, tab.saved.s
+		tab.saved = target
+	end
 	tab.loading = nil
 end
 
@@ -266,30 +274,30 @@ function NpcData.New(saved, now, limits, work)
 	local tab = setmetatable({ saved = saved, now = now, work = work, skillRev = 0,
 		lt = limits.t or NpcData.LIMIT_T, lv = limits.v or NpcData.LIMIT_V,
 		le = limits.entries or NpcData.LIMIT_ENTRIES, ls = limits.sheets or NpcData.LIMIT_SHEETS }, Table)
-	local src = saved.s
-	if saved.e ~= NpcData.EPOCH or type(src) ~= "table" then src = {} end
 	-- A clock not known yet (0): the saved sheets are left untouched and this session's table
 	-- lives in memory only (tab.detached).
 	local today = tab:Today()
-	if today <= 0 then tab.saved, tab.detached, tab.real, src = {}, true, saved, {} end
+	if today <= 0 then tab.saved, tab.detached, tab.real = {}, true, saved end
 	-- the table is built in a table of its own and swapped into saved when complete: a logout
 	-- half way leaves saved as it was
 	local target = tab.saved
 	tab.saved = {}
 	-- the newest table made on a saved table owns it: an older one (a guild key that flickered, a
-	-- /reload in tests) no longer settles its day into it (Settle)
+	-- /reload in tests) is retired, it no longer writes saved nor settles its day (Settle)
 	tab.target = target
+	local old = owners[target]
+	if old and old ~= tab then old.retired = true end
 	owners[target] = tab
 	tab:reset()
 	if work then
 		if work.Watch then work:Watch(tab) end
 		tab.loading = true
-		work:Run(function() load(tab, target, src) end, tab, function()
+		work:Run(function() load(tab, target) end, tab, function()
 			-- an error half way: saved is left as it was, this session's table lives in memory only
 			tab.loading, tab.detached, tab.real = nil, true, target
 		end)
 	else
-		load(tab, target, src)
+		load(tab, target)
 	end
 	return tab
 end
@@ -385,7 +393,7 @@ function Table:put(id, s, packed)
 	if (self.skh[id] or 0) ~= sk then self.skillRev = self.skillRev + 1 end
 	self.skh[id] = sk ~= 0 and sk or nil
 	-- a held-back sheet keeps its saved place: what this session holds for that NPC is not saved
-	if not self.future[id] then self.saved.s[id] = s and (packed or NpcData.Pack(id, s)) or nil end
+	if not self.future[id] and not self.retired then self.saved.s[id] = s and (packed or NpcData.Pack(id, s)) or nil end
 	self:recut(id)
 end
 
@@ -397,7 +405,7 @@ function Table:limit()
 		local drop = {}
 		for _, d in ipairs(worst(over, function(offer, enters)
 			for npc, s in pairs(sheets) do
-				pace(self, sizes[npc] or 1)
+				pace(self, sizes[npc] or 1, "scan")
 				local nh = KeyHash(npc)
 				for id, e in pairs(s.t) do
 					if enters(e[1]) then offer(e[1], entryHash(nh, 1, id), npc, 1, id) end
@@ -414,7 +422,7 @@ function Table:limit()
 		-- a sheet is cut and stored in one slice: between slices every sheet agrees with the
 		-- counts, caches and index (the window reads them)
 		for npc, l in pairs(drop) do
-			pace(self, sizes[npc] or 1)
+			pace(self, sizes[npc] or 1, "store")
 			local s = sheets[npc]
 			for _, d in ipairs(l) do s[d[4] == 1 and "t" or "v"][d[5]] = nil end
 			self:put(npc, s)
@@ -423,11 +431,11 @@ function Table:limit()
 	over = self.nSheets - self.ls
 	if over > 0 then
 		local newest = self.newest
-		pace(self, self.nSheets)
+		pace(self, self.nSheets, "scan")
 		for _, d in ipairs(worst(over, function(offer)
 			for npc in pairs(sheets) do offer(newest[npc], KeyHash(npc), npc, 0, 0) end
 		end)) do
-			pace(self, sizes[d[3]] or 1)
+			pace(self, sizes[d[3]] or 1, "store")
 			self:put(d[3], nil)
 		end
 	end
@@ -447,7 +455,7 @@ local function due(self) return self.expiring ~= nil or self:Today() ~= self.day
 local function check(self)
 	if not due(self) then return end
 	local w = self.work
-	if w and owners[self.target] ~= self then return end -- an older table on the same saved one
+	if w and self.retired then return end -- an older table on the same saved one
 	if not w then return self:Expire() end
 	if not self.expireQueued then
 		self.expireQueued = true
@@ -460,7 +468,7 @@ end
 -- the expiry of a new day, so the job works on the table of its day as a synchronous client would.
 function Table:Settle()
 	self.expireQueued = nil -- this start settles what the queued job was for
-	if owners[self.target] ~= self then return end
+	if self.retired then return end
 	if due(self) then self:Expire() end
 end
 
@@ -487,7 +495,7 @@ function Table:Expire()
 		local id = list[ex.i]
 		local s = self.sheets[id]
 		if s then
-			pace(self, self.sizes[id])
+			pace(self, self.sizes[id], "store")
 			if self.oldest[id] < gone then
 				expireSheet(s, day)
 				self:put(id, s)
@@ -503,6 +511,9 @@ end
 -- Everything goes, also from the saved table a detached table left untouched.
 function Table:Clear()
 	if self.real then self.real.e, self.real.s = NpcData.EPOCH, {} end
+	-- the saved table too while this one still loads (a loading not started yet then finds it empty)
+	local t = self.target
+	if t and not self.detached then t.e, t.s = NpcData.EPOCH, {} end
 	self:reset()
 end
 
@@ -556,7 +567,10 @@ function Table:MergeAll(items)
 	local valid, before, merged = {}, {}, false
 	for i = 1, #items do
 		local id = items[i][1]
-		pace(self, (validID(id) and self.sizes[id] or 0) + 100)
+		-- the work of the item: the held sheet and the received one (valid, merged, stored)
+		local x = items[i][2]
+		local n = type(x) == "table" and ((type(x.t) == "table" and count(x.t) or 0) + (type(x.v) == "table" and count(x.v) or 0)) or 0
+		pace(self, (validID(id) and self.sizes[id] or 0) + n + 10, "mergeput")
 		local s = validID(id) and NpcData.Valid(items[i][2], self.day) or nil
 		if s then
 			valid[i] = s
@@ -577,7 +591,7 @@ function Table:MergeAll(items)
 		local s, c, t = valid[i], false, false
 		if s then
 			local id = items[i][1]
-			pace(self, (self.sizes[id] or 0) + 10)
+			pace(self, (self.sizes[id] or 0) + 10, "check")
 			local now = self.sheets[id]
 			if now then
 				for k in pairs(s.t) do if now.t[k] then t = true break end end
@@ -602,7 +616,7 @@ end
 function Table:OwnVisit(id, reading)
 	check(self)
 	if not validID(id) then return false end
-	pace(self, (self.sizes[id] or 0) + 100)
+	pace(self, (self.sizes[id] or 0) + 100, "mergeput")
 	local before = self.cuts[id]
 	local m, changed = NpcData.Visit(self.sheets[id], reading, self.day, { t = self.lt, v = self.lv })
 	if not changed then return false end
@@ -618,7 +632,7 @@ end
 function Table:Write(id, reading)
 	check(self)
 	if not validID(id) then return false end
-	pace(self, (self.sizes[id] or 0) + 100)
+	pace(self, (self.sizes[id] or 0) + 100, "mergeput")
 	local fresh = NpcData.Visit(nil, reading, self.day, { t = self.lt, v = self.lv })
 	if not fresh then return false end
 	local held = self.sheets[id]
@@ -659,15 +673,19 @@ function Table:Import(own)
 	local touched = false
 	for id, o in pairs(own.sheets) do
 		local held = self.sheets[id]
-		pace(self, (own.sizes[id] or 0) + (self.sizes[id] or 0) / 4)
+		local n = (own.sizes[id] or 0) + (self.sizes[id] or 0)
+		pace(self, n, "check")
 		if mayEnter(held or EMPTY, o) then
-			pace(self, (own.sizes[id] or 0) * 4)
+			-- two items: the merged sheet is made (nothing changes), then stored; only this job
+			-- changes the table, so held is still the sheet m was made from
+			pace(self, n, "merge")
 			local ins = ownRegisters(held or EMPTY, o)
 			if held or next(ins.t) or next(ins.v) then
 				local m = NpcData.Merge(held, ins)
 				makeRoom(m.t, held and held.t or EMPTY.t, self.lt, self.day)
 				makeRoom(m.v, held and held.v or EMPTY.v, self.lv, self.day)
 				if not held or not deepEqual(m, held) then
+					pace(self, count(m.t) + count(m.v), "store")
 					self:put(id, m)
 					touched = true
 				end

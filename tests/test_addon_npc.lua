@@ -103,6 +103,8 @@ H.test("text of 6145 bytes is ignored, 6144 is decoded", function()
 	ns.Comm:OnCommReceived("ProfguildNPC", textOfSize(ns, 6145), "GUILD", "Ana")
 	H.eq(#ns.npcSync.got, 0, "6145")
 	ns.Comm:OnCommReceived("ProfguildNPC", textOfSize(ns, 6144), "GUILD", "Ana")
+	-- a text this large is decoded in parts over a few frames (NpcWork)
+	M.advance(1)
 	H.eq(#ns.npcSync.got, 1, "6144")
 	H.eq(ns.npcSync.got[1].size, 6144)
 end)
@@ -1259,3 +1261,125 @@ H.test("npc: a flood of NPC texts while the work is busy is bounded; the excess 
 	H.eq(ns.Comm.npcQueued, 0, "drained")
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 end)
+
+-- Received NPC texts: bounded decoding, blocks before decoding, the NU queue, logout ---------------
+
+-- A text that inflates to about 230 kB of small numbers (a decompression bomb of 1.5 kB).
+local function bombText(ns)
+	local col, col2 = {}, {}
+	for i = 1, 120000 do col[i] = (i % 7) + 1 end
+	for i = 1, 110000 do col2[i] = (i % 5) + 1 end
+	return npcText(ns, "NU", { x = { col, col2 } })
+end
+
+-- Counts what NpcInflate wrote (its ticks) and the parts NpcWork paced while fn runs.
+local function decodeWork(ns, fn)
+	local inflate, ticks, out = ns.NpcInflate.Inflate, 0, 0
+	ns.NpcInflate.Inflate = function(str, max, tick)
+		local s, why = inflate(str, max, function(u) ticks = ticks + 1 if tick then tick(u) end end)
+		out = out + (s and #s or 0)
+		return s, why
+	end
+	local paces, pace = 0, ns.npcWork.Pace
+	ns.npcWork.Pace = function(self, u, k) if k == "inflate" or k == "deserialize" or k == "text" then paces = paces + 1 end return pace(self, u, k) end
+	fn()
+	ns.NpcInflate.Inflate, ns.npcWork.Pace = inflate, nil
+	return ticks, paces, out
+end
+
+H.test("npc comm: a decompression bomb stops unpacking at NPC_MAX_SERIALIZED; its sender is ignored", function()
+	local ns = boot()
+	M.advance(30)
+	local text = bombText(ns)
+	H.ok(#text < 2000, "small when packed: " .. #text)
+	local ticks = decodeWork(ns, function()
+		ns.Comm:OnCommReceived("ProfguildNPC", text, "GUILD", "Evil")
+		M.advance(1)
+	end)
+	H.ok(ns.Comm.blocked.Evil, "the sender ignored")
+	-- 16 kB at most: a few dozen parts, not the 230 kB the text holds
+	H.ok(ticks < 80, "inflate stopped early: " .. ticks .. " parts")
+	-- a second bomb of the same sender is not decoded at all
+	local again = decodeWork(ns, function()
+		ns.Comm:OnCommReceived("ProfguildNPC", text, "GUILD", "Evil")
+		M.advance(1)
+	end)
+	H.eq(again, 0, "not decoded again")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+end)
+
+H.test("npc comm: an NU over the bounds blocks its sender before the next text is decoded", function()
+	local ns = boot()
+	M.advance(30)
+	local NpcSync = ns.NpcSync
+	local x = {}
+	for i = 1, NpcSync.NU_SHEETS + 1 do x[i] = ns.NpcData.Pack(70000 + i, { name = "N", nd = math.floor(GetServerTime() / 86400), t = { [5] = { math.floor(GetServerTime() / 86400), 0, 0, 0, 0 } }, v = {} }) end
+	ns.Comm:OnCommReceived("ProfguildNPC", npcText(ns, "NU", { x = x }), "GUILD", "Evil")
+	M.advance(1)
+	H.eq(ns.npcSync.stats.bad, 1, "refused")
+	H.ok(ns.npcSync:Blocked("Evil"), "blocked by NpcSync")
+	local ticks, paces = decodeWork(ns, function()
+		ns.Comm:OnCommReceived("ProfguildNPC", npcText(ns, "ND", { n = 1 }), "GUILD", "Evil")
+		M.advance(1)
+	end)
+	H.eq(ticks + paces, 0, "the next text of the sender is not decoded")
+	H.eq(ns.npcSync.stats.recv.ND, nil, "nor read")
+	H.ok(ns.npcSync.stats.capped >= 1, "counted")
+end)
+
+H.test("npc comm: a large text is decoded in parts (inflate, deserialize), each paced; the message is the same", function()
+	local ns = boot()
+	M.advance(30)
+	local ids, c = {}, {}
+	for i = 1, 600 do ids[i] = 1 + (i * 7919) % 3000 c[i] = (i * 104729) % 65536 end
+	local text = npcText(ns, "NI", { r = 5, i = ids, c = c })
+	local got
+	local sync = ns.npcSync
+	ns.npcSync = { OnMessage = function(_, msg) got = msg end, stats = {} }
+	local _, paces = decodeWork(ns, function()
+		ns.Comm:OnCommReceived("ProfguildNPC", text, "GUILD", "Ana")
+		M.advance(1)
+	end)
+	ns.npcSync = sync
+	H.ok(paces >= 4, "paced parts: " .. paces)
+	local want = ns.Comm.Decode(text)
+	H.ok(got and same(got, want), "the same message as decoded at once")
+	H.ok(same(ns.Comm.DecodeNpc(text), want), "DecodeNpc too")
+end)
+
+H.test("npc comm: NU texts waiting for the loading are capped at NpcSync.QUEUE_NU; other messages are not", function()
+	local ns = bootFull()
+	-- the clock of the budget moves (1 ms a reading), so that the frame's budget is spent
+	_G.debugprofilestop = function() M.cpu = M.cpu + 1 return M.cpu end
+	local before = ns.npcSync.stats.overflow
+	for i = 1, ns.NpcSync.QUEUE_NU + 15 do
+		receiveNU(ns, 7100 + i, vendorReading(2000 + i), "Mate" .. i)
+		ns.Comm:OnCommReceived("ProfguildNPC", npcText(ns, "ND", { n = 3 }), "GUILD", "Other" .. i)
+	end
+	untilDone(ns)
+	H.eq(ns.npcSync.stats.overflow - before, 15, "the NUs over the cap dropped and counted")
+	H.eq(ns.npcSync.stats.recv.ND, ns.NpcSync.QUEUE_NU + 15, "every ND read")
+	local merged = 0
+	for i = 1, ns.NpcSync.QUEUE_NU + 15 do if ns.npc:Get(7100 + i) then merged = merged + 1 end end
+	H.eq(merged, ns.NpcSync.QUEUE_NU, "the first QUEUE_NU merged")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+end)
+
+H.test("npc comm: at logout received texts are dropped and counted, own readings are saved; the logout is short", function()
+	local ns = bootFull()
+	local key = ns.guildKey
+	ns.npcReader.onReading(5001, trainerReading())
+	for i = 1, 20 do receiveNU(ns, 7200 + i, vendorReading(3000 + i), "Mate" .. i) end
+	H.ok(ns.Comm.npcQueued > 0, "texts wait")
+	local decoded = decodeWork(ns, function() M.fire("PLAYER_LOGOUT") end)
+	H.ok(not ns.npcWork:Busy(), "done at logout")
+	H.eq(decoded, 0, "nothing decoded at logout")
+	H.eq(ns.npcSync.stats.flushed, 20, "the received texts counted")
+	H.eq(ns.Comm.npcQueued, 0)
+	H.ok(ProfguildDB.npcOwn.Alliance.s[5001], "the own reading saved in npcOwn")
+	H.ok(ProfguildDB.guilds[key].npc.Alliance.s[5001], "and in the guild's table")
+	H.eq(ProfguildDB.guilds[key].npc.Alliance.s[7201], nil, "a received NU not merged at logout")
+	H.ok(ProfguildDB.guilds[key].npc.Alliance.s[60290], "the guild's sheets saved")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+end)
+

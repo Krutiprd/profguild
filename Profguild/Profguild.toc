@@ -32,6 +32,7 @@ NpcTable.lua
 NpcSync.lua
 NpcReader.lua
 NpcView.lua
+NpcInflate.lua
 Prices.lua
 Data.lua
 Scanner.lua

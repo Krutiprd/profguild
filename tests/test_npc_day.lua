@@ -328,3 +328,42 @@ H.test("day: midnight at any frame of loading, merges, NIs, NUs, own readings an
 		H.eq(tab:Hash(), freshHash(tab, clock), "seed " .. seed .. ": the table equals one cut on its day")
 	end
 end)
+
+H.test("day: a table no longer used is collected (none kept by the owner map or the scheduler)", function()
+	local clock = function() return DAY * 86400 + 3600 end
+	local w = work(200)
+	local saved = savedTable(5, clock, 5)
+	local probe = setmetatable({}, { __mode = "v" })
+	probe[1] = ND.New(saved, clock, nil, w)
+	w.pump()
+	local keep = ND.New(saved, clock, nil, w) -- a newer table on the same saved one
+	w.pump()
+	H.ok(probe[1].retired, "the older one is retired")
+	collectgarbage("collect") collectgarbage("collect")
+	H.eq(probe[1], nil, "the older one collected")
+	H.ok(keep.nSheets == 5)
+	probe[2] = keep
+	keep = nil
+	collectgarbage("collect") collectgarbage("collect")
+	H.eq(probe[2], nil, "the newer one collected once dropped")
+end)
+
+H.test("day: an older table on the same saved one neither writes it nor settles; a clear holds", function()
+	local T = DAY * 86400 + 3600
+	local clock = function() return T end
+	local w = work(20)
+	local saved = savedTable(30, clock, 5)
+	local old = ND.New(saved, clock, nil, w)
+	w.pump()
+	-- a clear queued, then the table made anew on the same saved one before the clear ran
+	w.newFrame()
+	w:Run(function() w:Pace(1000) end)
+	local now
+	w:Run(function() now:Clear() end)
+	now = ND.New(saved, clock, nil, w)
+	w.pump()
+	H.eq(now.nSheets, 0, "the clear holds in the new table")
+	H.eq(next(saved.s), nil, "and in saved")
+	old:MergeIn(99, { name = "X", nd = DAY, t = { [1] = { DAY, 0, 0, 0, 0 } }, v = {} })
+	H.eq(saved.s[99], nil, "the older table does not write saved")
+end)
