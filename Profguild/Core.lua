@@ -78,7 +78,7 @@ local function initDB()
 	db.settings.lang = db.settings.lang or "en"
 	if db.settings.onlineOnly == nil then db.settings.onlineOnly = false end
 	db.settings.staleDays = db.settings.staleDays or ns.Config.staleDays
-	db.guilds = db.guilds or {}
+	if type(db.guilds) ~= "table" then db.guilds = {} end
 	db.own = db.own or {}
 	-- reagents per recipe: game data, kept for the whole account (see Reagents.lua)
 	if type(db.reagents) ~= "table" then db.reagents = {} end
@@ -648,6 +648,8 @@ function ns.SetupNpc()
 		tab:Import(ns.npcOwn)
 		ns.npcGuild = tab
 		ns.npcSync = NpcSync.New(npcAdapter, tab)
+		-- made after the login hello (the faction was not known then): its ND need not wait 900 s
+		if ns.loginHelloPassed then ns.npcSync:Announce() end
 	end
 	local shown = ns.npc
 	ns.npc = ns.npcGuild or ns.npcOwn
@@ -755,11 +757,11 @@ function ns.SetupGuild()
 		ns.OnDataChanged()
 		return
 	end
-	ns.db.guilds[key] = ns.db.guilds[key] or {}
+	if type(ns.db.guilds[key]) ~= "table" then ns.db.guilds[key] = {} end
 	-- older versions saved the guild under "name@realm"; join those databases into this one
 	local prefix = key .. "@"
 	for oldKey, data in pairs(ns.db.guilds) do
-		if type(oldKey) == "string" and oldKey ~= key and oldKey:sub(1, #prefix) == prefix then
+		if type(oldKey) == "string" and oldKey ~= key and oldKey:sub(1, #prefix) == prefix and type(data) == "table" then
 			local taken = Store.MergeGuildData(ns.db.guilds[key], data)
 			ns.db.guilds[oldKey] = nil
 			ns.Log("guild data saved as \"%s\" joined: %d records", oldKey, taken)
@@ -767,7 +769,7 @@ function ns.SetupGuild()
 	end
 	ns.Log("guild %s, realm reported now: %s", key, tostring(realm))
 	ns.guildDB = ns.db.guilds[key]
-	ns.guildDB.names = ns.guildDB.names or {}
+	if type(ns.guildDB.names) ~= "table" then ns.guildDB.names = {} end
 	ns.store = Store.New(ns.guildDB)
 	ns.sync = Sync.New(adapter, ns.store, ns.version)
 	-- auction prices shared in this guild (GuildPrices.lua); old ones are dropped
@@ -791,7 +793,10 @@ function ns.SetupGuild()
 	Scanner.RequestRoster()
 	ns.RefreshOwn()
 	local d = ns.Config.loginHelloDelay
-	C_Timer.After(d[1] + math.random() * (d[2] - d[1]), function() ns.Hello(true) end)
+	C_Timer.After(d[1] + math.random() * (d[2] - d[1]), function()
+		ns.loginHelloPassed = true
+		ns.Hello(true)
+	end)
 	ns.OnDataChanged()
 end
 

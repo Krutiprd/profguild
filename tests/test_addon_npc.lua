@@ -1073,3 +1073,31 @@ H.test("npc: the end of combat lets the reader read windows opened in combat", f
 	H.eq(called, 1, "CombatEnded at PLAYER_REGEN_ENABLED")
 	ns.npcReader.CombatEnded = nil
 end)
+
+H.test("saved data: a broken guilds table or guild entry loads without an error", function()
+	local ns = boot()
+	local key = ns.guildKey
+	H.ok(key, "in a guild")
+	for _, guilds in ipairs({ "junk", 5, { [key] = "junk" }, { [key] = 7, [key .. "@Old Realm"] = "junk" } }) do
+		ProfguildDB.guilds = guilds
+		local ok, err = pcall(boot, nil, true)
+		H.ok(ok, tostring(err))
+		ns = ok and err or ns
+		H.eq(ns.lastError, nil, tostring(ns.lastError))
+		H.ok(ns.store and ns.guildDB and type(ProfguildDB.guilds[key]) == "table", "the guild's data made again")
+		H.ok(ns.npc and ns.npcSync, "the guild's NPC table")
+	end
+end)
+
+H.test("npc: a sync made after the login hello (faction known late) announces itself", function()
+	local faction = nil
+	local ns = boot(function() _G.UnitFactionGroup = function() return faction, faction end end)
+	M.advance(60) -- the login hello has gone out
+	H.eq(ns.npcSync, nil)
+	local from = #M.sent
+	faction = "Alliance"
+	M.fire("GUILD_ROSTER_UPDATE")
+	M.advance(30)
+	H.ok(ns.npcSync, "made")
+	H.ok(#sentNpc(ns, from, "ND") >= 1, "ND within 30 s, not at the next 900 s hello")
+end)
