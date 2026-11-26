@@ -104,12 +104,12 @@ založená postava alebo hráč, ktorý sa práve prihlásil. Požiadavky aj cen
 | A otvorí predajcu receptov (recept s cenou, s „obmedzené množstvo“) | `/pg npc` ukáže predajcu; u B riadok „Vendor: …“ s cenou, „obmedzené množstvo“ |
 | A znova otvorí toho istého trénera s iným filtrom (napr. skryté známe recepty) | Nič sa nestratí: u B ostanú všetky recepty z predošlého čítania |
 | Nová postava C sa prihlási a hneď (do 5 s) otvorí trénera | Dáta od A a B ostanú, C dostane tabuľku guildy do pár minút (`/pg npc` rastie) |
-| A otvorí trénera v boji (alebo B v boji otvorí predajcu) | Nič sa nezapíše, žiadna chyba; po boji a opätovnom otvorení sa zapíše |
+| A otvorí trénera v boji (alebo B v boji otvorí predajcu) | Kým trvá boj, nič sa nezapíše, žiadna chyba; ak je okno po boji ešte otvorené, zapíše sa hneď po boji (inak pri ďalšom otvorení) |
 | A vidí vlastnú cenu iného dňa | Vlastná cena z posledných 30 dní je bez `~`, cena guildy so `~` |
 | Recept bez trénera aj predajcu | „zdroj nie je známy“ / „pravdepodobne tréner, guilda zatiaľ žiadneho nevidela“ / „guilda zatiaľ nevidela vendora“, aukcia ak recept má predmet |
 | Zelený rám | Má ho riadok s najnižšou cenou (aspoň dva riadky s cenou) |
 | Tlačidlo „NÁJSŤ RECEPT“ znova, „SPÄŤ K SUROVINÁM“, iný recept, iná karta | Návrat k surovinám, žiadna Lua chyba, kolieskom sa posúva zoznam |
-| Tlačidlo „Mapa“ pri trénerovi | Na mape sa objaví špendlík na mieste NPC (alebo TomTom, ak je) |
+| Tlačidlo „Mapa“ pri trénerovi | Na mape sa objaví špendlík na mieste NPC (alebo TomTom, ak je); v chate „Značka na mape: <meno>“, ak sa nedá, „Značku na mapu sa nepodarilo dať.“ |
 | `/pg status` a `/pg npc` | Riadok o NPC dátach; počty NPC, receptov a preskočených mien |
 | `/pg npc clear` | Dáta frakcie zmiznú lokálne; do pár minút ich guilda pošle späť |
 
@@ -117,7 +117,7 @@ Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
 
 - Špendlík na mape (`Mapa`): ukáže sa, v správnom meste a na správnom mieste? Bez TomTom aj s ním.
 - Predajca s inou menou (žetóny, odznaky, predmet namiesto zlata): cena a „iná cena“ v riadku.
-- Obmedzený počet pri predajcovi: riadok hovorí „obmedzené množstvo“.
+- Obmedzený počet pri predajcovi: riadok hovorí „obmedzené množstvo“ (pred zónou; hover ho ukáže tiež), cena je v riadku mena.
 - Dve reputácie: tá istá cena pri inej reputácii (zľava) nerobí zmätok; po čase zostane základná cena.
 - Tréner s ponechanými všetkými filtrami (zobraziť aj nedostupné/známe): recepty sa prečítajú, žiadne dvojité.
 - Neanglické názvy povolaní a receptov (klient v inom jazyku): recepty sa priradia, `/pg npc` nehlási veľa preskočených mien.

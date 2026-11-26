@@ -83,7 +83,7 @@ Saved: `ProfguildDB.guilds[key].npc[faction] = { e = EPOCH, s = { [npcID] = shee
 `ProfguildDB.npcOwn[faction]` (no realm: its name changes between logins, see Scanner.GuildKey), the same shape: only what was read on this account, always the last known
 reading of each register with its day (local, no traffic). At guild setup every npcOwn register goes into the
 guild's table by the own-visit rules as of its own day (older days change nothing; at an equal day the greater value stays). So nothing learned from guild A
-reaches guild B. Without a guild the window reads npcOwn. Both tables are validated at load like messages.
+reaches guild B. Without a guild there is no guild's table and no sharing: readings still go into npcOwn and `/pg npc` counts it, but the window, which lists the guild's recipes, shows only that the character is in no guild. Both tables are validated at load like messages.
 Messages carry the faction, another one is ignored.
 
 Limits, applied in this order after a merge: entries per sheet (no limit by size: one by content does not converge); 20 000 entries; 600 sheets. The older goes first (`seen`; a
