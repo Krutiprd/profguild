@@ -545,3 +545,35 @@ H.test("NpcReader in Core: trainer events give a reading, recipeInfo.m as today"
 	C_Map, IsTradeskillTrainer, GetNumTrainerServices, GetTrainerServiceInfo, GetTrainerServiceSkillReq, GetTrainerServiceCost = nil, nil, nil, nil, nil, nil
 	GetMerchantNumItems, GetMerchantItemID, C_MerchantFrame, GetMerchantItemCostInfo, GetItemInfoInstant = nil, nil, nil, nil, nil
 end)
+
+H.test("NpcReader bounds (mutation check): grey equal to the skill, 0.5 s, the largest NPC ID, four costs", function()
+	local recipes = { { id = 11, name = "A", line = 171, item = 901, grey = 100 }, { id = 12, name = "A", line = 171, item = 902, grey = 99 } }
+	local t = R.Match({ svc("A", 100, 5) }, recipes)
+	H.ok(t[11], "a grey equal to the skill fits in step 4") H.eq(t[11] and t[11].skill, 100, "and the skill is kept")
+
+	local g = newGame()
+	alchemy(g)
+	openTrainer(g)
+	g.run(0.45)
+	H.eq(#g.readings, 0, "not read before 0.5 s")
+	g.run(0.05)
+	H.eq(#g.readings, 1, "read at 0.5 s")
+
+	for _, case in ipairs({ { "2147483647", 1 }, { "2147483648", 0 } }) do
+		g = newGame()
+		alchemy(g)
+		g.guid = "Creature-0-55165-1-15571149-" .. case[1] .. "-DB04E5BC4A"
+		openTrainer(g)
+		g.run(1)
+		H.eq(#g.readings, case[2], "NPC ID " .. case[1])
+	end
+
+	g = newGame()
+	nata(g)
+	local costs = {}
+	for i = 1, 4 do costs[i] = { count = i, link = "|Hitem:" .. (20720 + i) .. "|h[Shard]|h", name = "Shard" } end
+	g.items = { item(6377, 900, { costs = costs }) }
+	openMerchant(g)
+	g.run(0.5)
+	H.eq(g.readings[1].r.v[6377].price, nil, "four other costs: seen only")
+end)

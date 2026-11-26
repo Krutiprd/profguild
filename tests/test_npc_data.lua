@@ -894,3 +894,145 @@ H.test("npc data: import", function()
 	guild:Clear()
 	H.eq(guild:Count(), 0, "clear") H.eq(next(guild.saved.s), nil)
 end)
+
+-- Bounds the tests above leave open (the 0.7.0 mutation check) ----------------
+
+H.test("npc data: 1 is a value; other costs of the same number differ in both directions; cost kind 0", function()
+	local one = { t = { [1] = { D, 1, D + 1, 1, D + 1 } }, v = {} }
+	H.ok(deepEq(ND.Merge(one, nil).t[1], { D, 1, D + 1, 1, D + 1 }), "skill 1 and copper 1 kept by a merge")
+	H.ok(deepEq(ND.Merge(nil, one).t[1], { D, 1, D + 1, 1, D + 1 }), "skill 1 and copper 1 kept, other side")
+
+	local held = { t = {}, v = { [7] = { D, price(100, { { 1, 5, 1 } }), D } } }
+	for _, id in ipairs({ 4, 6 }) do
+		local s = ND.Visit(held, soldReading(price(120, { { 1, id, 1 } })), D + 1, LIMIT)
+		H.eq(s.v[7][2].c, 100, "other cost id " .. id .. " instead of 5: a higher copper waits 14 days")
+		s = ND.Visit(held, soldReading(price(90, { { 1, id, 1 } })), D + 15, LIMIT)
+		H.eq(s.v[7][2].c, 90, "other cost id " .. id .. " instead of 5: a lower copper after 15 days")
+	end
+
+	H.eq(ND.Valid({ t = {}, v = { [7] = { D, price(1, { { 0, 1, 1 } }), D } } }, D).v[7][2], false, "cost kind 0 is no price")
+end)
+
+H.test("npc data: Valid at the bounds of head days, places and trained copper 0", function()
+	local function sheet() return { name = "V", nd = D, map = 1, x = 50, y = 50, pd = D, t = { [1] = { D, 10, D, 100, D } }, v = {} } end
+	local function valid(k, v)
+		local s = sheet()
+		s[k] = v
+		return ND.Valid(s, D)
+	end
+	H.eq(valid("nd", 0).name, "V", "a name of day 0 is kept") H.eq(valid("nd", -1).name, nil, "a name of day -1 is dropped")
+	H.eq(valid("pd", 0).map, 1, "a place of day 0 is kept") H.eq(valid("pd", -1).map, nil, "a place of day -1 is dropped")
+	H.eq(valid("y", 0).y, 0, "y 0") H.eq(valid("y", 101).map, nil, "y 101") H.eq(valid("x", -1).map, nil, "x -1")
+	local s = sheet()
+	s.t[1][4] = 0
+	local e = ND.Valid(s, D).t[1]
+	H.eq(e[4], 0, "trained copper 0 is unknown") H.eq(e[5], 0, "with day 0")
+end)
+
+H.test("npc data: an own visit pushes out only as many old entries as the new ones need", function()
+	local held = { t = {}, v = {} }
+	for id = 1, 10 do held.t[id] = { D - 20, 10, D - 20, 0, 0 } end
+	local s = ND.Visit(held, trainerReading({ [100] = 10 }), D, { t = 10, v = 60 })
+	H.eq(count(s.t), 10, "at the limit, not below") H.ok(s.t[100], "the new one entered")
+end)
+
+H.test("npc data: own visit at the bounds of places, skill and copper", function()
+	local function place(map, x, y) return ND.Visit(nil, trainerReading({ [1] = 50 }, { map = map, x = x, y = y }), D, LIMIT) end
+	for _, ok in ipairs({ { 0, 0, 0 }, { 1, 100, 100 } }) do
+		local s = place(ok[1], ok[2], ok[3])
+		H.eq(s.map, ok[1], "place written " .. table.concat(ok, ",")) H.eq(s.x, ok[2]) H.eq(s.y, ok[3])
+	end
+	for _, bad in ipairs({ { -1, 5, 5 }, { 1, -1, 5 }, { 1, 5, -1 }, { 1, 101, 5 }, { 1, 5, 101 } }) do
+		H.eq(place(bad[1], bad[2], bad[3]).map, nil, "place not written " .. table.concat(bad, ","))
+	end
+	local s = ND.Visit(nil, { t = { [1] = { skill = 1, copper = 1 } }, v = {} }, D, LIMIT)
+	H.eq(s.t[1][2], 1, "skill 1 is written") H.eq(s.t[1][4], 1, "copper 1 is written")
+	s = ND.Visit({ t = { [1] = { D - 1, 0, 0, 0, 0 } }, v = {} }, { t = { [1] = { skill = 0, copper = 0 } }, v = {} }, D, LIMIT)
+	H.ok(deepEq(s.t[1], { D - 1, 0, 0, 0, 0 }), "skill and copper 0 are not written")
+	local held = { t = { [1] = { D, 1, D, 1, D } }, v = {} }
+	s = ND.Visit(held, { t = { [1] = { skill = 5, copper = 1 } }, v = {} }, D + 1, LIMIT)
+	H.ok(deepEq(s.t[1], { D, 1, D, 1, D }), "a held skill 1 and copper 1 of yesterday stay")
+end)
+
+H.test("npc data: pack and unpack at the bounds", function()
+	local T = D + 300
+	local function sheet(x)
+		return { name = "N", nd = T - 3, map = x == 0 and 0 or 100000, x = x, y = x, pd = T - 2,
+			t = { [5] = { T, 1, T - 7, 1, T - 9 }, [9] = { T - 1, 0, 0, 0, 0 }, [2147483647] = { T, 0, 0, 0, 0 } },
+			v = { [3] = { T, price(5, { { 1, 2, 3 } }), T - 1 }, [4] = { T - 1, false, 0 }, [2147483647] = { T, false, 0 } } }
+	end
+	for _, x in ipairs({ 0, 100 }) do
+		local s = sheet(x)
+		H.ok(deepEq(select(2, ND.Unpack(ND.Pack(1, s), T)), s), "round trip: place " .. x .. ", skill and copper 1, ID 2^31-1")
+	end
+	local list = ND.Pack(1, sheet(0))
+	H.eq(list[13][2], 0, "the day of an unknown skill is stored as 0")
+	H.eq(list[14][2], 0, "the day of an unknown copper is stored as 0")
+	local cases = {
+		ndNeg = function(l) l[3] = -1 end, mapNeg = function(l) l[4] = -1 end, xNeg = function(l) l[5] = -1 end,
+		x101 = function(l) l[5] = 101 end, yNeg = function(l) l[6] = -1 end, y101 = function(l) l[6] = 101 end,
+		pdNeg = function(l) l[7] = -1 end, skillNeg = function(l) l[10][1] = -1 end, copperNeg = function(l) l[11][1] = -1 end,
+		seenNeg = function(l) l[12][1] = -1 end, skillDayNeg = function(l) l[13][1] = -1 end,
+		copperDayNeg = function(l) l[14][1] = -1 end, vidsZero = function(l) l[15][2] = 0 end,
+		priceMinus2 = function(l) l[16][2] = -2 end, termsNeg = function(l) l[17][1], l[20] = -1, {} end,
+		vseenNeg = function(l) l[18][1] = -1 end, priceDayNeg = function(l) l[19][1] = -1 end,
+		fourCosts = function(l) l[17][1], l[20] = 8, { 1, 2, 3, 1, 2, 4, 1, 2, 5, 1, 2, 6 } end,
+		unknownPriceLimited = function(l) l[17][2] = 1 end, costZero = function(l) l[20][2] = 0 end,
+	}
+	for name, change in pairs(cases) do
+		local l = ND.Pack(1, sheet(0))
+		change(l)
+		local id, s = ND.Unpack(l, T)
+		H.eq(id, 1, name) H.eq(s, nil, "a broken list is no sheet: " .. name)
+	end
+end)
+
+H.test("npc data: hash values are fixed (clients compare them)", function()
+	local s = { name = "Ab", nd = 20005, map = 1415, x = 40, y = 60, pd = 20004,
+		t = { [5] = { 20005, 10, 20003, 500, 20002 }, [9] = { 20004, 0, 0, 0, 0 } },
+		v = { [7] = { 20005, price(100, { { 1, 42, 5 } }, 1), 20005 }, [8] = { 20001, false, 0 } } }
+	H.eq(ND.HashSheet(1234, s), 1429718044, "HashSheet")
+	H.eq(ND.SaltedHash(1429718044, 77), 38687, "SaltedHash")
+	H.eq(ND.KeyHash(1234), 2808649522, "KeyHash")
+end)
+
+H.test("npc data: the table at its edges: sendable, expiry, the day, import and write", function()
+	local T = D + 300
+	local tab = newTable(T)
+	tab:MergeIn(5, { t = { [1] = { T, 10, T - 118, 20, T - 118 } }, v = { [3] = { T, price(5), T - 118 } } })
+	local c = tab:Sendable(5)
+	H.eq(c.t[1][2], 10, "a skill 118 days old is sent") H.eq(c.v[3][2].c, 5, "a price 118 days old is sent")
+
+	local tab2, set = newTable(T)
+	tab2:MergeIn(5, { t = { [1] = { T, 1, T - 1, 1, T - 1 } }, v = { [3] = { T - 1, price(5), T - 1 }, [4] = { T, price(6), T } } })
+	set(T + 119)
+	H.ok(tab2:Get(5).v[3] and tab2:Get(5).v[3][2], "a sold entry and price 120 days old stay")
+	set(T + 120)
+	local s = tab2:Get(5)
+	H.eq(s.t[1][2], 0, "a skill 1 of 121 days goes") H.eq(s.t[1][4], 0, "a copper 1 of 121 days goes")
+	H.eq(s.v[3], nil, "a sold entry of 121 days goes")
+
+	H.eq(ND.New({}, function() return T * 86400 + 86399 end):Today(), T, "the last second of a day is that day")
+
+	local X = T - 40
+	local guild, own = newTable(T), newTable(T)
+	local g5 = { name = "G", nd = X, map = 1, x = 1, y = 1, pd = X, t = { [1] = { X, 10, X, 0, 0 } }, v = { [3] = { X, false, 0 } } }
+	guild:MergeIn(5, g5)
+	own:MergeIn(5, { name = "O", nd = X + 14, map = 2, x = 2, y = 2, pd = X + 14, t = { [1] = { X + 14, 20, X + 14, 0, 0 } },
+		v = { [3] = { X + 14, false, 0 } } })
+	guild:MergeIn(6, { t = { [2] = { X, 10, X, 0, 0 }, [3] = { X, 0, 0, 500, X }, [4] = { X, 1, X, 1, X } }, v = {} })
+	own:MergeIn(6, { t = { [2] = { X + 1, 1, X + 15, 0, 0 }, [3] = { X + 1, 0, 0, 1, X + 31 }, [4] = { X + 1, 5, X + 5, 1, X + 5 } }, v = {} })
+	guild:Import(own)
+	H.ok(deepEq(guild:Get(5), g5), "own registers 14 days newer do not enter (name, place, seen, skill, sold seen)")
+	local g6 = guild:Get(6).t
+	H.ok(deepEq(g6[2], { X, 1, X + 15, 0, 0 }), "an own skill 1 of 15 days newer enters")
+	H.ok(deepEq(g6[3], { X, 0, 0, 1, X + 31 }), "an own copper 1 of 31 days newer enters")
+	H.ok(deepEq(g6[4], { X, 1, X, 1, X }), "a held skill 1 and copper 1 wait like any other")
+
+	local w = newTable(T)
+	w:Write(7, { t = { [1] = { skill = 10, copper = 100 } }, v = {} })
+	w:Write(7, { t = { [1] = {} }, v = {} })
+	H.eq(w:Get(7).t[1][2], 10, "write: a skill not read stays") H.eq(w:Get(7).t[1][4], 100, "write: a copper not read stays")
+	w:Write(7, { t = { [1] = { skill = 1, copper = 1 } }, v = {} })
+	H.eq(w:Get(7).t[1][2], 1, "write: skill 1") H.eq(w:Get(7).t[1][4], 1, "write: copper 1")
+end)

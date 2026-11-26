@@ -888,3 +888,351 @@ H.test("sync: a sheet's packed content hashes the same at the receiver", functio
 	H.eq(b.tab:Hash(), a.tab:Hash(), "table")
 	H.ok(b.changes > 0, "changed() called")
 end)
+
+-- Exact bounds and times the tests above leave open (the 0.7.0 mutation check) ----
+
+local function near(a, b) return math.abs(a - b) < 1e-6 end
+local R1 = 0.9999 -- random() near its top: a range [lo, hi] gives lo + (hi - lo) * R1
+
+H.test("sync bounds: an equal ND heard exactly 600 s before the hello holds it back", function()
+	local env = newEnv({ random = 0.5 })
+	incoming(env, "ND", { h = env.tab:Hash(), n = 0 })
+	env.run(590)
+	env.sync:Announce()
+	env.run(10.5)
+	H.eq(#sentOf(env, "ND"), 0, "600 s")
+end)
+
+H.test("sync bounds: an ND is repeated 60 s after it at the lowest random, 120 s at the highest", function()
+	for _, r in ipairs({ 0, R1 }) do
+		local env = newEnv({ random = r })
+		env.sync:Announce()
+		env.run(1000)
+		local nd = sentOf(env, "ND")
+		H.eq(#nd, 4, "first and 3 repeats")
+		for i = 2, 4 do H.ok(near(nd[i].t - nd[i - 1].t, 60 + 60 * r), "repeat after " .. (nd[i].t - nd[i - 1].t)) end
+	end
+end)
+
+H.test("sync bounds: an ND repeat waits until 12 s after the last data plus 0-8 s", function()
+	-- random 0: ND at 10, check at 70, an NU at 65: the repeat at 65 + 12
+	local env = newEnv({ random = 0 })
+	env.sync:Announce()
+	env.runTo(65)
+	incoming(env, "NU", { h = 555, x = {} }, "Cid-Realm")
+	env.runTo(200)
+	local nd = sentOf(env, "ND")
+	H.ok(nd[2] and near(nd[2].t, 77), "repeat at " .. tostring(nd[2] and nd[2].t))
+	-- random 0.5: ND at 10, check at 100, an NU at 95: 100 + 12 - 5 + 4
+	env = newEnv({ random = 0.5 })
+	env.sync:Announce()
+	env.runTo(95)
+	incoming(env, "NU", { h = 555, x = {} }, "Cid-Realm")
+	env.runTo(200)
+	nd = sentOf(env, "ND")
+	H.ok(nd[2] and near(nd[2].t, 111), "repeat at " .. tostring(nd[2] and nd[2].t))
+end)
+
+H.test("sync bounds: an equal ND heard while the own one goes out confirms it", function()
+	local env = newEnv({ random = 0.5 })
+	env.sync:Announce()
+	env.runTo(10)
+	H.eq(#sentOf(env, "ND"), 1)
+	incoming(env, "ND", { h = env.tab:Hash(), n = 0 }, "Cid-Realm")
+	env.run(5000)
+	H.eq(#sentOf(env, "ND"), 1, "not repeated")
+end)
+
+H.test("sync bounds: the NI 2 s after the ND at the lowest random, 20 s at the highest; 12 s after data plus 0-12 s", function()
+	for _, r in ipairs({ 0, R1 }) do
+		local env = newEnv({ random = r })
+		incoming(env, "ND", { h = 777, n = 3 })
+		env.run(60)
+		local list = sentOf(env, "NI")
+		H.ok(#list == 1 and near(list[1].t, 2 + 18 * r), "NI at " .. tostring(list[1] and list[1].t))
+	end
+	-- random 0.5: the try at 11, an NU at 10: again 12 - 1 + 6 s later
+	local env = newEnv({ random = 0.5 })
+	incoming(env, "ND", { h = 777, n = 3 })
+	env.runTo(10)
+	incoming(env, "NU", { h = 555, x = {} }, "Cid-Realm")
+	env.run(60)
+	local list = sentOf(env, "NI")
+	H.ok(#list == 1 and near(list[1].t, 28), "NI at " .. tostring(list[1] and list[1].t))
+end)
+
+H.test("sync bounds: under data the NI waits while at most 120 s have passed since planning", function()
+	-- random 0.5: tries at 11, then 18 - q later, q = seconds since the last NU; the last try at 120 or 120.5
+	for _, case in ipairs({ { 2, 137 }, { 1.5, 120.5 } }) do
+		local env = newEnv({ random = 0.5 })
+		incoming(env, "ND", { h = 777, n = 3 })
+		local t, qs = 11, { 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, case[1] }
+		env.runTo(t - 2.5)
+		incoming(env, "NU", { h = 555, x = {} }, "Cid-Realm")
+		for i = 2, #qs do
+			t = t + 18 - qs[i - 1]
+			env.runTo(t - qs[i])
+			incoming(env, "NU", { h = 555, x = {} }, "Cid-Realm")
+		end
+		t = t + 18 - qs[#qs]
+		env.runTo(t - 1)
+		incoming(env, "NU", { h = 555, x = {} }, "Cid-Realm")
+		env.runTo(300)
+		local list = sentOf(env, "NI")
+		H.ok(#list == 1 and near(list[1].t, case[2]), "last try at " .. t .. ": NI at " .. tostring(list[1] and list[1].t))
+	end
+end)
+
+H.test("sync bounds: the second own NI 65.01 s after the first", function()
+	local env = newEnv({ random = 0 })
+	incoming(env, "ND", { h = 777, n = 3 })
+	env.run(3)
+	incoming(env, "ND", { h = 778, n = 3 }, "Cid-Realm")
+	env.run(300)
+	local list = sentOf(env, "NI")
+	H.ok(#list == 2 and near(list[2].t, list[1].t + 65.01), "at " .. tostring(list[2] and list[2].t))
+end)
+
+H.test("sync bounds: the NI salt reaches 65535", function()
+	local env = newEnv({ random = 0.99999 })
+	incoming(env, "ND", { h = 777, n = 3 })
+	env.run(60)
+	H.eq(sentOf(env, "NI")[1].msg.r, 65535)
+end)
+
+H.test("sync bounds: NR 1 s after the NI at the lowest random, 8 s at the highest; the answer 2 s after an NR", function()
+	for _, r in ipairs({ 0, R1 }) do
+		local env = newEnv({ random = r })
+		ni(env, { 5000 }, nil)
+		env.run(100)
+		local nr = sentOf(env, "NR")
+		H.ok(#nr == 1 and near(nr[1].t, 1 + 7 * r), "NR at " .. tostring(nr[1] and nr[1].t))
+	end
+	local env = newEnv({ random = 0.5 })
+	hold(env, 1001, { 1 })
+	incoming(env, "NR", { h = 1, to = "Me-Realm", i = { 1001 } })
+	env.run(100)
+	local nu = sentOf(env, "NU")
+	H.ok(#nu == 1 and near(nu[1].t, 2), "NU at " .. tostring(nu[1] and nu[1].t))
+end)
+
+H.test("sync bounds: the echo 6 s after the NU at the highest random", function()
+	local env = newEnv({ random = R1 })
+	hold(env, 1001, { 1, 2 })
+	incoming(env, "ND", { h = 777, n = 1 })
+	env.run(21)
+	H.eq(#sentOf(env, "NI"), 1, "own NI")
+	incoming(env, "NU", { h = 777, x = { packed(1001, sheet(1001, { 1 })) } })
+	local at = env.t
+	env.run(10)
+	local nu = sentOf(env, "NU")
+	H.ok(#nu == 1 and near(nu[1].t, at + 2 + 4 * R1), "echo at " .. tostring(nu[1] and nu[1].t))
+end)
+
+H.test("sync bounds: the round-end ND at least 30 s after the last ND", function()
+	for _, case in ipairs({ { 30, 1 }, { 29, 0 } }) do
+		local env = newEnv({ random = 0 })
+		incoming(env, "NU", { h = 1, x = { packed(1001, sheet(1001, { 1 })) } })
+		env.runTo(case[1])
+		H.eq(#sentOf(env, "ND"), 1, "ND at 12")
+		incoming(env, "NU", { h = 1, x = { packed(1002, sheet(1002, { 1 })) } })
+		env.runTo(case[1] + 13)
+		H.eq(#sentOf(env, "ND", 13), case[2], "second NU at " .. case[1] .. ", its round ends " .. (case[1] + 12))
+	end
+end)
+
+H.test("sync bounds: a foreign hash heard exactly 120 s before a fruitless round's end is not counted", function()
+	for _, case in ipairs({ { 108, 1 }, { 107.5, 0 } }) do
+		local env = newEnv({ random = 0 })
+		incoming(env, "ND", { h = 777, n = 3 }) -- own NI at 2, a fruitless round to 14
+		env.runTo(case[1])
+		incoming(env, "NI", { h = 888, r = 1, i = {}, c = {} }, "Cid-Realm") -- a round to case + 12
+		env.runTo(130)
+		incoming(env, "ND", { h = 777, n = 3 })
+		env.runTo(200)
+		H.eq(#sentOf(env, "NI", 130), case[2], "second round ends " .. (case[1] + 12))
+	end
+end)
+
+H.test("sync bounds: a blocked NU waits exactly 30 s from its first attempt", function()
+	-- an own visit: first attempt at 3, retries every 1 s (random 0), the last at 32, dropped at 33
+	for _, case in ipairs({ { 31.5, 1 }, { 32.5, 0 } }) do
+		local env = newEnv({ random = 0 })
+		env.blocked = true
+		env.sync:OwnVisit(1001, reading)
+		env.runTo(case[1])
+		env.blocked = false
+		env.run(100)
+		H.eq(#sentOf(env, "NU"), case[2], "block until " .. case[1])
+	end
+end)
+
+H.test("sync bounds: a failed NU is tried again 3 s later at the highest random", function()
+	local env = newEnv({ random = R1 })
+	hold(env, 1001, { 1 })
+	env.fail.NU = "fail"
+	ni(env, {}, nil)
+	env.run(11)
+	env.fail.NU = nil
+	env.run(10)
+	local nu = sentOf(env, "NU")
+	H.ok(#nu == 2 and near(nu[2].t - nu[1].t, 1 + 2 * R1), "again after " .. tostring(nu[2] and nu[2].t - nu[1].t))
+end)
+
+H.test("sync bounds: after a block the ND comes 10-20 s after the first 5 s poll that can send", function()
+	for _, r in ipairs({ 0, R1 }) do
+		local env = newEnv({ random = r })
+		env.blocked = true
+		env.sync:Announce() -- the ND at 10 is due while blocked: polls at 15, 20, ...
+		env.runTo(17)
+		env.blocked = false
+		env.runTo(100)
+		local nd = sentOf(env, "ND")
+		H.ok(#nd >= 1 and near(nd[1].t, 20 + 10 + 10 * r), "ND at " .. tostring(nd[1] and nd[1].t))
+	end
+	-- an equal ND heard at most 60 s before holds it back
+	for _, case in ipairs({ { 50, 0 }, { 49.5, 1 } }) do
+		local env = newEnv({ random = 0 })
+		env.blocked = true
+		env.sync:Announce()
+		env.runTo(case[1])
+		incoming(env, "ND", { h = env.tab:Hash(), n = 0 }, "Cid-Realm")
+		env.runTo(99)
+		env.blocked = false -- the poll at 100 can send: the ND at 110
+		env.runTo(160)
+		H.eq(#sentOf(env, "ND"), case[2], "equal ND heard at " .. case[1])
+	end
+end)
+
+H.test("sync bounds: no done within 30 s plus 1 s per part", function()
+	local env = newEnv({ random = 0 })
+	env.fail.ND = "never"
+	env.sync:Announce()
+	env.runTo(40.9)
+	H.eq(env.sync.lastND, 10, "the ND of 10 s still counts at 40.9 s")
+	env.runTo(41.1)
+	H.eq(env.sync.lastND, -1e9, "failed at 41 s")
+end)
+
+H.test("sync bounds: one NI per sender within 60 s, at 60 s again", function()
+	for _, case in ipairs({ { 60, 0 }, { 59.5, 1 } }) do
+		local env = newEnv({ random = 0.5 })
+		incoming(env, "NI", { h = 777, r = 1, i = {}, c = {} })
+		env.runTo(case[1])
+		incoming(env, "NI", { h = 777, r = 1, i = {}, c = {} })
+		H.eq(env.sync.stats.capped, case[2], "second NI at " .. case[1])
+	end
+end)
+
+H.test("sync bounds: two NDs per sender in a minute; the minute is 60 s", function()
+	for _, case in ipairs({ { 1, 0 }, { 60, 1 }, { 60.5, 0 } }) do
+		local env = newEnv({ random = 0.5 })
+		incoming(env, "ND", { h = 11, n = 1 })
+		env.runTo(0.5)
+		incoming(env, "ND", { h = 12, n = 1 })
+		H.eq(env.sync.stats.capped, 0, "the second ND counts")
+		if case[1] > 1 then
+			env.runTo(case[1])
+			incoming(env, "ND", { h = 13, n = 1 })
+			H.eq(env.sync.stats.capped, case[2], "third ND at " .. case[1])
+		end
+	end
+end)
+
+H.test("sync bounds: a counter rises once per 60 s, a 7th rise is refused, within the minute its value holds", function()
+	local function nus(times)
+		local env = newEnv({ random = 0.5 })
+		hold(env, 1001, { 1 })
+		for _, t in ipairs(times) do
+			env.runTo(t)
+			incoming(env, "NR", { h = 1, to = "Me-Realm", i = { 1001 } })
+		end
+		env.run(100)
+		return #sentOf(env, "NU")
+	end
+	H.eq(nus({ 0, 60, 120, 180, 240, 300, 310, 360 }), 7, "6 rises 60 s apart, one more within the minute, the 7th rise refused")
+	H.eq(nus({ 0, 59.5, 119, 178.5, 238, 297.5, 357 }), 7, "59.5 s apart: 4 rises")
+	H.eq(nus({ 0, 60, 120, 180, 240, 300, 3600 }), 6, "an hour after the first rise the counters still hold")
+end)
+
+H.test("sync bounds: NRs to a sender count for the cap for exactly an hour", function()
+	-- random 0: the NR goes 1 s after the NI
+	for _, case in ipairs({ { 3599, 1 }, { 3598.5, 0 } }) do
+		local env = newEnv({ random = 0 })
+		for i = 1, 10 do incoming(env, "NR", { h = 1, to = "Bob-Realm", i = { i } }, "Cid-Realm") end
+		env.runTo(case[1])
+		ni(env, { 5000 }, nil)
+		env.run(100)
+		H.eq(#sentOf(env, "NR"), case[2], "NR due at " .. (case[1] + 1))
+	end
+end)
+
+H.test("sync bounds: a muted pair stays muted for exactly an hour", function()
+	for _, case in ipairs({ { 3600, 0 }, { 3600.5, 1 } }) do
+		local env = newEnv({ random = 0 })
+		hold(env, 1001, { 1 })
+		for _, t in ipairs({ 0, 100, 200 }) do
+			env.runTo(t)
+			incoming(env, "ND", { h = 777, n = 3 })
+		end
+		env.runTo(300)
+		H.eq(#sentOf(env, "NI"), 2, "muted")
+		env.runTo(case[1])
+		incoming(env, "ND", { h = 777, n = 3 })
+		env.run(100)
+		H.eq(#sentOf(env, "NI", 300), case[2], "ND at " .. case[1])
+	end
+end)
+
+H.test("sync bounds: a sheet bigger than an NU's fill goes alone", function()
+	local env = newEnv({ random = 0.5 })
+	local big, x = { name = "Big", nd = DAY, t = {}, v = {} }, 1
+	for _ = 1, 200 do
+		x = (x * 48271) % 2147483647
+		big.t[x % 100000 + 1] = { DAY, x % 300 + 1, DAY, x % 99999 + 1, DAY }
+	end
+	env.tab:MergeIn(1001, big)
+	H.ok(#encode({ x = { packed(1001, env.tab:Sendable(1001)) } }) > 1000, "the big sheet alone is over 1000 bytes")
+	hold(env, 1002, { 1 })
+	ni(env, {}, nil)
+	env.run(100)
+	local nu = sentOf(env, "NU")
+	local got = {}
+	for _, m in ipairs(nu) do got[#got + 1] = idsOf(m) end
+	table.sort(got)
+	H.eq(table.concat(got, " "), "1001 1002", "two NUs, each with one sheet")
+end)
+
+H.test("sync bounds: fields at their bounds pass, one beyond is bad", function()
+	local M = 2147483647
+	local function long(n) return ("x"):rep(n - 6) .. "-Realm" end
+	local many = {}
+	for i = 1, 601 do many[i] = 1 end
+	local function list(n)
+		local l = {}
+		for i = 1, n do l[i] = many[i] end
+		return l
+	end
+	local cases = {
+		{ "ND", { h = 0, n = 0 }, true }, { "ND", { h = M - 1, n = 600 }, true }, { "ND", { h = M, n = 0 }, false },
+		{ "ND", { h = -1, n = 0 }, false }, { "ND", { h = 1, n = -1 }, false },
+		{ "NI", { r = 0, i = { 5 }, c = { 0 } }, true }, { "NI", { r = 65535, i = { 5 }, c = { 65535 } }, true },
+		{ "NI", { r = -1, i = {}, c = {} }, false }, { "NI", { r = 65536, i = {}, c = {} }, false },
+		{ "NI", { r = 1, i = { 5 }, c = { -1 } }, false }, { "NI", { r = 1, i = { 5 }, c = { 65536 } }, false },
+		{ "NI", { r = 1, i = { M }, c = { 1 } }, true }, { "NI", { r = 1, i = { M - 1, 1 }, c = { 1, 1 } }, true },
+		{ "NI", { r = 1, i = { 5, 0 }, c = { 1, 1 } }, false },
+		{ "NI", { r = 1, i = list(600), c = list(600) }, true }, { "NI", { r = 1, i = list(601), c = list(601) }, false },
+		{ "NR", { to = long(100), i = { 5 } }, true }, { "NR", { to = long(101), i = { 5 } }, false },
+	}
+	for k, case in ipairs(cases) do
+		local env = newEnv({ random = 0.5 })
+		incoming(env, case[1], case[2], "S" .. k .. "-Realm")
+		H.eq(env.sync.stats.bad == 0, case[3], "case " .. k .. " " .. case[1])
+		H.eq(env.sync.stats.recv[case[1]] == 1, case[3], "case " .. k .. " received")
+	end
+	for _, case in ipairs({ { 100, 1 }, { 101, nil } }) do
+		local env = newEnv({ random = 0.5 })
+		incoming(env, "ND", { h = 1, n = 0 }, long(case[1]))
+		H.eq(env.sync.stats.recv.ND, case[2], "sender name of " .. case[1] .. " bytes")
+	end
+end)
