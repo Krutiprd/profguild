@@ -608,10 +608,18 @@ local function onNR(self, sender, h, to, ids)
 	list[#list + 1] = t
 	self.nrHeard[to] = list
 	if mine then
+		-- rule 9: a sheet already planned, or counted for the sender within COUNT_EVERY (sent or
+		-- planned for it, or asked of another), is not planned again: repeated NRs pull no more
 		local push = self.push or {}
 		for _, id in ipairs(ids) do
-			if tab:Sendable(id) and count(self, sender .. ":" .. contentKey(self, id)) then
-				push[id] = {}
+			if tab:Sendable(id) and not push[id] then
+				local key = sender .. ":" .. contentKey(self, id)
+				local last = self.raised[key]
+				if last and t - last < NpcSync.COUNT_EVERY then
+					self.stats.capped = self.stats.capped + 1
+				elseif count(self, key) then
+					push[id] = {}
+				end
 			end
 		end
 		self.push = push

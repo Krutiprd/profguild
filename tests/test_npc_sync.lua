@@ -649,7 +649,7 @@ H.test("sync 9: a counter rises at most once per 60 s", function()
 		incoming(env, "NR", { h = 1, to = "Me-Realm", i = { 1001 } })
 	end
 	env.run(100)
-	H.eq(#sentOf(env, "NU"), 12, "12 NRs in 2 minutes raise it twice")
+	H.eq(#sentOf(env, "NU"), 2, "12 NRs in 2 minutes raise it twice: sent twice, not again within the minute")
 end)
 
 H.test("sync 9: an NR raises the name counter only", function()
@@ -1194,7 +1194,7 @@ H.test("sync bounds: two NDs per sender in a minute; the minute is 60 s", functi
 	end
 end)
 
-H.test("sync bounds: a counter rises once per 60 s, a 7th rise is refused, within the minute its value holds", function()
+H.test("sync bounds: a counter rises once per 60 s, a 7th rise is refused, within the minute nothing more is sent", function()
 	local function nus(times)
 		local env = newEnv({ random = 0.5 })
 		hold(env, 1001, { 1 })
@@ -1205,8 +1205,8 @@ H.test("sync bounds: a counter rises once per 60 s, a 7th rise is refused, withi
 		env.run(100)
 		return #sentOf(env, "NU")
 	end
-	H.eq(nus({ 0, 60, 120, 180, 240, 300, 310, 360 }), 7, "6 rises 60 s apart, one more within the minute, the 7th rise refused")
-	H.eq(nus({ 0, 59.5, 119, 178.5, 238, 297.5, 357 }), 7, "59.5 s apart: 4 rises")
+	H.eq(nus({ 0, 60, 120, 180, 240, 300, 310, 360 }), 6, "6 rises 60 s apart, none more within the minute, the 7th rise refused")
+	H.eq(nus({ 0, 59.5, 119, 178.5, 238, 297.5, 357 }), 4, "59.5 s apart: 4 rises, sent at those")
 	H.eq(nus({ 0, 60, 120, 180, 240, 300, 3600 }), 6, "an hour after the first rise the counters still hold")
 end)
 
@@ -1393,4 +1393,25 @@ H.test("sync 4: a sheet of an NU pushed out by a later one of the same NU is rem
 	incoming(env, "NU", { h = 1, x = { packed(2001, old), packed(2002, new) } }, "Cid-Realm")
 	H.eq(env.tab:Sendable(2001), nil, "the older sheet goes") H.ok(env.tab:Sendable(2002), "the newer stays")
 	H.ok(env.sync.refused[2001], "remembered") H.eq(env.sync.refused[2002], nil)
+end)
+
+H.test("sync 9: NRs to us every 10 s for an hour get each sheet at most 6 times; one already planned is not planned twice", function()
+	local env = newEnv({ random = 0.5 })
+	local ids = {}
+	for i = 1, 40 do
+		local r = {}
+		for k = 1, 30 do r[k] = i * 1000 + k end
+		hold(env, 5000 + i, r)
+		ids[i] = 5000 + i
+	end
+	for k = 0, 359 do
+		env.runTo(k * 10)
+		incoming(env, "NR", { h = 12345, to = "Me-Realm", i = deltas(ids) }, "Griefer-Realm")
+	end
+	env.runTo(3700)
+	local per = {}
+	for _, nu in ipairs(sentOf(env, "NU")) do
+		for _, list in ipairs(nu.msg.x) do per[list[1]] = (per[list[1]] or 0) + 1 end
+	end
+	for _, id in ipairs(ids) do H.eq(per[id], 6, "sheet " .. id) end
 end)
