@@ -1,0 +1,330 @@
+-- The day changing while NPC work is spread over frames (NpcWork). A read never changes a table:
+-- the expiry of a new day runs at the start of the next job (Settle), so a job that waited for a
+-- frame across midnight keeps the day it started with, and nothing paces under a pcall (PUC Lua 5.1
+-- cannot yield across one: run these under real Lua 5.1 too, tests/run.lua through lupa).
+local H = ...
+H.loadLibs()
+local ns = H.newNamespace({ "NpcWork.lua", "NpcData.lua", "NpcTable.lua", "NpcSync.lua" })
+local ND, NW, NS = ns.NpcData, ns.NpcWork, ns.NpcSync
+
+local DAY = 20770
+
+-- A scheduler whose clock is the work declared with Pace (each unit 1 ms), frames by hand.
+local function work(budget)
+	local w
+	local units, frame, pending, errors = 0, 0, {}, {}
+	w = NW.New({ clock = function() return units end, frame = function() return frame end,
+		defer = function(fn) pending[#pending + 1] = fn end, budget = function() return budget end,
+		rate = 1, spend = function(u) units = units + u end,
+		error = function(e, stack) errors[#errors + 1] = tostring(e) end })
+	w.errors = errors
+	function w.newFrame() frame = frame + 1 end
+	function w.spendNow(u) units = units + u end
+	function w.step()
+		if not pending[1] then return false end
+		frame = frame + 1
+		local p = pending
+		pending = {}
+		for _, fn in ipairs(p) do fn() end
+		return true
+	end
+	function w.pump() local n = 0 while w.step() and n < 100000 do n = n + 1 end return n end
+	return w
+end
+
+local function adapter(o)
+	o = o or {}
+	local a = {
+		now = function() return o.now and o.now() or 1000 end,
+		after = function(s, fn) if o.timers then o.timers[#o.timers + 1] = { s, fn } end end,
+		random = function() return 0.5 end, canSend = function() return true end,
+		send = function(msg, done)
+			if o.sent then o.sent[#o.sent + 1] = msg end
+			if done then done(true) end
+		end,
+		selfGuid = function() return "Me-1" end, faction = function() return "Alliance" end,
+		changed = function() end, isMe = function(n) return n == "Me" end,
+		size = function(msg) return 60 + 30 * #(msg.x or msg.i or {}) end,
+	}
+	for k, v in pairs(o.override or {}) do a[k] = v end
+	return a
+end
+
+local function msg(t, f)
+	local x = { t = t, pv = ND.PROTOCOL, e = ND.EPOCH, f = "Alliance", s = "G-1", h = 12345 }
+	for k, v in pairs(f) do x[k] = v end
+	return x
+end
+
+-- A table of n sheets whose entry 1001 is `age` days old today (k > 1 younger), saved.
+local function savedTable(n, clock, age)
+	local tmp = ND.New({}, clock)
+	for id = 1, n do
+		local s = { name = "N" .. id, nd = DAY - 5, t = {}, v = {} }
+		for k = 1, 20 do
+			local d = (k == 1) and (DAY - age) or (DAY - k)
+			s.t[1000 + k] = { d, 10 * k, d, 100, d }
+		end
+		tmp:MergeIn(id, s)
+	end
+	return tmp.saved
+end
+
+-- The hash a table of the same sheets has when cut anew on its clock's day.
+local function freshHash(tab, clock)
+	local fresh = ND.New({}, clock)
+	for id, s in pairs(tab.sheets) do fresh:MergeIn(id, s) end
+	return fresh:Hash()
+end
+
+H.test("day: midnight while a step waits for the frame of its NU: the NU goes out, no error, the table is recut", function()
+	local T = DAY * 86400 + 86000
+	local clock = function() return T end
+	local w = work(200)
+	local tab = ND.New(savedTable(30, clock, 118), clock, nil, w)
+	w.pump()
+	local timers, sent = {}, {}
+	local now = 1000
+	local sync = NS.New(adapter({ timers = timers, sent = sent, now = function() return now end }), tab)
+	sync:OnMessage(msg("NI", { r = 7, i = {}, c = {} }), "G", 100)
+	w.pump()
+	-- the step: its sheet sizes known, another job used the frame first, so it waits at pace(bytes)
+	for _, id in ipairs(tab:SendableIDs()) do sync.sizes[tab:SheetHash(id) .. ":" .. id] = 90 end
+	table.sort(timers, function(a, b) return a[1] < b[1] end)
+	local tm = table.remove(timers, 1)
+	w.newFrame()
+	w:Run(function() w:Pace(1) w.spendNow(50) end)
+	tm[2]()
+	H.ok(w:Busy(), "the step waits for the next frame")
+	T = (DAY + 1) * 86400 + 5
+	w.pump()
+	H.eq(#w.errors, 0, table.concat(w.errors, "\n"))
+	local nu = false
+	for _, m in ipairs(sent) do if m.t == "NU" then nu = true end end
+	H.ok(nu, "the NU was sent")
+	H.eq(tab.day, DAY + 1, "the next job settled the day")
+	H.eq(tab:Hash(), freshHash(tab, clock), "the table equals one cut on the new day")
+	for id in pairs(tab.sheets) do H.ok(not tab.cuts[id].t[1001], "no 119 day old entry sent: " .. id) end
+end)
+
+H.test("day: midnight inside a received NI and our own NI: no error, the NI is answered from one day", function()
+	local T = DAY * 86400 + 86390
+	local clock = function() return T end
+	local tmp = ND.New({}, clock)
+	for id = 1, 40 do
+		local s = { name = "N" .. id, nd = DAY - 5, t = {}, v = {} }
+		if id == 30 then
+			s.t[5] = { DAY - ND.SEND, 0, 0, 0, 0 } -- sendable today, not tomorrow
+		else
+			for k = 1, 5 do s.t[1000 + k] = { DAY - k, 10, DAY - k, 0, 0 } end
+		end
+		tmp:MergeIn(id, s)
+	end
+	local w = work(20)
+	local tab = ND.New(tmp.saved, clock, nil, w)
+	w.pump()
+	local sync = NS.New(adapter(), tab)
+	local ids, c, prev = {}, {}, 0
+	for id = 1, 40 do ids[#ids + 1], c[#c + 1], prev = id - prev, 1, id end
+	w.newFrame()
+	sync:OnMessage(msg("NI", { r = 7, i = ids, c = c }), "G", 100)
+	H.ok(w:Busy(), "the NI job waits for a frame")
+	T = (DAY + 1) * 86400 + 1
+	w.pump()
+	H.eq(#w.errors, 0, table.concat(w.errors, "\n"))
+	local n = 0
+	for _ in pairs(sync.push or {}) do n = n + 1 end
+	H.eq(n, 40, "every sheet of the day the NI started on is planned")
+	H.eq(tab:Count(), 39, "the next job settled the day: sheet 30 is no longer sendable")
+	-- a planned sheet without a sendable part any more is dropped by the step, not sent
+	H.ok(sync.push[30], "planned on the day before")
+end)
+
+
+H.test("day: our own NI cut short by an error does not count: lastNI and the pair rise only when it goes out", function()
+	local clock = function() return DAY * 86400 + 3600 end
+	local w = work(20)
+	local tab = ND.New(savedTable(60, clock, 5), clock, nil, w)
+	w.pump()
+	local timers, sent = {}, {}
+	local now = 1000
+	local sync = NS.New(adapter({ timers = timers, sent = sent, now = function() return now end }), tab)
+	local function fire()
+		local list = {}
+		for i, tm in ipairs(timers) do list[i] = tm timers[i] = nil end
+		for _, tm in ipairs(list) do now = now + tm[1] w.newFrame() tm[2]() w.pump() end
+	end
+	sync:OnMessage(msg("ND", { n = 3, h = 7 }), "Bob", 20)
+	w.pump()
+	local salted = tab.SaltedHash
+	local calls = 0
+	tab.SaltedHash = function(self, h, salt)
+		calls = calls + 1
+		if calls == 30 then error("cut short") end
+		return salted(self, h, salt)
+	end
+	fire()
+	tab.SaltedHash = salted
+	H.eq(#w.errors, 1, "the NI job ended in the error")
+	H.eq(sync.lastNI, -1e9, "an NI never sent does not hold back the next")
+	for _, p in pairs(sync.pair) do H.eq(p.n, 0, "nor count toward muting the pair") end
+	-- the next ND plans again and the NI goes out
+	sync:OnMessage(msg("ND", { n = 3, h = 7 }), "Ann", 20)
+	w.pump()
+	for _ = 1, 5 do fire() end
+	local ni = 0
+	for _, m in ipairs(sent) do if m.t == "NI" then ni = ni + 1 end end
+	H.eq(ni, 1, "the NI was sent")
+	H.ok(sync.lastNI > -1e9, "and counted")
+end)
+
+H.test("day: a read inside a job never changes the table; the next job settles the day", function()
+	local T = DAY * 86400 + 86390
+	local clock = function() return T end
+	local w = work(50)
+	local tab = ND.New(savedTable(20, clock, 118), clock, nil, w)
+	w.pump()
+	local h0, seen = tab:Hash(), {}
+	w:Run(function()
+		T = (DAY + 1) * 86400 + 1
+		seen.hash, seen.day, seen.count = tab:Hash(), tab.day, tab:Count()
+		-- inside a pcall too (the UI, Bugs.Call): nothing paces there
+		seen.ok = pcall(function() return tab:Hash(), tab:SendableIDs(), tab:Sendable(1), tab:Get(1) end)
+	end)
+	H.eq(seen.hash, h0, "the job sees the day it started with")
+	H.eq(seen.day, DAY) H.eq(seen.count, 20) H.ok(seen.ok)
+	w.pump()
+	H.eq(#w.errors, 0, table.concat(w.errors, "\n"))
+	H.eq(tab.day, DAY + 1, "the expiry queued by the read ran")
+	H.eq(tab:Hash(), freshHash(tab, clock))
+end)
+
+H.test("day: an expiry cut short by an error is finished by the next job (the day is not lost)", function()
+	local T = DAY * 86400 + 3600
+	local clock = function() return T end
+	local w = work(50)
+	local tab = ND.New(savedTable(40, clock, 118), clock, nil, w)
+	w.pump()
+	local put, n = tab.put, 0
+	tab.put = function(self, id, s, packed)
+		n = n + 1
+		if n == 7 then error("cut short") end
+		return put(self, id, s, packed)
+	end
+	T = (DAY + 3) * 86400 + 1 -- 121 days: entry 1001 expires in every sheet
+	tab:Hash()
+	w.pump()
+	tab.put = nil
+	H.eq(#w.errors, 1, "the expiry ended in the error")
+	H.ok(tab.expiring ~= nil, "and is still due")
+	tab:Hash()
+	w.pump()
+	H.eq(#w.errors, 1)
+	H.eq(tab.expiring, nil, "finished")
+	for id, s in pairs(tab.sheets) do H.ok(not s.t[1001], "expired in sheet " .. id) end
+	H.eq(tab:Hash(), freshHash(tab, clock), "equal to a table cut on that day")
+	-- and to the table a synchronous client holds on that day
+	local sync0 = ND.New(savedTable(40, function() return DAY * 86400 + 3600 end, 118), clock)
+	H.eq(tab:Hash(), sync0:Hash(), "equal to synchronous")
+end)
+
+H.test("day: a step that ends in an error leaves no planned sheet without a step", function()
+	local clock = function() return DAY * 86400 + 3600 end
+	local w = work(200)
+	local tab = ND.New(savedTable(5, clock, 5), clock, nil, w)
+	w.pump()
+	local timers, sent = {}, {}
+	local now, bad = 1000, true
+	local a = adapter({ timers = timers, sent = sent, now = function() return now end })
+	local size = a.size
+	a.size = function(m) if bad and m.t == "NU" then bad = false error("encoder") end return size(m) end
+	local sync = NS.New(a, tab)
+	sync:OnMessage(msg("NI", { r = 7, i = {}, c = {} }), "G", 100)
+	w.pump()
+	for _ = 1, 10 do
+		local list = {}
+		for i, tm in ipairs(timers) do list[i] = tm timers[i] = nil end
+		for _, tm in ipairs(list) do now = now + tm[1] tm[2]() w.pump() end
+	end
+	H.eq(#w.errors, 1, "the step failed once")
+	local nu = 0
+	for _, m in ipairs(sent) do if m.t == "NU" then nu = nu + #m.x end end
+	H.eq(nu, 5, "every planned sheet went out after it")
+	H.ok(not sync.sending)
+end)
+
+H.test("day: a session stopped while its step waits sends nothing", function()
+	local clock = function() return DAY * 86400 + 3600 end
+	local w = work(200)
+	local tab = ND.New(savedTable(30, clock, 5), clock, nil, w)
+	w.pump()
+	local timers, sent = {}, {}
+	local sync = NS.New(adapter({ timers = timers, sent = sent }), tab)
+	sync:OnMessage(msg("NI", { r = 7, i = {}, c = {} }), "G", 100)
+	w.pump()
+	for _, id in ipairs(tab:SendableIDs()) do sync.sizes[tab:SheetHash(id) .. ":" .. id] = 90 end
+	w.newFrame()
+	w:Run(function() w:Pace(1) w.spendNow(50) end)
+	timers[1][2]()
+	H.ok(w:Busy(), "the step waits")
+	sync:Stop()
+	w.pump()
+	H.eq(#sent, 0, "nothing sent for the guild left")
+end)
+
+-- Audit: midnight between any two frames of any NPC work, under PUC Lua 5.1 as under LuaJIT. No
+-- job ends in an error, and once the work settles every table equals one cut on its day.
+H.test("day: midnight at any frame of loading, merges, NIs, NUs, own readings and steps gives no error", function()
+	for seed = 1, 6 do
+		local rs = seed * 104729
+		local function r(n) rs = (rs * 1103515245 + 12345) % 2147483648 return math.floor(rs / 2147483648 * n) + 1 end
+		local T = DAY * 86400 + 80000
+		local clock = function() return T end
+		local w = work(30 + r(60))
+		local tmp = ND.New({}, clock)
+		for id = 1, 60 do
+			local s = { name = "N" .. id, nd = DAY - r(5), t = {}, v = {} }
+			for k = 1, r(25) do local d = DAY - 110 - r(12) + (k > 3 and 100 or 0) s.t[1000 + k] = { d, 10, d, 100, d } end
+			for k = 1, r(6) do local d = DAY - r(120) s.v[50 + k] = { d, { c = 100, o = {}, l = 0 }, d } end
+			tmp:MergeIn(id, s)
+		end
+		local tab = ND.New(tmp.saved, clock, nil, w)
+		local timers, now = {}, 1000
+		local sync = NS.New(adapter({ timers = timers, sent = {}, now = function() return now end }), tab)
+		for _ = 1, 60 do
+			local k = r(6)
+			if k == 1 then
+				local x = {}
+				for j = 1, r(4) do
+					local d = DAY - r(119)
+					x[j] = ND.Pack(r(80), { name = "X", nd = DAY, t = { [2000 + r(30)] = { d, 5, d, 0, 0 } }, v = {} })
+				end
+				sync:OnMessage(msg("NU", { x = x, h = r(1000) }), "P" .. r(3), 100)
+			elseif k == 2 then
+				local d, c = {}, {}
+				for j = 1, r(30) do d[j], c[j] = r(3), r(65536) - 1 end
+				sync:OnMessage(msg("NI", { r = r(65536) - 1, i = d, c = c, h = r(1000) }), "Q" .. r(5), 100)
+			elseif k == 3 then
+				sync:OnMessage(msg("ND", { n = r(30), h = r(1000) }), "D" .. r(5), 20)
+			elseif k == 4 then
+				sync:OwnVisit(r(80), { name = "Me", t = { [3000 + r(20)] = { skill = 10 } }, v = {} })
+			else
+				local list = {}
+				for i, tm in ipairs(timers) do list[i] = tm timers[i] = nil end
+				for _, tm in ipairs(list) do now = now + tm[1] w.newFrame() tm[2]() end
+			end
+			-- frames pass; midnight between some of them
+			for _ = 1, r(4) do
+				if r(5) == 1 then T = T + 43200 end
+				w.step()
+			end
+			now = now + r(30)
+		end
+		w.pump()
+		tab:Hash()
+		w.pump()
+		H.eq(#w.errors, 0, "seed " .. seed .. ": " .. table.concat(w.errors, "\n"))
+		H.eq(tab.day, math.floor(T / 86400), "seed " .. seed .. ": settled")
+		H.eq(tab:Hash(), freshHash(tab, clock), "seed " .. seed .. ": the table equals one cut on its day")
+	end
+end)

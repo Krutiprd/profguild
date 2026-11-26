@@ -175,19 +175,24 @@ local function canSend(self) return not self.dead and self.a.canSend() end
 -- Everything NpcSync does runs as a job of the table's scheduler (NpcWork), in order with the
 -- table's own work (loading, expiry): what it reads and sends is never a table half loaded or half
 -- merged. Inside a job, or without a scheduler, fn runs at once.
-local function job(self, fn)
+-- fail(err): the job ended in an error (NpcWork records it). While the scheduler flushes (logout)
+-- nothing is sent: what a session would still send, the next login's sync brings.
+local function job(self, fn, fail)
 	local w = self.tab.work
 	if not w or w:InJob() then return fn() end
-	w:Run(function() if not self.dead then fn() end end, self)
+	w:Run(function() if not self.dead and not (w.Flushing and w:Flushing()) then fn() end end, self, fail)
 end
 
+-- Paces the work of a job (NpcWork); true when the session was stopped meanwhile (logout, guild
+-- left): the job then ends, it must not send or plan for a guild left.
 local function pace(self, units)
 	local w = self.tab.work
 	if w then w:Pace(units) end
+	return self.dead
 end
 
-local function after(self, s, fn)
-	self.a.after(s, function() if not self.dead then job(self, fn) end end)
+local function after(self, s, fn, fail)
+	self.a.after(s, function() if not self.dead then job(self, fn, fail) end end)
 end
 
 local function equalHeard(self, window)
@@ -198,6 +203,7 @@ end
 -- Sends msg of type t with the common fields; done(ok, size) once (a send without done in
 -- DONE_TIMEOUT + 1 s per part counts as failed, a late done is ignored).
 local function transmit(self, t, msg, done)
+	if self.dead then return 0 end
 	local NpcData = ns.NpcData
 	msg.t, msg.pv, msg.e, msg.f, msg.s, msg.h = t, NpcData.PROTOCOL, NpcData.EPOCH, self.a.faction(),
 		self.a.selfGuid(), self.tab:Hash()
@@ -236,7 +242,11 @@ local function count(self, key)
 	return n <= NpcSync.SEND_CAP
 end
 
-local function contentKey(self, id) return self.tab:SheetHash(id) .. ":" .. id end
+-- nil when the sheet has no sendable part (a caller skips it)
+local function contentKey(self, id)
+	local h = self.tab:SheetHash(id)
+	return h and (h .. ":" .. id) or nil
+end
 
 -- Rule 6: the record of (their hash, our hash), renewed after an hour.
 local function pairOf(self, h)
@@ -356,10 +366,15 @@ end
 
 local step
 
+-- a step that ends in an error (recorded by NpcWork) does not leave the planned sheets without a
+-- step: sending is cleared and a later step tries what is left
 local function later(self, d)
 	self.laterSeq = self.laterSeq + 1
 	local k = self.laterSeq
-	after(self, d, function() if k == self.laterSeq then step(self) end end)
+	after(self, d, function() if k == self.laterSeq then step(self) end end, function()
+		self.sending = false
+		if not self.dead and self.push and next(self.push) then later(self, rnd(self, NpcSync.RETRY)) end
+	end)
 end
 
 local function sheetSize(self, id)
@@ -404,7 +419,7 @@ function step(self)
 	end
 	local tab, ids = self.tab, {}
 	for id in pairs(push) do
-		if tab:Sendable(id) then ids[#ids + 1] = id else push[id] = nil end
+		if tab:Sendable(id) and tab:SheetHash(id) then ids[#ids + 1] = id else push[id] = nil end
 	end
 	if #ids == 0 then return end
 	sort(ids)
@@ -418,24 +433,36 @@ function step(self)
 	local list, sent, since, bytes = {}, {}, {}, 0
 	for i = 1, #ids do
 		local id = ids[(i - 1 + rot) % #ids + 1]
+		local key = contentKey(self, id)
 		-- an encoding of the sheet alone (cached by content): a few ms under PUC Lua for a large one
-		if not self.sizes[contentKey(self, id)] then pace(self, 4 * ((tab.cn and tab.cn[id]) or 100)) end
-		local b = sheetSize(self, id)
-		if bytes > 0 and bytes + b > NpcSync.NU_FILL then break end
-		list[#list + 1], sent[#sent + 1] = ns.NpcData.Pack(id, tab:Sendable(id)), id
-		since[id] = push[id] and push[id].since or t
-		bytes = bytes + b
-		push[id] = nil
-		self.cursor = id
+		if key and not self.sizes[key] then
+			if pace(self, 4 * ((tab.cn and tab.cn[id]) or 100)) then return end
+		end
+		-- a sheet left without a sendable part meanwhile is not sent (a read never changes the
+		-- table, so this is only a guard)
+		local c = tab:Sendable(id)
+		if not c or not tab:SheetHash(id) then
+			push[id] = nil
+		else
+			local b = sheetSize(self, id)
+			if bytes > 0 and bytes + b > NpcSync.NU_FILL then break end
+			list[#list + 1], sent[#sent + 1] = ns.NpcData.Pack(id, c), id
+			since[id] = push[id] and push[id].since or t
+			bytes = bytes + b
+			push[id] = nil
+			self.cursor = id
+		end
 	end
 	if not next(push) then self.cursor = nil end
+	if #list == 0 then return end
 	-- the encoding of the NU: about 6 ms a kB under PUC Lua, in a frame of its own when needed
-	pace(self, bytes)
+	if pace(self, bytes) then return end
 	self.sending = true
 	self.lastData = t
 	openRound(self).had = true
 	settle(self)
-	-- an error in transmit (the encoding) must not leave sending set: no NU would go out again
+	-- an error in transmit (the encoding) must not leave sending set: no NU would go out again.
+	-- Nothing under this pcall paces (a read never expires the table), so no job waits inside it.
 	local fine, err = pcall(transmit, self, "NU", { x = list }, function(ok, size)
 		if not ok then
 			-- rules 7 and 10: the sheets go back and are tried again until WAIT seconds after their
@@ -496,14 +523,12 @@ local function plan(self, h)
 			return after(self, NpcSync.NI_GAP - (t - self.lastNI) + 0.01, try)
 		end
 		self.plan = nil
-		self.lastNI, self.lastData = t, t
-		local pr = pairOf(self, P.h)
-		pr.n = pr.n + 1
 		local salt = floor(self.a.random() * 65536)
 		local hashes, ids, n = {}, {}, 0
 		for _, id in ipairs(tab:SendableIDs()) do
-			pace(self, 2)
-			hashes[id], n = tab:SaltedHash(tab:SheetHash(id), salt), n + 1
+			if pace(self, 2) then return end
+			local sh = tab:SheetHash(id)
+			if sh then hashes[id], n = tab:SaltedHash(sh, salt), n + 1 end
 		end
 		-- refused sheets, newest first, only while receivers read the list (MAX_LIST IDs)
 		local rl = self.refusedList
@@ -517,7 +542,11 @@ local function plan(self, h)
 		local c = {}
 		for i, id in ipairs(ids) do c[i] = hashes[id] end
 		-- the encoding of the NI (sized, then sent): a few ms under PUC Lua, in a frame of its own
-		pace(self, 4 * #ids)
+		if pace(self, 4 * #ids) then return end
+		-- counted only now that the NI goes out (rule 6: an NI never sent does not mute the pair)
+		self.lastNI, self.lastData = t, t
+		local pr = pairOf(self, P.h)
+		pr.n = pr.n + 1
 		local R = openRound(self)
 		R.ni, R.mine, R.hNI = true, true, H
 		transmit(self, "NI", { r = salt, i = toDeltas(ids), c = c }, function(ok, _, blocked)
@@ -571,9 +600,9 @@ local function onNI(self, sender, h, salt, ids, c)
 	for i, id in ipairs(ids) do held[id] = c[i] end
 	local give = {}
 	for _, id in ipairs(tab:SendableIDs()) do
-		pace(self, 4)
-		local their = held[id]
-		if not their or their ~= tab:SaltedHash(tab:SheetHash(id), salt) then
+		if pace(self, 4) then return end
+		local their, sh = held[id], tab:SheetHash(id)
+		if sh and (not their or their ~= tab:SaltedHash(sh, salt)) then
 			local x = contentKey(self, id)
 			local byName = count(self, sender .. ":" .. x)
 			local byHash = count(self, "H" .. h .. ":" .. x)
@@ -633,7 +662,8 @@ local function onNR(self, sender, h, to, ids)
 	local mine = self.a.isMe(to)
 	if not mine then
 		for _, id in ipairs(ids) do
-			if tab:Sendable(id) then count(self, sender .. ":" .. contentKey(self, id)) end
+			local x = tab:Sendable(id) and contentKey(self, id)
+			if x then count(self, sender .. ":" .. x) end
 		end
 	end
 	local list = self.nrHeard[to] or {}
@@ -644,8 +674,9 @@ local function onNR(self, sender, h, to, ids)
 		-- planned for it, or asked of another), is not planned again: repeated NRs pull no more
 		local push = self.push or {}
 		for _, id in ipairs(ids) do
-			if tab:Sendable(id) and not push[id] then
-				local key = sender .. ":" .. contentKey(self, id)
+			local x = tab:Sendable(id) and not push[id] and contentKey(self, id)
+			if x then
+				local key = sender .. ":" .. x
 				local last = self.raised[key]
 				if last and t - last < NpcSync.COUNT_EVERY then
 					self.stats.capped = self.stats.capped + 1
@@ -678,12 +709,15 @@ local function onNU(self, sender, h, x)
 	local R = openRound(self)
 	R.had = true
 	local tab = self.tab
-	local today, useful, changedAny = tab:Today(), false, false
+	-- the day of the table (of this job's start: see NpcTable check), not the clock's
+	local today, useful, changedAny = tab.day or tab:Today(), false, false
 	-- all sheets merged at once: the table limits run once per NU, not once per sheet
 	local got, items = {}, {}
 	for i = 1, #x do
 		local l = x[i]
-		pace(self, 1 + (type(l[9]) == "table" and #l[9] or 0) + (type(l[15]) == "table" and #l[15] or 0))
+		if pace(self, 1 + (type(l[9]) == "table" and #l[9] or 0) + (type(l[15]) == "table" and #l[15] or 0)) then
+			return
+		end
 		local id, s, sh = unpackSheet(l, today)
 		if s then
 			if tab:SheetHash(id) == sh then

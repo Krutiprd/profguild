@@ -204,8 +204,9 @@ end
 -- loaded table is swapped in when complete). Without work the table is loaded before New returns.
 -- Limits, after every merge (once for all sheets of an NU, MergeAll), in this order: entries per sheet, entries, sheets. The older goes first
 -- (an entry by seen, a sheet by its newest entry), then by a hash of the key.
--- Expiry runs at load and before anything is read on a new day (read outside a job of work: a
--- job is queued for it, the read sees the day before). Only the sendable part (see cut) is
+-- Expiry runs at load and on a new day: without work before anything is read; with work at the
+-- start of the next job (a read queues one; the read, and a job running across midnight, see the
+-- day before). Only the sendable part (see cut) is
 -- sent, hashed and counted. Returned sheets and lists are the table's own: do not change them.
 -- Every change must be made inside a job of work (or without work): see NpcWork.
 --
@@ -217,6 +218,9 @@ end
 
 local Table = {}
 Table.__index = Table
+
+-- saved table -> the table made on it last (see New, Settle)
+local owners = setmetatable({}, { __mode = "k" })
 
 -- Loads the saved sheets src into tab, then swaps them into target (the saved table).
 local function load(tab, target, src)
@@ -272,8 +276,13 @@ function NpcData.New(saved, now, limits, work)
 	-- half way leaves saved as it was
 	local target = tab.saved
 	tab.saved = {}
+	-- the newest table made on a saved table owns it: an older one (a guild key that flickered, a
+	-- /reload in tests) no longer settles its day into it (Settle)
+	tab.target = target
+	owners[target] = tab
 	tab:reset()
 	if work then
+		if work.Watch then work:Watch(tab) end
 		tab.loading = true
 		work:Run(function() load(tab, target, src) end, tab, function()
 			-- an error half way: saved is left as it was, this session's table lives in memory only
@@ -293,7 +302,7 @@ function Table:reset()
 	self.byT, self.byV, self.keysT, self.keysV, self.skh = {}, {}, {}, {}, {}
 	self.nSheets, self.nEntries = 0, 0
 	self.nSend, self.sendEntries, self.total, self.ids = 0, 0, 0, nil
-	self.day = self:Today()
+	self.day, self.expiring = self:Today(), nil
 	self.skillRev = self.skillRev + 1
 end
 
@@ -429,32 +438,53 @@ function Table:Today()
 	return floor((type(t) == "number" and t or 0) / 86400)
 end
 
--- A new day: expiry now inside a job (or without a scheduler); else a job is queued for it and
--- this read still sees the day before.
+-- A new day (or an expiry an error cut short). Without a scheduler expiry runs now, as at every
+-- read. With one a read never changes the table, also inside a job (a job may have read IDs or
+-- hashes before it waited for a frame, and may stand inside a pcall): one job is queued for it,
+-- whose start settles the day (Settle, see NpcWork:Watch); until then reads see the day before.
+local function due(self) return self.expiring ~= nil or self:Today() ~= self.day end
+
 local function check(self)
-	if self:Today() == self.day then return end
+	if not due(self) then return end
 	local w = self.work
-	if not w or w:InJob() then return self:Expire() end
+	if w and owners[self.target] ~= self then return end -- an older table on the same saved one
+	if not w then return self:Expire() end
 	if not self.expireQueued then
 		self.expireQueued = true
-		w:Run(function()
-			self.expireQueued = nil
-			check(self)
-		end, self)
+		local function done() self.expireQueued = nil end
+		w:Run(done, self, done)
 	end
+end
+
+-- At the start of every job of the scheduler (NpcWork:Watch), before it reads or changes anything:
+-- the expiry of a new day, so the job works on the table of its day as a synchronous client would.
+function Table:Settle()
+	self.expireQueued = nil -- this start settles what the queued job was for
+	if owners[self.target] ~= self then return end
+	if due(self) then self:Expire() end
 end
 
 -- Drops what is older than EXPIRE days; the sendable part is cut anew where the day changes it:
 -- in the sheets that hold an entry or register older than SEND days, or whose cut left one out.
+-- Resumable: the day and the list of sheets are kept (self.expiring) until the last one is done,
+-- so an expiry an error cut short is finished by the next one (check and Settle see it due).
 function Table:Expire()
 	local day = self:Today()
-	self.day = day
-	local lo, gone = day - NpcData.SEND, day - NpcData.EXPIRE
-	local list = {}
-	for id, d in pairs(self.oldest) do
-		if d < lo or self.partial[id] then list[#list + 1] = id end
+	local ex = self.expiring
+	if not ex or ex.day ~= day then
+		-- a day later still (or the first try): the sheets an unfinished expiry left are listed again,
+		-- since what the new day changes in a sheet is older than SEND days of it
+		self.day = day
+		local lo, list = day - NpcData.SEND, {}
+		for id, d in pairs(self.oldest) do
+			if d < lo or self.partial[id] then list[#list + 1] = id end
+		end
+		ex = { day = day, list = list, i = 1 }
+		self.expiring = ex
 	end
-	for _, id in ipairs(list) do
+	local gone, list = day - NpcData.EXPIRE, ex.list
+	while ex.i <= #list do
+		local id = list[ex.i]
 		local s = self.sheets[id]
 		if s then
 			pace(self, self.sizes[id])
@@ -465,7 +495,9 @@ function Table:Expire()
 				self:recut(id)
 			end
 		end
+		ex.i = ex.i + 1
 	end
+	self.expiring = nil
 end
 
 -- Everything goes, also from the saved table a detached table left untouched.

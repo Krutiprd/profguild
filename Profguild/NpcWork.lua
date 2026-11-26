@@ -21,9 +21,14 @@
 -- work:InJob(): the caller runs inside a job (then everything it does is in order already).
 -- work:Busy([owner]): jobs are queued or half done (of that owner).
 -- work:Flush(): runs every job to its end now, whatever the budget (logout: the game is leaving).
+-- work:Flushing(): Flush is running (inbound network data may then be dropped: see NpcSync, Comm).
+-- work:Watch(obj): obj:Settle() runs at the start of every job, before the job's own code (an NPC
+--   table expires there when the day changed): a job never sees the table change under it but by
+--   its own work, and it keeps the day it started with (weak: a table no longer used goes).
 --
 -- Jobs never run at the same time: between two slices of a job only reads happen (the window),
--- every change of the NPC tables is made by a job.
+-- every change of the NPC tables is made by a job. A read never changes a table (a new day is
+-- settled at the start of the next job).
 
 local _, ns = ...
 ns = ns or {}
@@ -45,7 +50,7 @@ Work.__index = Work
 function NpcWork.New(adapter)
 	return setmetatable({ a = adapter, q = {}, cur = nil, slicing = false, deferred = false,
 		frame = nil, spent = 0, t0 = 0, left = 0, items = 0, est = 0, unlimited = false,
-		rate = adapter.rate or NpcWork.RATE,
+		rate = adapter.rate or NpcWork.RATE, watched = setmetatable({}, { __mode = "k" }),
 		stats = { jobs = 0, slices = 0, maxMs = 0, errors = 0 } }, Work)
 end
 
@@ -76,7 +81,13 @@ function Work:slice()
 	local q = self.q
 	while q[1] do
 		local job = q[1]
-		if not job.co then job.co = create(job.fn) end
+		if not job.co then
+			local fn = job.fn
+			job.co = create(function()
+				self:settle()
+				return fn()
+			end)
+		end
 		self.cur = job
 		local ok, err = resume(job.co)
 		self.cur = nil
@@ -102,6 +113,18 @@ function Work:slice()
 	self.slicing = false
 	if q[1] and not self.unlimited then later(self) end
 end
+
+function Work:Watch(obj) self.watched[obj] = true end
+
+-- At the start of a job, inside its coroutine (it may pace): every watched object settles (the
+-- list is taken first: a table made in a window between two slices may be added meanwhile).
+function Work:settle()
+	local list = {}
+	for obj in pairs(self.watched) do list[#list + 1] = obj end
+	for i = 1, #list do list[i]:Settle() end
+end
+
+function Work:Flushing() return self.unlimited end
 
 function Work:Run(fn, owner, fail)
 	self.q[#self.q + 1] = { fn = fn, owner = owner, fail = fail }
