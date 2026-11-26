@@ -27,6 +27,7 @@ local LIST_ROWS, ROW_H, ROW_STEP = 8, 36, 38
 local DETAIL_ROWS, DETAIL_STEP = 10, 24  -- member professions
 local CRAFTER_ROWS, CRAFTER_STEP, CRAFTER_TOP = 4, 22, -334
 local REAGENT_ROWS, REAGENT_STEP, REAGENT_TOP = 5, 22, -154
+local FIND_ROWS, FIND_STEP, FIND_TOP = 3, 36, -154          -- FIND RECIPE: where the recipe is had
 local MENU_ROWS, MENU_STEP, MENU_W = 12, 20, 190
 local REQ_BOX_H = 190                                 -- the request box: item, count, note
 local REQ_PICK_ROWS, REQ_PICK_STEP = 5, 20            -- its recipe search (NEW REQUEST)
@@ -49,6 +50,7 @@ local C = {
 	muted    = { 0.60, 0.62, 0.64, 1 },
 	text     = { 0.93, 0.92, 0.89, 1 },
 	clear    = { 0, 0, 0, 0 },
+	best     = { 0.44, 0.82, 0.55, 0.95 },  -- the cheapest source of FIND RECIPE
 }
 local HEX_ONLINE, HEX_OFFLINE, HEX_MUTED, HEX_GOLD = "|cff70d08c", "|cff8a8f94", "|cff9a9ea3", "|cffebc273"
 local PLUS_TEX, MINUS_TEX = "Interface\\Buttons\\UI-PlusButton-Up", "Interface\\Buttons\\UI-MinusButton-Up"
@@ -206,6 +208,14 @@ local function pill(parent, width, height)
 	b:SetScript("OnEnter", function() end)
 	b:SetScript("OnLeave", function() end)
 	return b
+end
+
+-- The big buttons of the details: their normal font, the small one where the text does not fit
+-- (the Slovak request button in the game).
+local function fitButtonFont(b, text)
+	b.text:SetText(text)
+	b.text:SetFontObject("GameFontHighlight")
+	if (b.text:GetStringWidth() or 0) > 136 then b.text:SetFontObject("GameFontHighlightSmall") end
 end
 
 local function setPill(b, text, active, disabled)
@@ -366,6 +376,27 @@ local SOURCE_KEYS = { d = "SRC_DROP", v = "SRC_VENDOR", q = "SRC_QUEST", c = "SR
 -- ProfguildDB.sources; the list uses what is already known. "No text" is not saved: the game is
 -- asked again a minute later (it may not have had the data yet).
 local noSource = {}
+
+-- The recipe item at the auction house, for the source line and the AH row of FIND RECIPE:
+-- copper, the source line's text ("on AH 1g (today), 3 pcs") and the row's ("today, 3 pcs":
+-- how old or whose, pieces); nil when the auction house has no price.
+local function recipeAH(itemID)
+	local price, kind, age, guild = ns.Prices.Get(itemID)
+	if not price or kind ~= "ah" then return nil end
+	local when = guild and ns.Prices.FromText(guild)
+		or age and (age <= 0 and ns.T("TODAY") or ns.T("DAYS_AGO", age)) or nil
+	local onMarket = ns.Prices.Available(itemID)
+	local pieces = onMarket and ns.T("PCS", onMarket) or nil
+	local line = when and ns.T("RECIPE_AH", ns.Prices.Format(price), when) or ns.T("RECIPE_AH_PRICE", ns.Prices.Format(price))
+	local parts = {}
+	if when then parts[#parts + 1] = when end
+	if pieces then
+		line = line .. ", " .. pieces
+		parts[#parts + 1] = pieces
+	end
+	return price, line, table.concat(parts, ", ")
+end
+
 local function recipeItemText(recipeID, ask)
 	local sources = ns.db.sources
 	if ask and sources and sources[recipeID] == nil and GetTime() - (noSource[recipeID] or -1e9) >= 60 then
@@ -384,15 +415,8 @@ local function recipeItemText(recipeID, ask)
 		if SOURCE_KEYS[letter] then parts[#parts + 1] = ns.T(SOURCE_KEYS[letter]) end
 	end
 	local text = gameText or ns.T("RECIPE_FROM", #parts > 0 and table.concat(parts, ", ") or "?")
-	local price, kind, age, guild = ns.Prices.Get(itemID)
-	if price and kind == "ah" then
-		local onAH = guild and ns.T("RECIPE_AH", ns.Prices.Format(price), ns.Prices.FromText(guild))
-			or age and ns.T("RECIPE_AH", ns.Prices.Format(price), age <= 0 and ns.T("TODAY") or ns.T("DAYS_AGO", age))
-			or ns.T("RECIPE_AH_PRICE", ns.Prices.Format(price))
-		local onMarket = ns.Prices.Available(itemID)
-		if onMarket then onAH = onAH .. ", " .. ns.T("PCS", onMarket) end
-		return text .. " · " .. onAH, ns.T("LIST_RECIPE_AH", ns.Prices.Format(price))
-	end
+	local price, onAH = recipeAH(itemID)
+	if price then return text .. " · " .. onAH, ns.T("LIST_RECIPE_AH", ns.Prices.Format(price)) end
 	return text .. " · " .. ns.T("RECIPE_NO_AH"), ""
 end
 
@@ -447,13 +471,35 @@ local function recipeSkill(recipeID, ask)
 	return info
 end
 
+-- What NpcView reads for a recipe: trainers and vendors (own and the guild's), the kept numbers.
+local function npcSource(recipeID)
+	return { own = ns.npcOwn, guild = ns.npc, info = ns.db.recipeInfo and ns.db.recipeInfo[recipeID] or nil }
+end
+
+-- The skill numbers (NpcView.Skill): trainers, then the game's, then Data.lua. ask: as recipeSkill.
+local function recipeSkillNumbers(recipeID, ask)
+	if ask then recipeSkill(recipeID, true) end
+	return ns.NpcView.Skill(recipeID, npcSource(recipeID))
+end
+
+-- the profession window's colours: red = learnable from, then yellow, green, grey = no more skill-ups
+local SKILL_HEX = { learn = HEX_SKILL_MIN, yellow = HEX_DIFFICULTY[1], green = HEX_DIFFICULTY[2], grey = HEX_DIFFICULTY[3] }
+
+-- The numbers of the detail, coloured, "" when none is known.
+local function skillNumbersText(skill)
+	local parts = {}
+	for i, n in ipairs(skill.show) do parts[i] = SKILL_HEX[n[2]] .. n[1] .. "|r" end
+	return table.concat(parts, " ")
+end
+
+-- Leveling rows: learn and grey only.
 local function recipeSkillText(recipeID)
-	local info = recipeSkill(recipeID, true)
-	if not info or not (info.g or info.m) then return nil end
+	local skill = recipeSkillNumbers(recipeID, true)
+	if not (skill.learn or skill.grey) then return nil end
 	-- only coloured numbers, like Wowhead: red = learnable from, grey = no more skill-ups from
 	local parts = {}
-	if info.m then parts[#parts + 1] = HEX_SKILL_MIN .. info.m .. "|r" end
-	if info.g then parts[#parts + 1] = HEX_DIFFICULTY[3] .. info.g .. "|r" end
+	if skill.learn then parts[#parts + 1] = HEX_SKILL_MIN .. skill.learn .. "|r" end
+	if skill.grey then parts[#parts + 1] = HEX_DIFFICULTY[3] .. skill.grey .. "|r" end
 	return table.concat(parts, "  ")
 end
 
@@ -700,15 +746,16 @@ end
 
 -- Leveling: the recipes of the recipe filter without group headers, sorted by the skill from
 -- which they turn grey (the game knows it for every recipe of an opened profession window),
--- then by the skill they are learned at. Recipes without skill data come last.
+-- then by the skill they are learned at, both with the fallbacks of the detail (NpcView.Skill:
+-- trainers, the game, Data.lua). Recipes without skill data come last.
 function UI:BuildLevelingRows(query, category)
 	local rows, counts, total = self:BuildRecipeRows(query, category, true)
 	local out = {}
 	for _, d in ipairs(rows) do
 		if d.kind == "recipe" then
-			local info = ns.db.recipeInfo and ns.db.recipeInfo[d.recipeID]
-			d.grey = info and info.g or 99999
-			d.minSkill = info and info.m or d.grey
+			local skill = recipeSkillNumbers(d.recipeID)
+			d.grey = skill.grey or 99999
+			d.minSkill = skill.learn or d.grey
 			out[#out + 1] = d
 		end
 	end
@@ -940,6 +987,117 @@ local function createReagentRow(parent, index)
 	end)
 	row:SetScript("OnClick", function(self)
 		if self.data and IsShiftKeyDown() then insertLink(0, self.data.itemID) end
+	end)
+	return row
+end
+
+-- Map pin of FIND RECIPE: the game's own waypoint where the client allows one on that map, else
+-- TomTom's. Not verified in the live client: every call is checked for existence and pcall'd.
+local function clientPinAPI()
+	local api = C_Map
+	return type(api) == "table" and type(api.CanSetUserWaypointOnMap) == "function" and type(api.SetUserWaypoint) == "function"
+		and type(UiMapPoint) == "table" and type(UiMapPoint.CreateFromCoordinates) == "function" and api or nil
+end
+
+local function clientCanPin(map)
+	local api = clientPinAPI()
+	if not api then return false end
+	local ok, can = pcall(api.CanSetUserWaypointOnMap, map)
+	return ok and can and true or false
+end
+
+local function tomTom()
+	return type(TomTom) == "table" and type(TomTom.AddWaypoint) == "function" and TomTom or nil
+end
+
+function UI.CanMapPin(map)
+	if type(map) ~= "number" then return false end
+	return clientCanPin(map) or tomTom() ~= nil
+end
+
+-- x, y in whole percent. Returns whether a pin was set.
+function UI.SetMapPin(map, x, y, title)
+	if type(map) ~= "number" or type(x) ~= "number" or type(y) ~= "number" then return false end
+	if clientCanPin(map) then
+		local ok = pcall(function()
+			C_Map.SetUserWaypoint(UiMapPoint.CreateFromCoordinates(map, x / 100, y / 100))
+		end)
+		if ok then
+			-- the pin is also tracked on the screen where the client knows how
+			if C_SuperTrack and type(C_SuperTrack.SetSuperTrackedUserWaypoint) == "function" then
+				pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+			end
+			return true
+		end
+	end
+	local tt = tomTom()
+	if tt then
+		local ok = pcall(tt.AddWaypoint, tt, map, x / 100, y / 100, { title = title })
+		return ok
+	end
+	return false
+end
+
+-- One source of FIND RECIPE: name and a detail line from the left, the price right-aligned, and
+-- the Map button at the right end; the green frame marks the cheapest. Hover: the recipe item's
+-- tooltip (vendor, AH), where, how old, what ~ means.
+local function createFindRow(parent, index)
+	local row = CreateFrame("Button", nil, parent)
+	row:SetSize(DETAIL_W - 28, FIND_STEP - 2)
+	row:SetPoint("TOPLEFT", 14, FIND_TOP - (index - 1) * FIND_STEP)
+	row.bg = row:CreateTexture(nil, "BACKGROUND")
+	row.bg:SetAllPoints()
+	row.bg:SetColorTexture(unpack(C.row))
+	row.bestFrame = panel(row, C.clear, C.best, nil, "flat")
+	row.bestFrame:SetAllPoints()
+	row.bestFrame:Hide()
+	row.name = label(row, "GameFontHighlightSmall", C.text)
+	row.name:SetPoint("TOPLEFT", 8, -4)
+	row.detail = label(row, "GameFontHighlightSmall", C.muted)
+	row.detail:SetPoint("TOPLEFT", 8, -19)
+	row.price = label(row, "GameFontHighlightSmall", C.text)
+	row.price:SetJustifyH("RIGHT")
+	row.mapButton = pill(row, 44, 18)
+	row.mapButton:SetPoint("RIGHT", -6, 0)
+	row.mapButton:SetScript("OnClick", function()
+		local r = row.data
+		if r then UI.SetMapPin(r.map, r.x, r.y, r.name) end
+	end)
+	row.mapButton:HookScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:AddLine(ns.T("BTN_MAP"), C.gold[1], C.gold[2], C.gold[3])
+		GameTooltip:AddLine(ns.T("MAP_HINT"), 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	row.mapButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
+	row:EnableMouseWheel(true)
+	row:SetScript("OnMouseWheel", function(_, delta) UI:ScrollFind(delta) end)
+	row:SetScript("OnEnter", function(self)
+		self.bg:SetColorTexture(unpack(C.hover))
+		local r = self.data
+		if not r then return end
+		local item = (r.kind == "vendor" or r.kind == "ah") and type(self.item) == "number" and self.item or nil
+		if item then ns.Scanner.WantItem(item, true) end
+		showTooltip(self, function()
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			if item then
+				if ns.Tooltip then ns.Tooltip.suppress = true end
+				pcall(GameTooltip.SetItemByID, GameTooltip, item)
+				if ns.Tooltip then ns.Tooltip.suppress = false end
+				GameTooltip:AddLine(" ")
+			end
+			GameTooltip:AddLine(self.title or "", C.gold[1], C.gold[2], C.gold[3])
+			if self.where and self.where ~= "" then GameTooltip:AddLine(self.where, 1, 1, 1) end
+			if r.age and (r.kind == "trainer" or r.kind == "vendor") then
+				GameTooltip:AddLine(r.age <= 0 and ns.T("FIND_SEEN_TODAY") or ns.T("FIND_SEEN", r.age), C.muted[1], C.muted[2], C.muted[3])
+			end
+			if r.approx then GameTooltip:AddLine(ns.T("FIND_APPROX"), C.muted[1], C.muted[2], C.muted[3], true) end
+			GameTooltip:Show()
+		end, item and { [item] = true } or nil)
+	end)
+	row:SetScript("OnLeave", function(self)
+		self.bg:SetColorTexture(unpack(C.row))
+		hideTooltip()
 	end)
 	return row
 end
@@ -1217,7 +1375,7 @@ function UI:Create()
 	d.recipeInfo:SetWidth(DETAIL_W - 28)
 	-- ask the guild to craft the selected recipe (Requests.lua): big, right under the recipe,
 	-- players overlooked it as a small button in the header
-	d.requestButton = pill(body, 170, 22)
+	d.requestButton = pill(body, 146, 22)
 	d.requestButton:SetPoint("TOPLEFT", 14, -104)
 	d.requestButton.text:SetFontObject("GameFontHighlight")
 	d.requestButton:SetScript("OnClick", function()
@@ -1225,6 +1383,13 @@ function UI:Create()
 		if s and s.kind == "recipe" and not s.request then UI:OpenRequestBox(s) end
 	end)
 	d.requestButton:Hide()
+	-- where the recipe is had: switches reagents and cost to that list; keeps its place without
+	-- the request button
+	d.findButton = pill(body, 146, 22)
+	d.findButton:SetPoint("TOPLEFT", 168, -104)
+	d.findButton.text:SetFontObject("GameFontHighlight")
+	d.findButton:SetScript("OnClick", function() UI:ToggleFind() end)
+	d.findButton:Hide()
 	local hover = CreateFrame("Frame", nil, body)
 	hover:SetPoint("TOPLEFT", 12, -40)
 	hover:SetSize(DETAIL_W - 24, 54)
@@ -1239,34 +1404,61 @@ function UI:Create()
 		if s and s.kind == "recipe" and IsShiftKeyDown() then insertLink(s.recipeID, s.itemID) end
 	end)
 
-	-- recipe: reagents, cost, crafters
+	-- recipe: reagents and cost (or FIND RECIPE's list in their place), crafters
 	local rb = CreateFrame("Frame", nil, body)
 	rb:SetAllPoints()
 	d.recipeBody = rb
-	d.reagentTitle = label(rb, "GameFontNormal", C.gold)
+	-- the skill numbers at the right end of the profession line (recipes and requests)
+	d.skillNumbers = label(rb, "GameFontHighlightSmall", C.muted)
+	d.skillNumbers:SetPoint("TOPRIGHT", -14, -64)
+	d.skillNumbers:SetJustifyH("RIGHT")
+	local reb = CreateFrame("Frame", nil, rb)
+	reb:SetAllPoints()
+	d.reagentBody = reb
+	d.reagentTitle = label(reb, "GameFontNormal", C.gold)
 	d.reagentTitle:SetPoint("TOPLEFT", 14, -130)
-	d.reagentCount = label(rb, "GameFontHighlightSmall", C.muted)
+	d.reagentCount = label(reb, "GameFontHighlightSmall", C.muted)
 	d.reagentCount:SetPoint("TOPRIGHT", -14, -132)
 	d.reagentCount:SetJustifyH("RIGHT")
-	hline(rb, 12, -148, DETAIL_W - 24)
+	hline(reb, 12, -148, DETAIL_W - 24)
 	d.reagentRows = {}
-	for i = 1, REAGENT_ROWS do d.reagentRows[i] = createReagentRow(rb, i) end
-	d.reagentNote = label(rb, "GameFontHighlightSmall", C.muted)
+	for i = 1, REAGENT_ROWS do d.reagentRows[i] = createReagentRow(reb, i) end
+	d.reagentNote = label(reb, "GameFontHighlightSmall", C.muted)
 	d.reagentNote:SetPoint("TOPLEFT", 16, REAGENT_TOP - 4)
 	d.reagentNote:SetWidth(DETAIL_W - 32)
 	d.reagentNote:SetWordWrap(true)
 	local costTop = REAGENT_TOP - REAGENT_ROWS * REAGENT_STEP - 6
-	hline(rb, 12, costTop, DETAIL_W - 24)
-	d.costLabel = label(rb, "GameFontHighlightSmall", C.muted)
+	hline(reb, 12, costTop, DETAIL_W - 24)
+	d.costLabel = label(reb, "GameFontHighlightSmall", C.muted)
 	d.costLabel:SetPoint("TOPLEFT", 16, costTop - 8)
-	d.costValue = label(rb, "GameFontHighlightSmall", C.text)
+	d.costValue = label(reb, "GameFontHighlightSmall", C.text)
 	d.costValue:SetPoint("TOPRIGHT", -16, costTop - 8)
 	d.costValue:SetJustifyH("RIGHT")
-	d.profitLabel = label(rb, "GameFontHighlightSmall", C.muted)
+	d.profitLabel = label(reb, "GameFontHighlightSmall", C.muted)
 	d.profitLabel:SetPoint("TOPLEFT", 16, costTop - 26)
-	d.profitValue = label(rb, "GameFontHighlightSmall", C.text)
+	d.profitValue = label(reb, "GameFontHighlightSmall", C.text)
 	d.profitValue:SetPoint("TOPRIGHT", -16, costTop - 26)
 	d.profitValue:SetJustifyH("RIGHT")
+	-- FIND RECIPE: title as the reagents', 3 rows (the wheel scrolls them), the way back
+	local fb = CreateFrame("Frame", nil, rb)
+	fb:SetAllPoints()
+	d.findBody = fb
+	d.findTitle = label(fb, "GameFontNormal", C.gold)
+	d.findTitle:SetPoint("TOPLEFT", 14, -130)
+	d.findTitle:SetWidth(DETAIL_W - 100)
+	d.findCount = label(fb, "GameFontHighlightSmall", C.muted)
+	d.findCount:SetPoint("TOPRIGHT", -14, -132)
+	d.findCount:SetJustifyH("RIGHT")
+	hline(fb, 12, -148, DETAIL_W - 24)
+	d.findRows = {}
+	for i = 1, FIND_ROWS do d.findRows[i] = createFindRow(fb, i) end
+	d.backButton = pill(fb, 300, 20)
+	d.backButton:SetPoint("TOPLEFT", 14, -268)
+	d.backButton:SetScript("OnClick", function()
+		UI.findOpen = false
+		UI:Refresh()
+	end)
+	fb:Hide()
 	d.crafterTitle = label(rb, "GameFontNormal", C.gold)
 	d.crafterTitle:SetPoint("TOPLEFT", 14, CRAFTER_TOP + 24)
 	d.crafterCount = label(rb, "GameFontHighlightSmall", C.muted)
@@ -1912,6 +2104,25 @@ function UI:ScrollDetail(delta)
 	self:Refresh()
 end
 
+function UI:ScrollFind(delta)
+	self.findOffset = (self.findOffset or 0) - (delta or 0)
+	self:Refresh()
+end
+
+-- FIND RECIPE of the selected recipe (not of a request): open, or back to the reagents. It stays
+-- open only for the recipe and view it was opened in (DrawDetail closes it otherwise).
+UI.findOpen = false
+UI.findOffset = 0
+function UI:ToggleFind()
+	local s = self.selected
+	if self.findOpen or not s or s.kind ~= "recipe" or s.request then
+		self.findOpen = false
+	else
+		self.findOpen, self.findKey, self.findView, self.findOffset = true, s.key, self.view, 0
+	end
+	self:Refresh()
+end
+
 function UI:ApplyTexts()
 	if self.frame then self:Refresh() end
 end
@@ -2144,22 +2355,14 @@ function UI:DrawReagents(s)
 	if s.itemID and s.itemID > 0 then
 		if bop then value = 0 else value, valueSource, _, guildValue = ns.Prices.SaleValue(s.itemID) end
 	end
-	local skill = recipeSkillText(s.recipeID)
 	local valueText = bop and (HEX_LOSS .. ns.T("ITEM_BOP") .. "|r")
 		or (value and ns.T(valueSource == "vendor" and "ITEM_VALUE_VENDOR" or "ITEM_VALUE", ns.Prices.Format(value))) or ""
 	local onMarket = value and not bop and valueSource ~= "vendor" and ns.Prices.Available(s.itemID)
 	local extra = {}
 	if onMarket then extra[#extra + 1] = ns.T("PCS", onMarket) end
-	-- a guildmate's price: whose and how old; the skill moves to the line above to make room
+	-- a guildmate's price: whose and how old (the skill numbers are on the line above, DrawDetail)
 	if guildValue and not bop then extra[#extra + 1] = ns.Prices.FromText(guildValue) end
 	if #extra > 0 then valueText = valueText .. " " .. HEX_MUTED .. "(" .. table.concat(extra, ", ") .. ")|r" end
-	-- d.subBase: the line as DrawDetail wrote it (this runs again on every price refresh)
-	if skill and guildValue and not bop then
-		d.sub:SetText((d.subBase or "") .. "  " .. HEX_MUTED .. skill .. "|r")
-	else
-		if d.subBase then d.sub:SetText(d.subBase) end
-		if skill then valueText = valueText ~= "" and (valueText .. "  ·  " .. skill) or skill end
-	end
 	d.value:SetText(valueText)
 	d.costLabel:SetText(ns.T("COST_LABEL"))
 	d.profitLabel:SetText(ns.T("PROFIT_LABEL"))
@@ -2215,13 +2418,128 @@ function UI:RefreshPrices()
 	end
 end
 
+local function zoneName(map)
+	local info = safeCall(C_Map and C_Map.GetMapInfo, map)
+	return type(info) == "table" and type(info.name) == "string" and info.name or nil
+end
+
+-- "Stormwind 56,64" where the finder stood; "" without a place.
+local function placeText(r)
+	if not (r.map and r.x and r.y) then return "" end
+	local zone = zoneName(r.map)
+	local spot = string.format("%d,%d", r.x, r.y)
+	return zone and (zone .. " " .. spot) or spot
+end
+
+-- "5 Merchant's Favor": a currency (kind 1) or an item (kind 2); "#id" until the item is loaded.
+local function otherCostText(c)
+	local kind, id, count = c[1], c[2], c[3]
+	local name
+	if kind == 1 then
+		local info = safeCall(C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo, id)
+		name = type(info) == "table" and info.name or nil
+	else
+		name = ns.Scanner.ItemName(id)
+	end
+	return count .. " " .. (name or ("#" .. id))
+end
+
+local HOW_KEYS = { drop = "SRC_DROP", quest = "SRC_QUEST", crafted = "SRC_CRAFT" }
+
+-- The texts of one source row: name, detail line, price, whether the name is muted.
+local function findLine(r)
+	local kind = r.kind
+	local price = r.copper and ((r.approx and "~" or "") .. ns.Prices.Format(r.copper)) or ""
+	if kind == "ah" then
+		return ns.T("FIND_AH"), (r.text and r.text ~= "") and r.text or (r.copper and "" or ns.T("FIND_AH_NONE")), price
+	elseif kind == "trainer" or kind == "vendor" then
+		local parts = {}
+		local place = placeText(r)
+		if place ~= "" then parts[#parts + 1] = place end
+		for _, c in ipairs(r.other or {}) do parts[#parts + 1] = otherCostText(c) end
+		if r.limited then parts[#parts + 1] = ns.T("FIND_LIMITED") end
+		return ns.T(kind == "trainer" and "FIND_TRAINER" or "FIND_VENDOR", r.name or "?"), table.concat(parts, ", "), price
+	elseif kind == "other" then
+		local how = {}
+		for i, h in ipairs(r.how or {}) do how[i] = ns.T(HOW_KEYS[h] or h) end
+		return ns.T("FIND_OTHER", table.concat(how, ", ")), ns.T("FIND_NO_PLACE"), "", true
+	elseif kind == "missing" then
+		return ns.T(r.of == "vendor" and "FIND_NO_VENDOR" or "FIND_NO_TRAINER"), "", "", true
+	end
+	return ns.T("FIND_UNKNOWN"), "", "", true
+end
+
+-- FIND RECIPE: where the selected recipe is had (NpcView.Sources), drawn in place on every
+-- refresh, the scroll position kept and clamped to the list.
+function UI:DrawFind(s)
+	local d = self.detail
+	local recipeItem, letters = ns.Prices.RecipeItem(s.recipeID)
+	-- vendors of Data.lua's recipe item or of the one found in recipeItems
+	local items = {}
+	local e = ns.RecipeData and ns.RecipeData[s.recipeID]
+	if type(e) == "table" and type(e[1]) == "number" then items[e[1]] = true end
+	if type(recipeItem) == "number" then items[recipeItem] = true end
+	local ah
+	if type(recipeItem) == "number" then
+		local copper, _, text = recipeAH(recipeItem)
+		if copper then ah = { copper = copper, text = text } end
+	end
+	local map = safeCall(C_Map and C_Map.GetBestMapForUnit, "player")
+	local rows = ns.NpcView.Sources(s.recipeID, npcSource(s.recipeID),
+		{ map = map, items = items, recipeItem = recipeItem, letters = letters or "", ah = ah })
+
+	local itemName = type(recipeItem) == "number" and ns.Scanner.ItemName(recipeItem) or nil
+	d.findTitle:SetText(itemName or ns.T("FIND_TITLE"))
+	local maxOffset = math.max(0, #rows - FIND_ROWS)
+	self.findOffset = math.max(0, math.min(maxOffset, math.floor(self.findOffset or 0)))
+	if maxOffset > 0 then
+		d.findCount:SetText(string.format("%d-%d / %d", self.findOffset + 1, self.findOffset + FIND_ROWS, #rows))
+	else
+		d.findCount:SetText(tostring(#rows))
+	end
+	local rowW = DETAIL_W - 28
+	for i, row in ipairs(d.findRows) do
+		local r = rows[self.findOffset + i]
+		row.data = r
+		if r then
+			local name, detail, price, muted = findLine(r)
+			row.title, row.where, row.item = name, placeText(r), recipeItem
+			row.name:SetText(muted and (HEX_MUTED .. name .. "|r") or name)
+			row.detail:SetText(detail)
+			row.price:SetText(price)
+			local pin = (r.kind == "trainer" or r.kind == "vendor") and r.map and r.x and r.y and UI.CanMapPin(r.map)
+			setPill(row.mapButton, ns.T("BTN_MAP"), false)
+			showIf(row.mapButton, pin)
+			-- the price ends 6 left of the Map button (at -6 without it), the name 8 before the price
+			row.priceRight = pin and 56 or 6
+			row.price:ClearAllPoints()
+			row.price:SetPoint("RIGHT", -row.priceRight, 0)
+			local free = rowW - 8 - row.priceRight - (price ~= "" and (row.price:GetStringWidth() or 0) or 0) - 8
+			row.name:SetWidth(math.max(40, free))
+			row.detail:SetWidth(math.max(40, free))
+			showIf(row.bestFrame, r.best)
+			row:Show()
+		else
+			row:Hide()
+		end
+	end
+end
+
 function UI:DrawDetail()
 	local d, s = self.detail, self.selected
+	-- FIND RECIPE stays open only on the recipe and in the view it was opened for
+	if self.findOpen and not (s and s.kind == "recipe" and not s.request and s.key == self.findKey and self.view == self.findView) then
+		self.findOpen = false
+	end
 	d.title:SetText(ns.T("HEAD_DETAILS"))
 	setPill(d.refreshButton, ns.T("BTN_REFRESH"), false)
 	showIf(d.refreshButton, s ~= nil and s.kind == "recipe" and ns.Prices.CanRefresh())
+	fitButtonFont(d.requestButton, ns.T("BTN_REQUEST")) -- before setPill: a font object resets the colour
 	setPill(d.requestButton, ns.T("BTN_REQUEST"), false)
 	showIf(d.requestButton, s ~= nil and s.kind == "recipe" and not s.request and ns.requests ~= nil)
+	fitButtonFont(d.findButton, ns.T("BTN_FIND"))
+	setPill(d.findButton, ns.T("BTN_FIND"), self.findOpen)
+	showIf(d.findButton, s ~= nil and s.kind == "recipe" and not s.request)
 	if not s then
 		d.body:Hide()
 		d.empty:SetText(ns.T(self.view == "members" and "PICK_MEMBER" or (self.view == "requests" and "PICK_REQUEST") or "PICK_RECIPE"))
@@ -2239,8 +2557,10 @@ function UI:DrawDetail()
 		setIcon(d.icon, recipeIcon(s))
 		d.name:SetText(qualityName(s))
 		local _, req = ns.Scanner.ItemLevel(s.itemID)
-		d.subBase = s.prof .. ((req and req > 1) and ("  " .. HEX_MUTED .. ns.T("REQ_LEVEL", req) .. "|r") or "")
-		d.sub:SetText(d.subBase)
+		-- the profession, the required level short, and the skill numbers at the right end
+		d.skillNumbers:SetText(skillNumbersText(recipeSkillNumbers(s.recipeID, true)))
+		d.sub:SetText(s.prof .. ((req and req > 1) and ("  " .. HEX_MUTED .. ns.T("REQ_LEVEL_SHORT", req) .. "|r") or ""))
+		d.sub:SetWidth(DETAIL_W - 80 - (d.skillNumbers:GetStringWidth() or 0) - 8)
 		d.recipeInfo:SetText((recipeItemText(s.recipeID, true)) or "")
 		if s.request then
 			local rec = s.request
@@ -2249,6 +2569,13 @@ function UI:DrawDetail()
 			d.recipeInfo:SetText(info)
 		end
 		self:DrawReagents(s)
+		-- FIND RECIPE takes the place of reagents and cost; the crafters stay
+		showIf(d.reagentBody, not self.findOpen)
+		showIf(d.findBody, self.findOpen)
+		if self.findOpen then
+			setPill(d.backButton, ns.T("BTN_BACK_REAGENTS"), false)
+			self:DrawFind(s)
+		end
 		d.crafterTitle:SetText(ns.T("HEAD_CRAFTERS"))
 		d.crafterCount:SetText(tostring(#s.crafters))
 		for _, c in ipairs(s.crafters) do
@@ -2279,6 +2606,7 @@ function UI:DrawDetail()
 		setClassIcon(d.icon, rec.c)
 		d.name:SetText(classColored(s.name, rec.c))
 		d.sub:SetText(s.online and (HEX_ONLINE .. ns.T("STATE_ONLINE") .. "|r") or ns.T("MEMBER_UPDATED", daysText(rec)))
+		d.sub:SetWidth(DETAIL_W - 80) -- no skill numbers: the full width
 		d.value:SetText("")
 		d.recipeInfo:SetText("")
 		d.section:SetText(ns.T("HEAD_MEMBER_PROFS"))
@@ -2341,7 +2669,7 @@ function UI:Draw()
 	local key = table.concat({ self.view, query, tostring(self.category), tostring(ns.db.settings.onlineOnly),
 		tostring(ns.db.settings.recipeFilter), ns.catalog and ns.catalog.revision or 0,
 		tostring(self.memberFilter), tostring(store), store and store.revision or 0, store and store.rosterRevision or 0,
-		tostring(ns.lang), self.nameEpoch or 0, ns.recipeInfoRevision or 0,
+		tostring(ns.lang), self.nameEpoch or 0, ns.recipeInfoRevision or 0, ns.npcSkillRevision or 0,
 		tostring(ns.requests), ns.requests and ns.requests.revision or 0,
 		math.floor(GetServerTime() / 3600) }, "\1") -- requests leave the list as hours pass
 	local cache = self.listCache

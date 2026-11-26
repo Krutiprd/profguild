@@ -611,7 +611,7 @@ local npcAdapter = {
 	send = function(msg, done) Comm.SendNpc(msg, done) end,
 	selfGuid = function() return UnitGUID("player") end,
 	faction = function() return ns.npcFaction end,
-	changed = function() ns.OnDataChanged() end,
+	changed = function() ns.NoteNpcSkills() ns.OnDataChanged() end,
 	isMe = function(name) return type(name) == "string" and ns.NormalizeName(name) == UnitName("player") end,
 	size = function(msg) return #Comm.Encode(msg) end,
 }
@@ -649,14 +649,61 @@ function ns.SetupNpc()
 		ns.npcGuild = tab
 		ns.npcSync = NpcSync.New(npcAdapter, tab)
 	end
+	local shown = ns.npc
 	ns.npc = ns.npcGuild or ns.npcOwn
+	if ns.npc ~= shown then ns.NoteNpcSkills() end
+end
+
+-- ns.npcSkillRevision: raised when a learn skill the window shows could have changed, so that the
+-- Leveling list (sorted by it) is rebuilt then and not at every sheet. Cheap rule: the skill
+-- registers (recipe, skill, its day) of the trainer entries of the shown tables changed. A sheet's
+-- registers are kept per sheet object while its entry count and the table's day stay (the table
+-- replaces a changed sheet, and only its limits and expiry edit one in place, which change those).
+local skillSigs = setmetatable({}, { __mode = "k" })
+local skillSeen, skillTables = setmetatable({}, { __mode = "k" }), nil
+
+local function skillSig(tab, id, s)
+	local c = skillSigs[s]
+	local n = tab.sizes and tab.sizes[id]
+	if c and c.n == n and c.day == tab.day then return c.sig end
+	local ids = {}
+	for recipe in pairs(s.t) do ids[#ids + 1] = recipe end
+	table.sort(ids)
+	local parts = {}
+	for i, recipe in ipairs(ids) do
+		local e = s.t[recipe]
+		parts[i] = recipe .. ":" .. tostring(e[2]) .. ":" .. tostring(e[3])
+	end
+	local sig = table.concat(parts, ",")
+	skillSigs[s] = { sig = sig, n = n, day = tab.day }
+	return sig
+end
+
+function ns.NoteNpcSkills()
+	local changed = false
+	local tables = tostring(ns.npc) .. tostring(ns.npcOwn)
+	if tables ~= skillTables then changed, skillTables = true, tables end
+	for _, tab in ipairs({ ns.npc or false, ns.npcOwn or false }) do
+		if tab and type(tab.sheets) == "table" then
+			local now, old = {}, skillSeen[tab] or {}
+			for id, s in pairs(tab.sheets) do
+				if next(s.t) then
+					now[id] = skillSig(tab, id, s)
+					if old[id] ~= now[id] then changed = true end
+				end
+			end
+			for id in pairs(old) do if not now[id] then changed = true end end
+			skillSeen[tab] = now
+		end
+	end
+	if changed then ns.npcSkillRevision = (ns.npcSkillRevision or 0) + 1 end
 end
 
 -- A reading of a trainer or vendor (NpcReader): npcOwn takes it as the last known reading; the
 -- guild's table takes it by the own-visit rules and NpcSync sends what changed.
 local function onNpcReading(npcID, reading)
 	ns.SetupNpc()
-	if ns.npcOwn and ns.npcOwn:Write(npcID, reading) then ns.OnDataChanged() end
+	if ns.npcOwn and ns.npcOwn:Write(npcID, reading) then ns.NoteNpcSkills() ns.OnDataChanged() end
 	if ns.npcSync then ns.npcSync:OwnVisit(npcID, reading) end
 end
 
@@ -1314,6 +1361,7 @@ local function slash(input)
 			-- the guild's comes back from guildmates
 			if ns.npcSync then ns.npcSync:Announce() end
 			ns.Say("NPC_CLEARED", ns.npcFaction)
+			ns.NoteNpcSkills()
 			ns.OnDataChanged()
 			return
 		end

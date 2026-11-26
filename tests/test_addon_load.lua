@@ -541,7 +541,7 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	end }
 	ProfguildDB.recipeInfo[3866] = nil
 	UI:Refresh()
-	local skillText = UI.detail.value:GetText()
+	local skillText = UI.detail.skillNumbers:GetText()
 	H.ok(skillText:find("275", 1, true) and skillText:find("320", 1, true), "learn at 275, grey at 320: " .. skillText)
 	H.eq(ProfguildDB.recipeInfo[3866].m, 275, "kept")
 	H.eq(ProfguildDB.recipeInfo[3866].g, 320)
@@ -574,7 +574,7 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	local levelShown
 	for _, r in ipairs(UI.rows) do if r.level:GetText() == ns.T("LIST_LEVEL", 55) then levelShown = true end end
 	H.ok(levelShown, "required level in the list")
-	H.ok(UI.detail.sub:GetText():find(ns.T("REQ_LEVEL", 55), 1, true), "required level: " .. UI.detail.sub:GetText())
+	H.ok(UI.detail.sub:GetText():find(ns.T("REQ_LEVEL_SHORT", 55), 1, true), "required level: " .. UI.detail.sub:GetText())
 	UI.recipeButton._scripts.OnClick(UI.recipeButton)
 	H.eq(ProfguildDB.settings.recipeFilter, "all")
 	H.eq(UI.selected, nil, "switching the filter drops the selection")

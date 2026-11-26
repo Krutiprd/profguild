@@ -569,3 +569,396 @@ H.test("npc: a 0.6.0 client in the same guild receives nothing on ProfguildNPC a
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 	H.ok(env.SlashCmdList.PROFGUILD ~= SlashCmdList.PROFGUILD, "own slash commands")
 end)
+
+-- Task 9: FIND RECIPE in the detail pane ---------------------------------------------------
+
+local RECIPE, ITEM = 3865, 7777 -- Tailoring, known after TRADE_SKILL_SHOW (makes 4305); its recipe item
+local ANA = "Player-1-00000002"
+
+local function placeOf(map, x, y) return map and { map = map, x = x, y = y } or {} end
+
+local function vendorOf(name, copper, extra, place)
+	local p = { c = copper or 0, o = {}, l = 0 }
+	for k, v in pairs(extra or {}) do p[k] = v end
+	local r = { name = name, t = {}, v = { [ITEM] = { price = p } } }
+	for k, v in pairs(place or placeOf(1453, 56, 64)) do r[k] = v end
+	return r
+end
+
+local function trainerOf(name, recipe, skill, copper, place)
+	local r = { name = name, t = { [recipe] = { skill = skill, copper = copper } }, v = {} }
+	for k, v in pairs(place or placeOf(1453, 43, 74)) do r[k] = v end
+	return r
+end
+
+local function clickRecipe(UI, id)
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.recipeID == id and not d.request then r._scripts.OnClick(r, "LeftButton") return d end
+	end
+end
+
+local function cleanGame()
+	_G.C_Map, _G.UiMapPoint, _G.TomTom, _G.Auctionator, _G.C_CurrencyInfo = nil, nil, nil, nil, nil
+end
+
+-- Logged in, Tailoring scanned, the window open on RECIPE.
+local function findWindow(setup)
+	cleanGame()
+	local ns = boot(setup)
+	M.fire("TRADE_SKILL_SHOW")
+	M.advance(5)
+	ns.RecipeData[RECIPE] = { ITEM, "v", 0, 60, 80 }
+	ns.RecipeData[18560] = { false, "", 0, 30, 50 }
+	_G.C_Map = { GetMapInfo = function(id) return ({ [1453] = { name = "Stormwind" }, [1455] = { name = "Ironforge" } })[id] end }
+	local UI = ns.UI
+	UI:Toggle()
+	UI:SetView("recipes")
+	UI:SetCategory(197)
+	H.ok(clickRecipe(UI, RECIPE), "recipe listed")
+	return ns, UI, UI.detail
+end
+
+local function plain(text) return ((text or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")) end
+
+local function rowTexts(row)
+	return plain(row.name:GetText()), plain(row.detail:GetText()), plain(row.price:GetText())
+end
+
+local function shownRows(d)
+	local n = 0
+	for _, r in ipairs(d.findRows) do if r:IsShown() then n = n + 1 end end
+	return n
+end
+
+-- the five sources of RECIPE: ah, trainer, two vendors with copper, one with another cost
+local function fiveSources(ns)
+	_G.Auctionator = { API = { v1 = {
+		GetAuctionPriceByItemID = function(_, id) if id == ITEM then return 8000 end end,
+		GetAuctionAgeByItemID = function() return 1 end,
+		GetVendorPriceByItemID = function() end,
+	} } }
+	local realInfo = C_Item.GetItemInfo
+	C_Item.GetItemInfo = function(id)
+		if id == 8888 then return "Merchant's Favor" end
+		return realInfo(id)
+	end
+	receiveNU(ns, 6001, trainerOf("Georgio Bolero", RECIPE, 50, 4000))
+	receiveNU(ns, 6002, vendorOf("Maria Lumere", 9500, { l = 1 }))
+	receiveNU(ns, 6003, vendorOf("Jormund", 10000, nil, placeOf(nil)))
+	receiveNU(ns, 6004, vendorOf("Favor Keeper", 0, { o = { { 2, 8888, 5 } } }))
+	M.advance(1)
+end
+
+H.test("find: opens in place of reagents and cost, crafters stay; again, back, another recipe, another view close it", function()
+	local ns, UI, d = findWindow()
+	H.ok(d.findButton:IsShown(), "button shown")
+	H.eq(d.findButton.text:GetText(), ns.T("BTN_FIND"))
+	H.ok(d.reagentBody:IsShown() and not d.findBody:IsShown(), "reagents first")
+	d.findButton._scripts.OnClick(d.findButton)
+	H.ok(UI.findOpen, "open")
+	H.ok(not d.reagentBody:IsShown(), "reagents and cost hidden")
+	H.ok(d.findBody:IsShown(), "the list shown")
+	H.eq(d.backButton.text:GetText(), ns.T("BTN_BACK_REAGENTS"))
+	H.ok(d.findButton.active, "pressed")
+	H.ok(d.recipeBody:IsShown(), "crafters stay")
+	H.eq(#d.crafterRows, 4, "4 crafter rows")
+	UI:ToggleFind()
+	H.ok(not UI.findOpen and d.reagentBody:IsShown() and not d.findBody:IsShown(), "pressed again: closed")
+	UI:ToggleFind()
+	d.backButton._scripts.OnClick(d.backButton)
+	H.ok(not UI.findOpen and d.reagentBody:IsShown(), "back to reagents")
+	UI:ToggleFind()
+	H.ok(clickRecipe(UI, 18560), "another recipe listed")
+	H.ok(not UI.findOpen and d.reagentBody:IsShown() and not d.findBody:IsShown(), "another recipe: closed")
+	clickRecipe(UI, RECIPE)
+	H.ok(not UI.findOpen, "the first one again: still closed")
+	UI:ToggleFind()
+	UI:SetView("leveling")
+	H.ok(not UI.findOpen, "another view: closed")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	cleanGame()
+end)
+
+H.test("find: rows of every kind, ~, limited stock, other costs, zone only with a place, green frame, 3 visible", function()
+	local ns, UI, d = findWindow()
+	fiveSources(ns)
+	UI:ToggleFind()
+	H.eq(shownRows(d), 3, "3 visible")
+	local name, detail, price = rowTexts(d.findRows[1])
+	H.eq(name, ns.T("FIND_AH"))
+	H.ok(detail:find(ns.T("DAYS_AGO", 1), 1, true), "AH age: " .. detail)
+	H.eq(price, plain(ns.Prices.Format(8000)))
+	H.ok(not d.findRows[1].mapButton:IsShown(), "no map for the AH")
+	name, detail, price = rowTexts(d.findRows[2])
+	H.eq(name, ns.T("FIND_TRAINER", "Georgio Bolero"))
+	H.eq(detail, "Stormwind 43,74")
+	H.eq(price, "~" .. plain(ns.Prices.Format(4000)), "the guild's price has ~")
+	H.ok(d.findRows[2].bestFrame:IsShown(), "green frame on the cheapest")
+	H.ok(not d.findRows[1].bestFrame:IsShown() and not d.findRows[3].bestFrame:IsShown(), "only there")
+	name, detail, price = rowTexts(d.findRows[3])
+	H.eq(name, ns.T("FIND_VENDOR", "Maria Lumere"))
+	H.eq(detail, "Stormwind 56,64, " .. ns.T("FIND_LIMITED"))
+	H.eq(price, "~" .. plain(ns.Prices.Format(9500)))
+	H.eq(d.findCount:GetText(), "1-3 / 5")
+	-- the wheel over the list reaches the last row and no further
+	local row = d.findRows[1]
+	for _ = 1, 4 do row._scripts.OnMouseWheel(row, -1) end
+	H.eq(UI.findOffset, 2, "clamped at the last")
+	name, detail, price = rowTexts(d.findRows[2])
+	H.eq(name, ns.T("FIND_VENDOR", "Jormund"))
+	H.eq(detail, "", "no place: no zone")
+	name, detail, price = rowTexts(d.findRows[3])
+	H.eq(name, ns.T("FIND_VENDOR", "Favor Keeper"))
+	H.ok(detail:find("5 Merchant's Favor", 1, true), "other cost: " .. detail)
+	H.eq(price, "", "no copper price")
+	H.ok(not d.findRows[2].mapButton:IsShown(), "no place: no map button")
+	-- the wheel over the crafters scrolls them, not the list
+	local scrolled
+	local real = UI.ScrollDetail
+	UI.ScrollDetail = function(_, delta) scrolled = delta end
+	d.crafterRows[1]._scripts.OnMouseWheel(d.crafterRows[1], -1)
+	UI.ScrollDetail = real
+	H.eq(scrolled, -1, "crafters")
+	H.eq(UI.findOffset, 2, "list untouched")
+	-- an own reading of the last 30 days has no ~
+	ns.npcReader.onReading(6003, vendorOf("Jormund", 10000, nil, placeOf(nil)))
+	M.advance(1)
+	name, detail, price = rowTexts(d.findRows[2])
+	H.eq(price, plain(ns.Prices.Format(10000)), "own: no ~")
+	-- hover: the recipe item's tooltip, the zone, how old, what ~ means
+	M.tooltipLines = {}
+	local itemShown
+	local realSet = GameTooltip.SetItemByID
+	GameTooltip.SetItemByID = function(_, id) itemShown = id end
+	UI.findOffset = 0
+	UI:Refresh()
+	d.findRows[3]._scripts.OnEnter(d.findRows[3])
+	GameTooltip.SetItemByID = realSet
+	local tip = table.concat(M.tooltipLines, "\n")
+	H.eq(itemShown, ITEM, "the recipe item's tooltip for a vendor")
+	H.ok(tip:find("Stormwind", 1, true) and tip:find(ns.T("FIND_SEEN_TODAY"), 1, true) and tip:find(ns.T("FIND_APPROX"), 1, true), tip)
+	d.findRows[3]._scripts.OnLeave(d.findRows[3])
+	-- other kinds: drop and quest, no vendor seen, no trainer seen, nothing known
+	ns.RecipeData[RECIPE] = { ITEM, "vdq", 0, 60, 80 }
+	SlashCmdList.PROFGUILD("npc clear")
+	UI:Refresh()
+	local texts = {}
+	for i = 1, shownRows(d) do texts[i] = (rowTexts(d.findRows[i])) end
+	H.eq(texts[2], ns.T("FIND_NO_VENDOR"))
+	H.eq(texts[3], ns.T("FIND_OTHER", ns.T("SRC_DROP") .. ", " .. ns.T("SRC_QUEST")))
+	H.eq(select(2, rowTexts(d.findRows[3])), ns.T("FIND_NO_PLACE"))
+	ns.RecipeData[RECIPE] = { false, "", 0, 60, 80 }
+	UI:Refresh()
+	H.eq((rowTexts(d.findRows[1])), ns.T("FIND_NO_TRAINER"))
+	ns.RecipeData[RECIPE] = nil
+	UI:Refresh()
+	H.eq((rowTexts(d.findRows[1])), ns.T("FIND_UNKNOWN"))
+	_G.Auctionator = nil
+	UI:Refresh()
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	cleanGame()
+end)
+
+H.test("find: a guild sheet arriving while open adds its row and keeps the offset; a shrinking list clamps it", function()
+	local ns, UI, d = findWindow()
+	fiveSources(ns)
+	UI:ToggleFind()
+	UI:ScrollFind(-1)
+	H.eq(UI.findOffset, 1)
+	receiveNU(ns, 6005, vendorOf("Late Vendor", 20000))
+	M.advance(1)
+	H.ok(UI.findOpen, "still open")
+	H.eq(UI.findOffset, 1, "offset kept")
+	H.eq(d.findCount:GetText(), "2-4 / 6", "the row added")
+	UI:ScrollFind(-5)
+	H.eq(UI.findOffset, 3)
+	SlashCmdList.PROFGUILD("npc clear")
+	M.advance(1)
+	H.eq(d.findCount:GetText(), "2", "ah and no vendor")
+	H.eq(UI.findOffset, 0, "clamped")
+	cleanGame()
+end)
+
+H.test("find: map pin by the client, else TomTom, else no button; errors stay inside", function()
+	local ns, UI, d = findWindow()
+	fiveSources(ns)
+	local set, tt
+	C_Map.CanSetUserWaypointOnMap = function(m) return m == 1453 end
+	C_Map.SetUserWaypoint = function(p) set = p end
+	_G.UiMapPoint = { CreateFromCoordinates = function(m, x, y) return { m = m, x = x, y = y } end }
+	UI:ToggleFind()
+	local b = d.findRows[2].mapButton
+	H.ok(b:IsShown(), "map button")
+	H.eq(b.text:GetText(), ns.T("BTN_MAP"))
+	b._scripts.OnClick(b)
+	H.ok(set and set.m == 1453 and set.x == 43 / 100 and set.y == 74 / 100, "client waypoint")
+	-- refused by the client, TomTom there
+	_G.TomTom = { AddWaypoint = function(self, m, x, y, opts) tt = { self = self, m = m, x = x, y = y, title = opts and opts.title } end }
+	set = nil
+	H.ok(UI.CanMapPin(1455), "TomTom can")
+	H.ok(UI.SetMapPin(1455, 38, 30, "Jormund"), "pinned")
+	H.eq(set, nil, "not the client's")
+	H.ok(tt.self == TomTom and tt.m == 1455 and tt.x == 38 / 100 and tt.y == 30 / 100 and tt.title == "Jormund", "TomTom")
+	-- the client's API missing, TomTom there
+	C_Map.SetUserWaypoint = nil
+	tt = nil
+	H.ok(UI.SetMapPin(1453, 43, 74, "Georgio Bolero") and tt and tt.m == 1453, "TomTom without the API")
+	-- neither
+	_G.TomTom = nil
+	H.ok(not UI.CanMapPin(1453), "nothing can")
+	UI:Refresh()
+	H.ok(not d.findRows[2].mapButton:IsShown(), "button hidden")
+	-- an error in the API does not escape
+	C_Map.CanSetUserWaypointOnMap = function() error("boom") end
+	C_Map.SetUserWaypoint = function() error("boom") end
+	local ok, r = pcall(UI.SetMapPin, 1453, 43, 74, "x")
+	H.ok(ok and not r, "no error, not pinned")
+	H.ok(not UI.CanMapPin(1453))
+	C_Map.CanSetUserWaypointOnMap = function() return true end
+	ok, r = pcall(UI.SetMapPin, 1453, 43, 74, "x")
+	H.ok(ok and not r, "SetUserWaypoint failing: not pinned")
+	_G.TomTom = { AddWaypoint = function() error("boom") end }
+	ok, r = pcall(UI.SetMapPin, 1455, 1, 1, "x")
+	H.ok(ok and not r, "TomTom failing")
+	UI:Refresh()
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	cleanGame()
+end)
+
+H.test("find: requests and members have no FIND RECIPE; requests have the numbers at the same place", function()
+	local ns, UI, d = findWindow()
+	ProfguildDB.recipeInfo[RECIPE] = { m = 50, g = 90 }
+	UI:Refresh()
+	local numbers = d.skillNumbers:GetText()
+	H.eq(plain(numbers), "50 60 75 90")
+	local clock = GetServerTime()
+	local rec = { id = ANA .. "-" .. clock .. "-1", by = ANA, r = RECIPE, i = 4305, n = 2, note = "pls",
+		c = clock, st = "open", u = clock, ub = ANA }
+	ns.Comm:OnCommReceived("Profguild", ns.Comm.Encode({ t = "TU", pv = ns.Requests.PROTOCOL, s = ANA, q = { rec } }),
+		"GUILD", "Ana Brightwood")
+	UI:SetView("requests")
+	local found
+	for _, r in ipairs(UI.rows) do
+		local data = rawget(r, "data")
+		if data and data.request then r._scripts.OnClick(r, "LeftButton") found = true break end
+	end
+	H.ok(found and UI.selected.request, "request selected")
+	H.ok(not d.findButton:IsShown(), "no FIND RECIPE on a request")
+	UI:ToggleFind()
+	H.ok(not UI.findOpen and not d.findBody:IsShown(), "no list on a request")
+	H.ok(d.recipeBody:IsShown())
+	H.eq(d.skillNumbers:GetText(), numbers, "the numbers at the same place")
+	UI:SetView("members")
+	UI.rows[1]._scripts.OnClick(UI.rows[1], "LeftButton")
+	H.eq(UI.selected.kind, "member")
+	H.ok(not d.findButton:IsShown(), "no FIND RECIPE on a member")
+	H.ok(not d.recipeBody:IsShown(), "no numbers on a member")
+	H.eq(d.sub._width, 250, "full width")
+	cleanGame()
+end)
+
+H.test("find: the numbers at the right end of the profession line, never written into it by a price refresh", function()
+	local ns, UI, d = findWindow()
+	ProfguildDB.recipeInfo[RECIPE] = { m = 50, g = 90 }
+	local realInfo = C_Item.GetItemInfo
+	C_Item.GetItemInfo = function(id)
+		if id == 4305 then return "Item 4305", "link", 1, 60, 55 end
+		return realInfo(id)
+	end
+	UI:Refresh()
+	H.eq(plain(d.skillNumbers:GetText()), "50 60 75 90")
+	H.ok(d.skillNumbers:GetText():find("|cffff2020" .. "50", 1, true), "learn in red")
+	H.eq(d.sub:GetText(), "Tailoring  |cff9a9ea3" .. ns.T("REQ_LEVEL_SHORT", 55) .. "|r")
+	H.eq(d.sub._width, 250 - d.skillNumbers:GetStringWidth() - 8, "the line ends before the numbers")
+	d.sub:SetText("X")
+	UI:DrawReagents(UI.selected)
+	H.eq(d.sub:GetText(), "X", "a price refresh leaves the line alone")
+	UI:Refresh()
+	H.ok(not plain(d.value:GetText()):find("90", 1, true), "no numbers on the value line")
+	-- Leveling: learn and grey with the same fallbacks, also for the order
+	ProfguildDB.recipeInfo[RECIPE], ProfguildDB.recipeInfo[18560] = nil, nil
+	UI:SetView("leveling")
+	local function order()
+		local pos = {}
+		for i, row in ipairs(UI.listCache.data) do pos[row.recipeID] = i end
+		return pos[18560] < pos[RECIPE] and "18560 first" or "3865 first"
+	end
+	H.eq(order(), "18560 first", "Data.lua's grey 50 before 80")
+	ProfguildDB.recipeInfo[18560] = { g = 95 }
+	ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+	UI:Refresh()
+	H.eq(order(), "3865 first", "info.g 95 after Data.lua's 80")
+	ProfguildDB.recipeInfo[18560] = { g = 80, m = 40 }
+	ns.recipeInfoRevision = ns.recipeInfoRevision + 1
+	UI:Refresh()
+	H.eq(order(), "18560 first", "same grey: learn 40 from info.m, the other unknown")
+	receiveNU(ns, 6101, trainerOf("Georgio Bolero", RECIPE, 30, 100))
+	M.advance(1)
+	H.eq(order(), "3865 first", "the trainer's learn 30 before 40, rebuilt by the sheet")
+	local sub
+	for _, r in ipairs(UI.rows) do
+		local data = rawget(r, "data")
+		if data and data.recipeID == RECIPE then sub = r.sub:GetText() end
+	end
+	H.ok(sub and sub:find("|cffff2020" .. "30|r", 1, true) and sub:find("80|r", 1, true), "learn and grey in the row: " .. tostring(sub))
+	cleanGame()
+end)
+
+H.test("find: a sheet that changes a learn skill rebuilds the list, 20 that change none do not", function()
+	local ns, UI = findWindow()
+	local left = 3600 - GetServerTime() % 3600
+	if left < 120 then M.advance(left + 1) end -- the list key holds the hour
+	UI:SetView("leveling")
+	local cache = UI.listCache
+	receiveNU(ns, 6201, trainerOf("Georgio Bolero", RECIPE, 30, 100))
+	M.advance(1)
+	H.ok(UI.listCache ~= cache, "rebuilt")
+	cache = UI.listCache
+	local revision = ns.npcSkillRevision
+	for i = 1, 20 do receiveNU(ns, 6300 + i, vendorOf("Vendor " .. i, 100 + i)) end
+	M.advance(1)
+	H.eq(ns.npcSkillRevision, revision, "no learn skill changed")
+	H.ok(UI.listCache == cache, "not rebuilt")
+	-- the same trainer, only its price: no rebuild
+	receiveNU(ns, 6201, trainerOf("Georgio Bolero", RECIPE, 30, 50))
+	M.advance(1)
+	H.ok(UI.listCache == cache, "a price is no learn skill")
+	cleanGame()
+end)
+
+H.test("find: the name gives way to the price and the Map button; another cost's name follows its item", function()
+	local ns, UI, d = findWindow()
+	C_Map.CanSetUserWaypointOnMap = function() return true end
+	C_Map.SetUserWaypoint = function() end
+	_G.UiMapPoint = { CreateFromCoordinates = function(m, x, y) return { m, x, y } end }
+	local realInfo = C_Item.GetItemInfo
+	local loaded = false
+	C_Item.GetItemInfo = function(id)
+		if id == 8889 then if loaded then return "Arcane Token" end return nil end
+		return realInfo(id)
+	end
+	receiveNU(ns, 6401, vendorOf("Maria Lumere of the Very Long Name", 123456))
+	receiveNU(ns, 6402, vendorOf("Token Keeper", 0, { o = { { 2, 8889, 5 } } }))
+	M.advance(1)
+	UI:ToggleFind()
+	local row = d.findRows[2]
+	H.eq(plain(row.price:GetText()), "~12g 34s 56c")
+	H.ok(row.mapButton:IsShown(), "map button")
+	H.eq(rawget(row, "priceRight"), 56, "the price ends 6 left of the button")
+	H.ok(8 + row.name._width + 8 <= 302 - 56 - row.price:GetStringWidth(), "the name ends 8 before the price: " .. row.name._width)
+	row = d.findRows[3]
+	H.eq(rawget(row, "priceRight"), 56)
+	H.ok(plain(row.detail:GetText()):find("5 #8889", 1, true), "not loaded: " .. plain(row.detail:GetText()))
+	H.ok(ns.Scanner.WasAsked(8889), "asked for")
+	loaded = true
+	M.fire("GET_ITEM_INFO_RECEIVED", 8889, true)
+	M.advance(3)
+	H.ok(plain(row.detail:GetText()):find("5 Arcane Token", 1, true), "loaded: " .. plain(row.detail:GetText()))
+	-- without the button the price ends at -6
+	C_Map.CanSetUserWaypointOnMap = function() return false end
+	UI:Refresh()
+	H.eq(rawget(d.findRows[2], "priceRight"), 6)
+	H.ok(8 + d.findRows[2].name._width + 8 <= 302 - 6 - d.findRows[2].price:GetStringWidth())
+	cleanGame()
+end)
