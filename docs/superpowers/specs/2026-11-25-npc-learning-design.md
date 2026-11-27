@@ -102,8 +102,12 @@ Trainer: the NPC and place are taken at TRAINER_SHOW; the services 0.5 s later (
 at TRAINER_UPDATE, only while the same NPC is open. Only profession trainers. *(user, after the in-game test)*
 A profession trainer is read whole whatever the player's filters: the filters that are off (available,
 unavailable, used) are switched on, every service is read, and the filters and the selected service
-(found by name and skill, else by its old index) are put back as they were, all in one frame and also when
-reading fails, so the window never visibly changes; the TRAINER_UPDATE this fires reads nothing. Without
+(found by name and skill, of identical ones the nearest to its old index, else by its old index) are put
+back as they were, all in one frame and also when reading fails, so the window never visibly changes; a
+filter the client left other than it was (a switch that took effect and failed, filters that move together)
+is set back. A trainer is read once per visit: a TRAINER_UPDATE reads it again only when the list the window
+shows has changed since the last reading (a recipe learned, a filter the player changed), so the updates the
+switching fires read nothing however late they come; no time window decides it. Without
 the filter API, or when the client refuses a switch, the list is read as the window shows it. The profession is the one
 GetTrainerServiceSkillReq names; a service without a requirement takes the only profession of the other
 services, else it is left out. Service to recipe, among the recipes (Data.lua and catalog) of that profession:

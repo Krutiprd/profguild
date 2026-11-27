@@ -209,10 +209,14 @@ H.test("NpcReader trainer: NPC and place at TRAINER_SHOW, services 0.5 s later",
 	H.eq(r.r.t[7845].skill, 140) H.eq(r.r.t[7845].copper, 2700)
 	H.eq(next(r.r.v), nil)
 	H.eq(g.reader.skipped, 0)
-	-- a later TRAINER_UPDATE reads again
+	-- a later TRAINER_UPDATE that changes nothing reads nothing; one that changes the list reads again
 	g.reader:TrainerUpdate()
 	g.run(0.5)
-	H.eq(#g.readings, 2)
+	H.eq(#g.readings, 1)
+	g.services[3] = { name = "Minor Healing Potion", prof = "Alchemy", skill = 1, copper = 50 }
+	g.reader:TrainerUpdate()
+	g.run(0.5)
+	H.eq(#g.readings, 2) H.eq(g.readings[2].r.t[2330].copper, 50)
 end)
 
 H.test("NpcReader trainer: a service without requirement takes the only profession", function()
@@ -404,7 +408,7 @@ H.test("NpcReader trainer: the whole list is read under a filter that hides know
 	g.calls.set = 0
 	g.filters.unavailable, g.filters.used = true, true
 	g.refilter()
-	g.run(1) -- a player's update, not one within OWN_UPDATE of our switching
+	g.run(1) -- a player's update, not our own
 	g.reader:TrainerUpdate()
 	g.run(0.5)
 	H.eq(#g.readings, 2) H.eq(g.calls.set, 0, "nothing to switch") H.ok(g.readings[2].r.t[2330])
@@ -427,13 +431,18 @@ H.test("NpcReader trainer: the selected service is selected again by what it is,
 	H.eq(selected(g), want, "same service selected")
 	H.eq(g.sel, 3)
 	H.eq(g.filters.unavailable, false) H.eq(g.filters.used, true) H.eq(g.filters.available, true)
-	-- nothing selected before: nothing selected after
+	-- nothing selected before: nothing selected after (the player learns Elixir of Greater Defense)
 	g.sel = 0
+	g.all[5].type = "used"
+	g.refilter()
 	g.run(1)
 	g.reader:TrainerUpdate()
 	g.run(0.5)
 	H.eq(#g.readings, 2) H.eq(g.sel, 0, "no selection made up") H.eq(g.calls.select, 1)
-	-- a selection the restored list no longer holds by name: its index again
+	-- a selection the restored list no longer holds by name: its index again (the player can
+	-- learn Minor Healing Potion now: it shows)
+	g.all[2].type = "used"
+	g.refilter()
 	g.sel = 2
 	local name = g.services[2].name
 	local info = g.api.serviceInfo
@@ -460,7 +469,9 @@ H.test("NpcReader trainer: our own filter switching does not read again", functi
 	g.run(10)
 	H.eq(#g.readings, 1, "no second read from our own TRAINER_UPDATE")
 	H.eq(#g.timers, 0, "nothing scheduled")
-	-- an update of the player's afterwards reads again, once
+	-- an update of the player's afterwards that changes the list reads again, once
+	g.all[5].type = "used"
+	g.refilter()
 	g.reader:TrainerUpdate()
 	g.run(10)
 	H.eq(#g.readings, 2)
@@ -483,6 +494,79 @@ H.test("NpcReader trainer: an error while reading still puts the filters and sel
 	H.eq(selected(g), want, "selection back")
 	H.eq(#g.readings, 0)
 	H.eq(g.reader.own, false, "the guard is cleared")
+end)
+
+-- A client whose TRAINER_UPDATE from our switching comes a frame later, after a frame that took
+-- longer than any time window (GetTime only moves between frames): still one reading.
+H.test("NpcReader trainer: our own update a slow frame later does not read again", function()
+	local g = newGame()
+	kray(g)
+	g.api.setTrainerFilter = function(kind, on)
+		g.calls.set = g.calls.set + 1
+		g.filters[kind] = on
+		g.refilter()
+		g.api.after(0.25, function() g.reader:TrainerUpdate() end)
+	end
+	g.reader:TrainerShow()
+	g.run(10)
+	H.eq(#g.readings, 1, "one reading, no loop")
+	H.eq(g.calls.set, 4, "switched on and back once")
+	-- a player's update that changes nothing: nothing read, nothing switched
+	g.reader:TrainerUpdate()
+	g.run(10)
+	H.eq(#g.readings, 1) H.eq(g.calls.set, 4)
+	-- the player learns Elixir of Greater Defense: it leaves the list, read again once
+	g.all[5].type = "used"
+	g.refilter()
+	g.reader:TrainerUpdate()
+	g.run(10)
+	H.eq(#g.readings, 2, "a real change is read, once") H.eq(g.calls.set, 8)
+	H.eq(g.readings[2].r.t[11450].copper, 9000)
+	-- a new visit reads again
+	g.reader:TrainerClosed()
+	g.reader:TrainerShow()
+	g.run(10)
+	H.eq(#g.readings, 3)
+end)
+
+H.test("NpcReader trainer: a filter the client left changed is set back as it was", function()
+	-- the switch of "used" takes effect and then throws
+	local g = newGame()
+	kray(g)
+	local set = g.api.setTrainerFilter
+	g.api.setTrainerFilter = function(kind, on)
+		set(kind, on)
+		if kind == "used" and on then error("refused") end
+	end
+	openTrainer(g)
+	g.run(1)
+	H.eq(g.filters.available, true) H.eq(g.filters.unavailable, false) H.eq(g.filters.used, false)
+	-- switching "unavailable" off also switches "used" off, which was on
+	g = newGame()
+	kray(g)
+	g.filters.used = true
+	g.refilter()
+	set = g.api.setTrainerFilter
+	g.api.setTrainerFilter = function(kind, on)
+		set(kind, on)
+		if kind == "unavailable" and not on then g.filters.used = false g.refilter() end
+	end
+	openTrainer(g)
+	g.run(1)
+	H.eq(#g.readings, 1) H.ok(g.readings[1].r.t[2330])
+	H.eq(g.filters.available, true) H.eq(g.filters.unavailable, false) H.eq(g.filters.used, true)
+end)
+
+H.test("NpcReader trainer: of two identical services the one nearest the old index is selected", function()
+	local g = newGame()
+	kray(g)
+	g.all[#g.all + 1] = { name = "Elixir of Greater Defense", prof = "Alchemy", skill = 195, copper = 9000, type = "available" }
+	g.refilter()
+	g.sel = 3 -- header, Elixir of Greater Defense, Elixir of Greater Defense
+	openTrainer(g)
+	g.run(1)
+	H.eq(#g.readings, 1)
+	H.eq(g.sel, 3, "the second one again")
 end)
 
 H.test("NpcReader trainer: filter API missing, or a filter call fails: the visible list as before", function()

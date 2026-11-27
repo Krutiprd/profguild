@@ -3,8 +3,10 @@
 -- All WoW calls go through the api, so tests inject a fake game. A profession trainer is read
 -- whole whatever the player's filters: the filters that are off are switched on, every service is
 -- read, and the filters and the selected service are put back as they were, all in one frame, so
--- the window never visibly changes (the TRAINER_UPDATE that switching fires is our own and reads
--- nothing, OwnUpdate). Without the filter API, or when the client refuses a switch, the list is
+-- the window never visibly changes. A trainer is read once per visit: a TRAINER_UPDATE reads it
+-- again only when the list the window shows has changed since (so the updates our switching
+-- fires, however late they come, read nothing; OwnUpdate tells Core which ones are ours, for a
+-- couple of frames). Without the filter API, or when the client refuses a switch, the list is
 -- read as the window shows it. The merchant window is not changed. Nothing is read in combat (a
 -- window opened or due to be read in combat is read when combat ends, CombatEnded, if it is still
 -- open), and a reading that met a value the game marks secret is dropped whole.
@@ -36,7 +38,7 @@ ns = ns or {}
 local NpcReader = {}
 ns.NpcReader = NpcReader
 
-local floor, pairs, ipairs, next, select, sort, type, tostring = math.floor, pairs, ipairs, next, select, table.sort, type, tostring
+local floor, abs, pairs, ipairs, next, select, sort, type, tostring = math.floor, math.abs, pairs, ipairs, next, select, table.sort, type, tostring
 
 NpcReader.DEBOUNCE = 0.5      -- a window is read this long after the first event of a burst; the
                               -- events meanwhile are covered by that read (a throttle, not a debounce)
@@ -46,7 +48,7 @@ NpcReader.ITEM_TRIES = 5      -- ... at most this many times
 NpcReader.RECIPE_CLASS = 9    -- GetItemInfoInstant's classID of recipes
 NpcReader.MAX_ID = 2147483647
 NpcReader.MAX_COSTS = 3
-NpcReader.OWN_UPDATE = 0.2    -- a TRAINER_UPDATE this soon after switching the filters is our own
+NpcReader.OWN_FRAMES = 2      -- a TRAINER_UPDATE this many frames after switching the filters is our own
 NpcReader.FILTERS = { "available", "unavailable", "used" }
 
 -- Matching --------------------------------------------------------------------
@@ -152,7 +154,7 @@ function NpcReader.New(api, onReading)
 		final = false,                -- the second try is over: nameless recipes are left out
 		firstTry = nil, retrying = false,
 		waiting = {},                 -- kind -> true: opened or due in combat, read when it ends
-		own = false, ownAt = nil,     -- switching the trainer filters now / when it last ended
+		own = false, ownTok = nil,    -- switching the trainer filters now / within OWN_FRAMES after
 	}, Reader)
 end
 
@@ -257,16 +259,51 @@ function Reader:TrainerShow()
 	if st then self:schedule("trainer", st, NpcReader.DEBOUNCE, Reader.readTrainer) end
 end
 
--- True for a TRAINER_UPDATE that our own filter switching fired, at once or a frame later.
+-- True for a TRAINER_UPDATE that our own filter switching fired, at once or within OWN_FRAMES
+-- frames (counted by timers of 0 s, not by time: GetTime only moves between frames). Only Core
+-- relies on it; the reader itself compares the list (shown).
 function Reader:OwnUpdate()
-	if self.own then return true end
-	local at = self.ownAt
-	return at ~= nil and self.api.now() - at < NpcReader.OWN_UPDATE
+	return self.own or self.ownTok ~= nil
+end
+
+-- Marks the next OWN_FRAMES frames as our own.
+function Reader:ownFrames()
+	local tok = {}
+	self.ownTok = tok
+	local left = NpcReader.OWN_FRAMES
+	local function tick()
+		if self.ownTok ~= tok then return end
+		left = left - 1
+		if left <= 0 then self.ownTok = nil return end
+		self.api.after(0, tick)
+	end
+	if not pcall(self.api.after, 0, tick) then self.ownTok = nil end
 end
 
 function Reader:TrainerUpdate()
-	if self:OwnUpdate() then return end
+	if self.own then return end
 	self:schedule("trainer", self.trainer, NpcReader.DEBOUNCE, Reader.readTrainer)
+end
+
+-- What the window shows now, as one string to compare: each row's name, kind and required skill.
+-- A value that cannot be read gives "?". Never throws; self.tainted stays as it was.
+function Reader:shown()
+	local tainted = self.tainted
+	self.tainted = false
+	local ok, out = pcall(function()
+		local n = self:get("numServices")
+		if type(n) ~= "number" then return "?" end
+		local parts = { tostring(n) }
+		for i = 1, n do
+			local name, kind = self:get("serviceInfo", i)
+			local _, skill = self:get("serviceSkill", i)
+			parts[#parts + 1] = tostring(name) .. "\1" .. tostring(kind) .. "\1" .. tostring(skill)
+		end
+		return table.concat(parts, "\0")
+	end)
+	if not ok or self.tainted then out = "?" end
+	self.tainted = tainted
+	return out
 end
 
 function Reader:TrainerClosed() self.trainer, self.waiting.trainer = nil, nil end
@@ -303,7 +340,9 @@ function Reader:openFilters()
 		if not on then off[#off + 1] = kind end
 	end
 	if #off == 0 then return nil end
-	local state = { switched = {} }
+	local state = { switched = {}, was = {} }
+	for _, kind in ipairs(NpcReader.FILTERS) do state.was[kind] = true end
+	for _, kind in ipairs(off) do state.was[kind] = false end
 	local ok, sel = pcall(api.trainerSelection)
 	sel = ok and self:clean(sel) or nil
 	if type(sel) == "number" and sel >= 1 and sel == floor(sel) then
@@ -321,18 +360,31 @@ function Reader:openFilters()
 	return state
 end
 
--- Puts back the filters openFilters switched and selects the service selected before, found by
--- what it is (its index moves with the filters), else by its old index. Never throws.
+-- Puts back the filters openFilters switched, then sets back any filter the client left other
+-- than it was (a switch that took effect and threw, filters that move together), and selects the
+-- service selected before, found by what it is (its index moves with the filters; of identical
+-- ones the nearest to its old index), else by its old index. Never throws.
 function Reader:closeFilters(state)
 	local api, tainted = self.api, self.tainted
 	for i = #state.switched, 1, -1 do pcall(api.setTrainerFilter, state.switched[i], false) end
+	for _, kind in ipairs(NpcReader.FILTERS) do
+		local was = state.was[kind]
+		self.tainted = false
+		local ok, v = pcall(api.trainerFilter, kind)
+		if ok then v = self:clean(v) end
+		local on = nil
+		if ok and not self.tainted then on = filterOn(v) end
+		if on ~= nil and was ~= nil and on ~= was then pcall(api.setTrainerFilter, kind, was) end
+	end
+	self.tainted = false
 	if state.sel then
 		local pick
 		local ok, n = pcall(self.get, self, "numServices")
 		if ok and type(n) == "number" then
 			if state.selID then
 				for i = 1, n do
-					if self:serviceID(i) == state.selID then pick = i break end
+					if self:serviceID(i) == state.selID
+						and (not pick or abs(i - state.sel) < abs(pick - state.sel)) then pick = i end
 				end
 			end
 			if not pick and state.sel <= n then pick = state.sel end
@@ -341,18 +393,20 @@ function Reader:closeFilters(state)
 	end
 	self.tainted = tainted
 	self.own = false
-	if #state.switched > 0 then
-		local ok, now = pcall(api.now)
-		self.ownAt = ok and type(now) == "number" and now or nil
-	end
+	self:ownFrames()
 end
 
 function Reader:readTrainer(st)
 	if not self:get("tradeskillTrainer") or self.tainted then return end -- a class trainer
+	-- read already this visit and the window shows the same list: nothing changed (our own
+	-- switching's updates, or a player's update that changed nothing)
+	if st.shown ~= nil and self:shown() == st.shown then return end
 	local state = self:openFilters()
 	self.tainted = false
 	local ok, services, profs, nprof = pcall(self.trainerServices, self)
 	if state then self:closeFilters(state) end
+	-- also after a failed or secret read: the next one waits for a change, so no loop of switching
+	st.shown = self:shown()
 	if not ok then error(services, 0) end
 	if not services or self.tainted then return end
 	-- a service without requirement takes the only profession of the others, else it is left out
