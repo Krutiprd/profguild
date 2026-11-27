@@ -125,7 +125,32 @@ Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
 - Tréner s akýmikoľvek filtrami (všetky zapnuté, alebo skryté nedostupné/známe): prečítajú sa všetky recepty, žiadne dvojité; filtre a vybraný recept v okne ostanú, ako boli, okno nebliká a iný doplnok trénera (napr. OneForAll) sa nespráva inak.
 - Neanglické názvy povolaní a receptov (klient v inom jazyku): recepty sa priradia, `/pg npc` nehlási veľa preskočených mien.
 
-## 7. Hlásenie chyby
+## 7. Leveling (0.8.0)
+
+Stačí 1 hráč s Auctionatorom a čerstvým skenom aukcie; na „Pre:“ druhý hráč v guilde s rovnakou profesiou.
+
+| Krok | Očakávaný výsledok |
+| --- | --- |
+| Karta LEVELING, vľavo tvoja profesia | Hore „<Profesia> <tvoj skill> -> 300“ a „Spolu: strata ~…“ (alebo zisk); pod tým úseky „od-do recept ~ks“ so stratou/ziskom vpravo a „[známy]“ alebo „[naučiť: cena, kde]“. Žiadna Lua chyba, hra sa nezasekne |
+| Plán | Dáva zmysel: lacné známe recepty, recept sa učí, len keď sa oplatí; počty sú odhady so `~` |
+| Klik na úsek | Vpravo detail receptu (suroviny, ceny, NÁJSŤ RECEPT); pod úsekom najviac 3 alternatívy a riadok „Všetky (n) ->“; ďalší klik úsek zavrie |
+| Klik na „Všetky (n) ->“ | „DÁVA SKILL TERAZ – <profesia> <skill začiatku úseku>“: všetky recepty, ktoré tam dávajú bod, najlacnejší bod prvý, s farbou, šancou, cenou craftu a známy/naučiť |
+| Tlačidlo „DÁVA SKILL TERAZ“ pod zoznamom | Ten istý zoznam pri tvojom skille; ďalší klik späť na plán |
+| Do poľa Skill napíš 120 a Enter | Plán „<Profesia> 120 -> 300“ a riadok „Ničie recepty“ (recepty od trénera pod 120 sa berú ako naučené); tlačidlo „Pre: nikoho“ |
+| „Pre:“ a vyber spoluhráča | Plán z jeho skillu a jeho receptov; „RESET“ vráti tvoje |
+| Spoluhráč bez tej profesie alebo dlho neprihlásený | Plán od 1 (alebo jeho skillu) s „Ničie recepty“, žiadna chyba |
+| Bez Auctionatora (alebo bez skenu) | Riadok „Chýbajú ceny: vynechaných receptov n“ a „Naskenuj aukciu.“, žiadny plán, žiadna chyba |
+| Profesia na 300 | „Skill 300: niet čo levelovať.“ |
+| Pod plánom | „VŠETKY RECEPTY PODĽA SIVÉHO SKILLU“ a starý zoznam ako v 0.7.0 |
+| Kolieskom cez celý zoznam, prepínanie profesií a kariet | Žiadna Lua chyba, plán sa nepočíta stále znova (hra nezamŕza) |
+
+Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
+
+- Či sú čísla rozumné voči tomu, čo poznáš z hry (počty craftov na úsek, celková strata).
+- Recepty, ktorých oranžová hranica nie je známa (trénerove bez údaja): plán ich berie od žltej.
+- Riadok „Počítam plán…“ by mal byť vidieť nanajvýš na okamih.
+
+## 8. Hlásenie chyby
 
 Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:
 
@@ -149,7 +174,7 @@ sa ukáže „Hlásenie ide autorovi cez guildu…“ a neskôr „Tvoje hlásen
 | Autor: `/pg bug inbox` | Posledné hlásenia s menom, časom, verziou a textom |
 | `/pg status` | Riadok „Nesené hlásenia chýb: …, autor v guilde: áno“ |
 
-## 8. Čo poslať späť
+## 9. Čo poslať späť
 
 - Výstup `/pg debug` a `/pg status` od každého testera.
 - Každú Lua chybu (screenshot alebo text z BugSack); Profguild si ich pamätá aj sám (`errors`).

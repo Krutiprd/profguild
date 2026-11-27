@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.0 – unreleased
+
+- Leveling guide: the LEVELING tab with a profession chosen shows the cheapest plan from the
+  current skill to 300 (the smallest Auction House loss, or a profit): segments "from–to recipe
+  ~count loss/profit [known | learn: price, where]" and a total. The whole path is searched, so a
+  recipe is learned only when it pays off. Auction House prices count for reagents (also those in
+  your bags) and products (minus the 5 % cut, only as many as the market holds, the rest at the
+  vendor price); the vendor price only when the AH knows nothing of the item. Recipes without a
+  price are left out and the tab says so. A segment opens to its 3 best alternatives and "All (n)",
+  which opens "GIVES SKILL NOW": every recipe that gives a point at that skill, with colour,
+  chance, cost per craft, loss per point and known or learn. The start skill can be edited and
+  "For:" plans with a guild member's skill and recipes (an edited skill counts nobody's recipes:
+  trainer recipes below it as learned). The old list sorted by grey skill stays below. The plan is
+  computed over a few frames, at most once per 3 s.
+
 ## 0.7.0 – 2026-11-26
 
 - The guild learns where recipes are had. Whoever opens a profession trainer or a vendor of
