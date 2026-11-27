@@ -1662,6 +1662,11 @@ ns.npcReader = ns.NpcReader.New({
 	serviceInfo = function(i) return call(GetTrainerServiceInfo, i) end,
 	serviceSkill = function(i) return call(GetTrainerServiceSkillReq, i) end,
 	serviceCost = function(i) return call(GetTrainerServiceCost, i) end,
+	-- the filters and the selection, to read a trainer whole (absent when the client has none)
+	trainerFilter = type(GetTrainerServiceTypeFilter) == "function" and function(kind) return GetTrainerServiceTypeFilter(kind) end or nil,
+	setTrainerFilter = type(SetTrainerServiceTypeFilter) == "function" and function(kind, on) SetTrainerServiceTypeFilter(kind, on) end or nil,
+	trainerSelection = type(GetTrainerSelectionIndex) == "function" and function() return GetTrainerSelectionIndex() end or nil,
+	selectService = type(SelectTrainerService) == "function" and function(i) SelectTrainerService(i) end or nil,
 	lineOf = npcLineOf,
 	recipes = npcRecipes,
 	numItems = function() return call(GetMerchantNumItems) end,
@@ -1696,7 +1701,11 @@ local function npcRead(method)
 end
 
 function events.TRAINER_SHOW() scheduleTrainer() npcRead("TrainerShow") end
-function events.TRAINER_UPDATE() scheduleTrainer() npcRead("TrainerUpdate") end
+-- the TRAINER_UPDATE the NPC reader fires by switching the trainer filters changes nothing to read
+function events.TRAINER_UPDATE()
+	if not (ns.npcReader and ns.npcReader:OwnUpdate()) then scheduleTrainer() end
+	npcRead("TrainerUpdate")
+end
 function events.TRAINER_CLOSED() npcRead("TrainerClosed") end
 function events.MERCHANT_SHOW() npcRead("MerchantShow") end
 function events.MERCHANT_UPDATE() npcRead("MerchantUpdate") end

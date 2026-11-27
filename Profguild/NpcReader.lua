@@ -1,9 +1,13 @@
 -- Profguild: NpcReader
 -- Turns the profession trainer and merchant windows into readings, one per NPC (design "Reading").
--- All WoW calls go through the api, so tests inject a fake game. Nothing in either window is
--- changed (no filter, no selection), nothing is read in combat (a window opened or due to be read
--- in combat is read when combat ends, CombatEnded, if it is still open), and a reading that met a
--- value the game marks secret is dropped whole.
+-- All WoW calls go through the api, so tests inject a fake game. A profession trainer is read
+-- whole whatever the player's filters: the filters that are off are switched on, every service is
+-- read, and the filters and the selected service are put back as they were, all in one frame, so
+-- the window never visibly changes (the TRAINER_UPDATE that switching fires is our own and reads
+-- nothing, OwnUpdate). Without the filter API, or when the client refuses a switch, the list is
+-- read as the window shows it. The merchant window is not changed. Nothing is read in combat (a
+-- window opened or due to be read in combat is read when combat ends, CombatEnded, if it is still
+-- open), and a reading that met a value the game marks secret is dropped whole.
 --
 -- reading = { name=, map=, x=, y=, t = { [recipeID] = { skill=, copper= } }, v = { [itemID] = { price= } } }
 --   place: uiMapID and the player's position in whole percent (rounded down), absent when unknown;
@@ -15,6 +19,9 @@
 --      tradeskillTrainer(), numServices(), serviceInfo(i) -> name, type, ...,
 --      serviceSkill(i) -> profession name, skill, met, serviceCost(i) -> copper,
 --      serviceSpell(i) -> spellID|nil (optional: the client gives none),
+--      trainerFilter(kind) -> on (kind "available", "unavailable", "used"; true|1 on, false|nil|0 off),
+--      setTrainerFilter(kind, on) (on true|false: the Forever client refuses 1|0),
+--      trainerSelection() -> index|0|nil, selectService(i) (these four optional, all or none used),
 --      lineOf(profession name) -> skill line|nil,
 --      recipes(line) -> { { id=, name=|nil, line=, item=id|false|nil, grey=|nil }, ... }
 --        (item: Data.lua's recipe item or false; nil and grey nil for a recipe without Data.lua),
@@ -39,6 +46,8 @@ NpcReader.ITEM_TRIES = 5      -- ... at most this many times
 NpcReader.RECIPE_CLASS = 9    -- GetItemInfoInstant's classID of recipes
 NpcReader.MAX_ID = 2147483647
 NpcReader.MAX_COSTS = 3
+NpcReader.OWN_UPDATE = 0.2    -- a TRAINER_UPDATE this soon after switching the filters is our own
+NpcReader.FILTERS = { "available", "unavailable", "used" }
 
 -- Matching --------------------------------------------------------------------
 
@@ -143,6 +152,7 @@ function NpcReader.New(api, onReading)
 		final = false,                -- the second try is over: nameless recipes are left out
 		firstTry = nil, retrying = false,
 		waiting = {},                 -- kind -> true: opened or due in combat, read when it ends
+		own = false, ownAt = nil,     -- switching the trainer filters now / when it last ended
 	}, Reader)
 end
 
@@ -247,17 +257,118 @@ function Reader:TrainerShow()
 	if st then self:schedule("trainer", st, NpcReader.DEBOUNCE, Reader.readTrainer) end
 end
 
+-- True for a TRAINER_UPDATE that our own filter switching fired, at once or a frame later.
+function Reader:OwnUpdate()
+	if self.own then return true end
+	local at = self.ownAt
+	return at ~= nil and self.api.now() - at < NpcReader.OWN_UPDATE
+end
+
 function Reader:TrainerUpdate()
+	if self:OwnUpdate() then return end
 	self:schedule("trainer", self.trainer, NpcReader.DEBOUNCE, Reader.readTrainer)
 end
 
 function Reader:TrainerClosed() self.trainer, self.waiting.trainer = nil, nil end
 
+-- What a service is, to find it again after its index moved: name and required skill.
+function Reader:serviceID(i)
+	local ok, name = pcall(self.get, self, "serviceInfo", i)
+	if not ok or type(name) ~= "string" then return nil end
+	local ok2, _, skill = pcall(self.get, self, "serviceSkill", i)
+	return name .. "\0" .. tostring(ok2 and type(skill) == "number" and skill or "")
+end
+
+local function filterOn(v)
+	if v == true or v == 1 then return true end
+	if v == false or v == nil or v == 0 then return false end
+	return nil
+end
+
+-- Switches on every trainer filter that is off, so the whole list shows. Returns what to put back
+-- (closeFilters), or nil when nothing was switched: the filter API missing, a value unknown or
+-- secret, every filter on already, or a switch refused (then what was switched is back already).
+-- No yield in here or until closeFilters: the window must not draw in between.
+function Reader:openFilters()
+	local api = self.api
+	if type(api.trainerFilter) ~= "function" or type(api.setTrainerFilter) ~= "function"
+		or type(api.trainerSelection) ~= "function" or type(api.selectService) ~= "function" then return nil end
+	self.tainted = false
+	local off = {}
+	for _, kind in ipairs(NpcReader.FILTERS) do
+		local ok, v = pcall(api.trainerFilter, kind)
+		if ok then v = self:clean(v) end
+		local on = filterOn(v)
+		if not ok or self.tainted or on == nil then self.tainted = false return nil end
+		if not on then off[#off + 1] = kind end
+	end
+	if #off == 0 then return nil end
+	local state = { switched = {} }
+	local ok, sel = pcall(api.trainerSelection)
+	sel = ok and self:clean(sel) or nil
+	if type(sel) == "number" and sel >= 1 and sel == floor(sel) then
+		state.sel, state.selID = sel, self:serviceID(sel)
+	end
+	self.tainted = false
+	self.own = true
+	for _, kind in ipairs(off) do
+		if not pcall(api.setTrainerFilter, kind, true) then
+			self:closeFilters(state)
+			return nil
+		end
+		state.switched[#state.switched + 1] = kind
+	end
+	return state
+end
+
+-- Puts back the filters openFilters switched and selects the service selected before, found by
+-- what it is (its index moves with the filters), else by its old index. Never throws.
+function Reader:closeFilters(state)
+	local api, tainted = self.api, self.tainted
+	for i = #state.switched, 1, -1 do pcall(api.setTrainerFilter, state.switched[i], false) end
+	if state.sel then
+		local pick
+		local ok, n = pcall(self.get, self, "numServices")
+		if ok and type(n) == "number" then
+			if state.selID then
+				for i = 1, n do
+					if self:serviceID(i) == state.selID then pick = i break end
+				end
+			end
+			if not pick and state.sel <= n then pick = state.sel end
+		end
+		if pick then pcall(api.selectService, pick) end
+	end
+	self.tainted = tainted
+	self.own = false
+	if #state.switched > 0 then
+		local ok, now = pcall(api.now)
+		self.ownAt = ok and type(now) == "number" and now or nil
+	end
+end
+
 function Reader:readTrainer(st)
 	if not self:get("tradeskillTrainer") or self.tainted then return end -- a class trainer
+	local state = self:openFilters()
 	self.tainted = false
+	local ok, services, profs, nprof = pcall(self.trainerServices, self)
+	if state then self:closeFilters(state) end
+	if not ok then error(services, 0) end
+	if not services or self.tainted then return end
+	-- a service without requirement takes the only profession of the others, else it is left out
+	local only = nprof == 1 and next(profs) or nil
+	for _, s in ipairs(services) do
+		s.prof = s.prof or only
+		s.line = s.prof and self.api.lineOf(s.prof) or nil
+	end
+	if self.tainted then return end
+	self:matchTrainer(st.id, st.head, services)
+end
+
+-- The services the window lists now, their professions and how many; nil when there is no list.
+function Reader:trainerServices()
 	local n = self:get("numServices")
-	if type(n) ~= "number" then return end
+	if type(n) ~= "number" then return nil end
 	local services, profs, nprof = {}, {}, 0
 	for i = 1, n do
 		local name, kind = self:get("serviceInfo", i)
@@ -276,15 +387,7 @@ function Reader:readTrainer(st)
 			services[#services + 1] = s
 		end
 	end
-	if self.tainted then return end
-	-- a service without requirement takes the only profession of the others, else it is left out
-	local only = nprof == 1 and next(profs) or nil
-	for _, s in ipairs(services) do
-		s.prof = s.prof or only
-		s.line = s.prof and self.api.lineOf(s.prof) or nil
-	end
-	if self.tainted then return end
-	self:matchTrainer(st.id, st.head, services)
+	return services, profs, nprof
 end
 
 -- The recipes of the professions of services; after the second try without the nameless ones.

@@ -1427,3 +1427,39 @@ H.test("npc comm: a text that cannot be decoded blocks its sender like an oversi
 	H.ok(ns.Comm.blocked.Junk, "blocked")
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 end)
+
+H.test("npc: the trainer filter API is bound when the client has it; our own TRAINER_UPDATE reads nothing", function()
+	local names = { "GetTrainerServiceTypeFilter", "SetTrainerServiceTypeFilter", "GetTrainerSelectionIndex", "SelectTrainerService", "GetNumTrainerServices", "GetTrainerServiceSkillReq" }
+	local ns = boot()
+	for _, f in ipairs({ "trainerFilter", "setTrainerFilter", "trainerSelection", "selectService" }) do
+		H.eq(ns.npcReader.api[f], nil, "without the client's function: " .. f)
+	end
+	local filters, got, counted = { used = false }, {}, 0
+	_G.GetTrainerServiceTypeFilter = function(kind) return filters[kind] end
+	_G.SetTrainerServiceTypeFilter = function(kind, on) got[#got + 1] = { kind, on } filters[kind] = on end
+	_G.GetTrainerSelectionIndex = function() return 3 end
+	_G.SelectTrainerService = function(i) got[#got + 1] = { "select", i } end
+	_G.GetNumTrainerServices = function() counted = counted + 1 return 0 end
+	_G.GetTrainerServiceSkillReq = function() return nil end
+	local ok, err = pcall(function()
+		ns = boot()
+		local api = ns.npcReader.api
+		H.eq(api.trainerFilter("used"), false)
+		api.setTrainerFilter("used", true)
+		api.selectService(2)
+		H.eq(api.trainerSelection(), 3)
+		H.eq(got[1][1], "used") H.eq(got[1][2], true, "true, not 1") H.eq(got[2][2], 2)
+		-- the reader switching: TRAINER_UPDATE schedules neither the reader nor the old trainer read
+		counted = 0
+		ns.npcReader.own = true
+		M.fire("TRAINER_UPDATE")
+		ns.npcReader.own = false
+		M.advance(2)
+		H.eq(counted, 0, "nothing read")
+		M.fire("TRAINER_UPDATE")
+		M.advance(2)
+		H.ok(counted > 0, "a player's update reads")
+	end)
+	for _, n in ipairs(names) do _G[n] = nil end
+	if not ok then error(err, 0) end
+end)

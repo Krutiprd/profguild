@@ -338,6 +338,217 @@ H.test("NpcReader: no map or position gives a reading without place", function()
 	H.eq(g.readings[1].r.x, 100) H.eq(g.readings[1].r.y, 0)
 end)
 
+-- Trainer filters ----------------------------------------------------------------
+
+-- Kray at Thunder Bluff for a player at Alchemy 300: the filters hide what is known ("used"), so
+-- the window lists one recipe of four. g.all is the trainer's whole list, g.services what the
+-- filters let through; a filter change fires TRAINER_UPDATE at once (and once more a frame later)
+-- and leaves nothing selected, like a client may.
+local function kray(g)
+	g.recipes = {
+		{ id = 2330, name = "Minor Healing Potion", line = 171, item = false, grey = 55 },
+		{ id = 2331, name = "Minor Mana Potion", line = 171, item = false, grey = 75 },
+		{ id = 7845, name = "Elixir of Fire Power", line = 171, item = false, grey = 165 },
+		{ id = 11450, name = "Elixir of Greater Defense", line = 171, item = false, grey = 225 },
+	}
+	g.all = {
+		{ name = "Alchemy", type = "header" },
+		{ name = "Minor Healing Potion", prof = "Alchemy", skill = 1, copper = 10, type = "used" },
+		{ name = "Minor Mana Potion", prof = "Alchemy", skill = 25, copper = 50, type = "used" },
+		{ name = "Elixir of Fire Power", prof = "Alchemy", skill = 140, copper = 2700, type = "used" },
+		{ name = "Elixir of Greater Defense", prof = "Alchemy", skill = 195, copper = 9000, type = "available" },
+	}
+	g.filters = { available = true, unavailable = false, used = false }
+	g.calls.set, g.calls.select, g.calls.get = 0, 0, 0
+	g.updates = 0
+	function g.refilter()
+		g.services = {}
+		for _, s in ipairs(g.all) do
+			if s.type == "header" or g.filters[s.type] == true then g.services[#g.services + 1] = s end
+		end
+	end
+	g.refilter()
+	g.sel = 0
+	g.api.trainerFilter = function(kind) g.calls.get = g.calls.get + 1 return g.filters[kind] end
+	g.api.setTrainerFilter = function(kind, on)
+		if g.setError then error(g.setError) end
+		assert(type(on) == "boolean", "the Forever client wants true / false")
+		g.calls.set = g.calls.set + 1
+		g.filters[kind] = on
+		g.refilter()
+		g.sel = 0
+		g.updates = g.updates + 1
+		g.reader:TrainerUpdate()
+		g.api.after(0.01, function() g.reader:TrainerUpdate() end)
+	end
+	g.api.trainerSelection = function() return g.sel end
+	g.api.selectService = function(i) g.calls.select = g.calls.select + 1 g.sel = i end
+end
+
+local function selected(g) return g.sel > 0 and g.services[g.sel] or nil end
+
+H.test("NpcReader trainer: the whole list is read under a filter that hides known recipes", function()
+	local g = newGame()
+	kray(g)
+	openTrainer(g)
+	g.run(0.5)
+	H.eq(#g.readings, 1)
+	local t = g.readings[1].r.t
+	H.eq(t[2330].skill, 1) H.eq(t[2331].copper, 50) H.eq(t[7845].skill, 140) H.eq(t[11450].copper, 9000)
+	-- the filters are as they were, the window shows the one recipe again
+	H.eq(g.filters.available, true) H.eq(g.filters.unavailable, false) H.eq(g.filters.used, false)
+	H.eq(#g.services, 2, "header and one recipe")
+	-- only the filters that were off were switched, and back
+	H.eq(g.calls.set, 4)
+	-- all filters on already: nothing is switched
+	g.calls.set = 0
+	g.filters.unavailable, g.filters.used = true, true
+	g.refilter()
+	g.run(1) -- a player's update, not one within OWN_UPDATE of our switching
+	g.reader:TrainerUpdate()
+	g.run(0.5)
+	H.eq(#g.readings, 2) H.eq(g.calls.set, 0, "nothing to switch") H.ok(g.readings[2].r.t[2330])
+end)
+
+H.test("NpcReader trainer: the selected service is selected again by what it is, not by index", function()
+	local g = newGame()
+	kray(g)
+	-- the player sees "used" and "available" with Elixir of Fire Power selected (index 3); the
+	-- hidden Minor Healing Potion moves it to index 4 while every filter is on
+	g.all[2].type = "unavailable"
+	g.filters.used = true
+	g.refilter()
+	g.sel = 3 -- header, Minor Mana Potion, Elixir of Fire Power, Elixir of Greater Defense
+	local want = g.services[3]
+	H.eq(want.name, "Elixir of Fire Power")
+	openTrainer(g)
+	g.run(0.5)
+	H.eq(#g.readings, 1) H.ok(g.readings[1].r.t[2330], "the hidden one read too")
+	H.eq(selected(g), want, "same service selected")
+	H.eq(g.sel, 3)
+	H.eq(g.filters.unavailable, false) H.eq(g.filters.used, true) H.eq(g.filters.available, true)
+	-- nothing selected before: nothing selected after
+	g.sel = 0
+	g.run(1)
+	g.reader:TrainerUpdate()
+	g.run(0.5)
+	H.eq(#g.readings, 2) H.eq(g.sel, 0, "no selection made up") H.eq(g.calls.select, 1)
+	-- a selection the restored list no longer holds by name: its index again
+	g.sel = 2
+	local name = g.services[2].name
+	local info = g.api.serviceInfo
+	local renamed = false
+	g.api.serviceInfo = function(i)
+		local n, k = info(i)
+		if renamed and n == name then n = name .. " (new)" end
+		return n, k, 134835, 0, "", "Elixirs"
+	end
+	local set = g.api.setTrainerFilter
+	g.api.setTrainerFilter = function(kind, on) set(kind, on) renamed = true end
+	g.run(1)
+	g.reader:TrainerUpdate()
+	g.run(0.5)
+	H.eq(g.sel, 2, "fallback to the index")
+end)
+
+H.test("NpcReader trainer: our own filter switching does not read again", function()
+	local g = newGame()
+	kray(g)
+	openTrainer(g)
+	g.run(0.5)
+	H.eq(#g.readings, 1) H.ok(g.updates > 0, "the fake fired TRAINER_UPDATE")
+	g.run(10)
+	H.eq(#g.readings, 1, "no second read from our own TRAINER_UPDATE")
+	H.eq(#g.timers, 0, "nothing scheduled")
+	-- an update of the player's afterwards reads again, once
+	g.reader:TrainerUpdate()
+	g.run(10)
+	H.eq(#g.readings, 2)
+end)
+
+H.test("NpcReader trainer: an error while reading still puts the filters and selection back", function()
+	local g = newGame()
+	kray(g)
+	g.sel = 2
+	local want = g.services[2]
+	local skill = g.api.serviceSkill
+	g.api.serviceSkill = function(i)
+		if g.filters.used then error("boom") end
+		return skill(i)
+	end
+	openTrainer(g)
+	local ok = pcall(g.run, 0.5)
+	H.eq(ok, false, "the error goes on to the caller (Bugs)")
+	H.eq(g.filters.available, true) H.eq(g.filters.unavailable, false) H.eq(g.filters.used, false)
+	H.eq(selected(g), want, "selection back")
+	H.eq(#g.readings, 0)
+	H.eq(g.reader.own, false, "the guard is cleared")
+end)
+
+H.test("NpcReader trainer: filter API missing, or a filter call fails: the visible list as before", function()
+	for _, missing in ipairs({ "trainerFilter", "setTrainerFilter", "trainerSelection", "selectService" }) do
+		local g = newGame()
+		kray(g)
+		g.api[missing] = nil
+		openTrainer(g)
+		g.run(0.5)
+		H.eq(#g.readings, 1, missing)
+		local t = g.readings[1].r.t
+		H.ok(t[11450], missing) H.eq(t[2330], nil, "visible only: " .. missing)
+		H.eq(g.calls.set, 0, "nothing switched: " .. missing)
+	end
+	-- the client refuses the switch
+	local g = newGame()
+	kray(g)
+	g.setError = "Missing on/off parameter"
+	openTrainer(g)
+	g.run(0.5)
+	H.eq(#g.readings, 1) H.eq(g.readings[1].r.t[2330], nil) H.ok(g.readings[1].r.t[11450])
+	H.eq(g.filters.used, false)
+	-- the second switch fails: the first is put back, the visible list read
+	g = newGame()
+	kray(g)
+	local set = g.api.setTrainerFilter
+	local n = 0
+	g.api.setTrainerFilter = function(kind, on)
+		n = n + 1
+		if n == 2 then error("refused") end
+		set(kind, on)
+	end
+	openTrainer(g)
+	g.run(0.5)
+	H.eq(g.filters.unavailable, false) H.eq(g.filters.used, false) H.eq(g.filters.available, true)
+	H.eq(#g.readings, 1) H.eq(g.readings[1].r.t[2330], nil)
+	-- a secret filter value: not switched
+	g = newGame()
+	kray(g)
+	g.filters.used = SECRET
+	openTrainer(g)
+	g.run(0.5)
+	H.eq(g.calls.set, 0) H.eq(#g.readings, 1) H.ok(g.readings[1].r.t[11450])
+end)
+
+H.test("NpcReader trainer: in combat no filter is touched", function()
+	local g = newGame()
+	kray(g)
+	g.combat = true
+	openTrainer(g)
+	g.run(1)
+	H.eq(#g.readings, 0) H.eq(g.calls.set, 0) H.eq(g.calls.get, 0) H.eq(g.calls.select, 0)
+	-- combat starts between the show and the read
+	g = newGame()
+	kray(g)
+	openTrainer(g)
+	g.combat = true
+	g.run(1)
+	H.eq(#g.readings, 0) H.eq(g.calls.set, 0) H.eq(g.calls.get, 0)
+	-- after combat the window is read whole
+	g.combat = false
+	g.reader:CombatEnded()
+	g.run(1)
+	H.eq(#g.readings, 1) H.ok(g.readings[1].r.t[2330]) H.eq(g.filters.used, false)
+end)
+
 -- Merchant --------------------------------------------------------------------
 
 local function item(id, price, o)
