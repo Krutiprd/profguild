@@ -3,7 +3,7 @@
 ## Notes: Share professions and recipes inside your guild. Who can craft what, no server needed.
 ## Notes-skSK: Zdieľanie profesií a receptov v guilde. Kto čo vyrobí, bez servera.
 ## Author: Profguild team
-## Version: 0.7.0
+## Version: 0.8.0
 ## SavedVariables: ProfguildDB
 ## IconTexture: Interface\AddOns\Profguild\Media\icon
 ## AddonCompartmentFunc: Profguild_OnAddonCompartmentClick

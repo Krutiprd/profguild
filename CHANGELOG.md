@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 – unreleased
+## 0.8.0 – 2026-11-27
 
 - Leveling guide: the LEVELING tab with a profession chosen shows the cheapest plan from the
   current skill to 300 (the smallest Auction House loss, or a profit): segments "from–to recipe
