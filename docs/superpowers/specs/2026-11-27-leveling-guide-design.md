@@ -20,6 +20,15 @@ knows and from Auction House prices, with the smallest loss (or a profit) to rea
   per point, with colour, chance, cost per craft, loss per point and known/learn. Opened by a toggle
   on the tab (at the player's current skill) and by "All (n) →" (at the start of that segment). One
   list implementation serves both.
+- **Plan for someone else** (the user's request: advise a friend): the start skill is an editable
+  number (default: the player's current skill) and the plan can be made for any profession, also one
+  the player does not have. Whose recipes count as known (my proposal):
+  - the player's own skill and recipes by default;
+  - a "For: <guild member>" pick uses that member's skill and known recipes from the guild store;
+  - an edited skill, or a profession the chosen person lacks, means "nobody's recipes": nothing is
+    known, every recipe counts its learn price (trainer recipes below the start skill are assumed
+    learned, since a player at that skill has them almost always).
+  A "Reset" returns to the player's own data.
 - Clicking a row shows the existing recipe detail (reagents, prices, where it is learned, map).
 - The old list (sorted by grey skill) stays below the plan.
 
