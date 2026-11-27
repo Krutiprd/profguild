@@ -424,13 +424,18 @@ end
 -- price is missing. Reagents come from the catalog of guildmates or straight from the game
 -- (asked once per session).
 local gameReagents = {}
+local function recipeReagents(recipeID)
+	local reagents = ns.reagents and ns.reagents:Get(recipeID)
+	if not reagents then
+		if gameReagents[recipeID] == nil then gameReagents[recipeID] = ns.Scanner.RecipeReagents(recipeID) or false end
+		reagents = gameReagents[recipeID] or nil
+	end
+	return reagents
+end
+
 local function craftProfit(d)
 	if not d.itemID or d.itemID == 0 or not ns.Prices.Source() then return nil end
-	local reagents = ns.reagents and ns.reagents:Get(d.recipeID)
-	if not reagents then
-		if gameReagents[d.recipeID] == nil then gameReagents[d.recipeID] = ns.Scanner.RecipeReagents(d.recipeID) or false end
-		reagents = gameReagents[d.recipeID] or nil
-	end
+	local reagents = recipeReagents(d.recipeID)
 	if not reagents then return nil end
 	-- an item that binds on pickup cannot be sold: one craft costs the reagents
 	local value, source
@@ -480,6 +485,23 @@ end
 local function recipeSkillNumbers(recipeID, ask)
 	if ask then recipeSkill(recipeID, true) end
 	return ns.NpcView.Skill(recipeID, npcSource(recipeID))
+end
+
+-- Where a recipe is had (NpcView.Sources) and its recipe item; map: the player's map (rows there first).
+local function recipeSources(recipeID, map)
+	local recipeItem, letters = ns.Prices.RecipeItem(recipeID)
+	-- vendors of Data.lua's recipe item or of the one found in recipeItems
+	local items = {}
+	local e = ns.RecipeData and ns.RecipeData[recipeID]
+	if type(e) == "table" and type(e[1]) == "number" then items[e[1]] = true end
+	if type(recipeItem) == "number" then items[recipeItem] = true end
+	local ah
+	if type(recipeItem) == "number" then
+		local copper, _, text = recipeAH(recipeItem)
+		if copper then ah = { copper = copper, text = text } end
+	end
+	return ns.NpcView.Sources(recipeID, npcSource(recipeID),
+		{ map = map, items = items, recipeItem = recipeItem, letters = letters or "", ah = ah }), recipeItem
 end
 
 -- the profession window's colours: red = learnable from, then yellow, green, grey = no more skill-ups
@@ -766,6 +788,107 @@ function UI:BuildLevelingRows(query, category)
 		return a.recipeID < b.recipeID
 	end)
 	return out, counts, total
+end
+
+-- The cheapest known way to learn a recipe (NpcView.Sources): a trainer, a vendor or the AH
+-- with a copper price and no other cost. Returns copper and the source row, or nil.
+local function cheapestSource(recipeID)
+	local best
+	for _, r in ipairs((recipeSources(recipeID))) do
+		if (r.kind == "trainer" or r.kind == "vendor" or r.kind == "ah") and r.copper and not r.other
+			and (not best or r.copper < best.copper) then
+			best = r
+		end
+	end
+	if best then return best.copper, best end
+end
+
+-- What a craft of the recipe sells for: after the AH cut (per craft), the crafts' worth on the
+-- market, the vendor's sell price (per craft). An item that binds on pickup is worth nothing,
+-- as for the profit of the list (craftProfit).
+local function productValue(recipeID, itemID)
+	if not itemID or itemID == 0 or ns.Scanner.ItemBoP(itemID) then return nil end
+	local k = ns.Scanner.RecipeOutputCount(recipeID)
+	local ah, avail, vendor
+	local price, source = ns.Prices.SaleValue(itemID)
+	if price and source ~= "vendor" then
+		ah = ns.Prices.AfterCut(price * k, source)
+		local onMarket = ns.Prices.Available(itemID)
+		if onMarket then avail = onMarket / k end
+	end
+	local sell = ns.Prices.SellPrice(itemID)
+	if sell then vendor = sell * k end
+	return ah, avail, vendor
+end
+
+-- The leveling guide's input (Leveling.lua) for a profession. who: nil = the player, a guild
+-- member's GUID, or { skill = n } (an edited skill). The player's or member's skill and known
+-- recipes count; an edited skill, a stale member, a profession the person lacks or has not
+-- shared is "nobody's recipes": nothing is known except trainer recipes learned below the start
+-- skill. Returns the recipe records, the start skill and how many recipes were left out for a
+-- missing price (a reagent without one, or no reagents known).
+function UI:LevelingInput(skillLine, who)
+	local store = ns.store
+	local own = ns.OwnState and ns.OwnState()
+	local start, known
+	if who == nil then
+		local prof = own and own.profs and own.profs[skillLine]
+		start = prof and prof.s
+		known = prof and own.recipes and own.recipes[skillLine] or nil
+	elseif type(who) == "table" then
+		start = who.skill
+	else
+		local rec = store and store:Get(who)
+		local prof = rec and rec.p[skillLine]
+		start = prof and prof.s
+		if prof and prof.k and not store:IsStale(who, ns.StaleDays(), GetServerTime()) then known = prof.r end
+	end
+	start = math.max(1, math.floor(tonumber(start) or 1))
+
+	-- every recipe of the profession the addon knows of, with its item
+	local items = {}
+	local function add(list)
+		for recipeID, itemID in pairs(list or {}) do
+			if not items[recipeID] or items[recipeID] == 0 then items[recipeID] = itemID or 0 end
+		end
+	end
+	add(ns.catalog and ns.catalog:Get(skillLine))
+	if store then
+		for recipeID, e in pairs(store:Index().recipes) do
+			if e.skillLine == skillLine and (not items[recipeID] or items[recipeID] == 0) then items[recipeID] = e.itemID or 0 end
+		end
+	end
+	add(own and own.recipes and own.recipes[skillLine])
+	add(known)
+
+	local recipes, missing = {}, 0
+	for recipeID, itemID in pairs(items) do
+		local skill = recipeSkillNumbers(recipeID)
+		if skill.yellow and skill.grey then
+			local reagents = recipeReagents(recipeID)
+			local cost, unpriced = 0, 1
+			if reagents and next(reagents) then cost, unpriced = ns.Prices.Cost(reagents) end
+			if unpriced > 0 then
+				missing = missing + 1
+			else
+				-- the client does not know where a trainer recipe turns orange: from its yellow
+				local learn = skill.learn or skill.yellow
+				local isKnown
+				if known then
+					isKnown = known[recipeID] ~= nil
+				else
+					isKnown = ns.Prices.RecipeItem(recipeID) == false and learn < start
+				end
+				local r = { id = recipeID, itemID = itemID, skillLine = skillLine, name = recipeName(recipeID, itemID),
+					learn = learn, yellow = skill.yellow, grey = skill.grey, cost = cost, known = isKnown }
+				r.ah, r.avail, r.vendor = productValue(recipeID, itemID)
+				if not isKnown then r.learnPrice, r.learnWhere = cheapestSource(recipeID) end
+				recipes[#recipes + 1] = r
+			end
+		end
+	end
+	table.sort(recipes, function(a, b) return a.id < b.id end)
+	return recipes, start, missing
 end
 
 -- Members (not stale, online filter). Returns the rows (online first), the number of members
@@ -2491,20 +2614,8 @@ end
 -- refresh, the scroll position kept and clamped to the list.
 function UI:DrawFind(s)
 	local d = self.detail
-	local recipeItem, letters = ns.Prices.RecipeItem(s.recipeID)
-	-- vendors of Data.lua's recipe item or of the one found in recipeItems
-	local items = {}
-	local e = ns.RecipeData and ns.RecipeData[s.recipeID]
-	if type(e) == "table" and type(e[1]) == "number" then items[e[1]] = true end
-	if type(recipeItem) == "number" then items[recipeItem] = true end
-	local ah
-	if type(recipeItem) == "number" then
-		local copper, _, text = recipeAH(recipeItem)
-		if copper then ah = { copper = copper, text = text } end
-	end
 	local map = safeCall(C_Map and C_Map.GetBestMapForUnit, "player")
-	local rows = ns.NpcView.Sources(s.recipeID, npcSource(s.recipeID),
-		{ map = map, items = items, recipeItem = recipeItem, letters = letters or "", ah = ah })
+	local rows, recipeItem = recipeSources(s.recipeID, map)
 
 	local itemName = type(recipeItem) == "number" and ns.Scanner.ItemName(recipeItem) or nil
 	d.findTitle:SetText(itemName or ns.T("FIND_TITLE"))

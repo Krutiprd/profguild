@@ -1,7 +1,7 @@
 -- Runs all Profguild tests: lua5.1 tests/run.lua (from the repository root)
 local H = dofile((arg[0]:match("^(.*)/[^/]+$") or ".") .. "/harness.lua")
 local dir = H.root .. "/tests/"
-for _, file in ipairs({ "test_store.lua", "test_sync_sim.lua", "test_reagents.lua", "test_leveling.lua", "test_catalog.lua", "test_guild_prices.lua", "test_npc_data.lua", "test_npc_sync.lua", "test_npc_work.lua", "test_npc_day.lua", "test_npc_inflate.lua", "run_npc_sim.lua", "test_npc_reader.lua", "test_npc_view.lua", "test_requests.lua", "test_reports.lua", "test_locale.lua", "test_addon_load.lua", "test_bugs.lua", "test_addon_prices.lua", "test_addon_requests.lua", "test_addon_catalog.lua", "test_addon_reports.lua", "test_addon_npc.lua" }) do
+for _, file in ipairs({ "test_store.lua", "test_sync_sim.lua", "test_reagents.lua", "test_leveling.lua", "test_catalog.lua", "test_guild_prices.lua", "test_npc_data.lua", "test_npc_sync.lua", "test_npc_work.lua", "test_npc_day.lua", "test_npc_inflate.lua", "run_npc_sim.lua", "test_npc_reader.lua", "test_npc_view.lua", "test_requests.lua", "test_reports.lua", "test_locale.lua", "test_addon_load.lua", "test_bugs.lua", "test_addon_prices.lua", "test_addon_requests.lua", "test_addon_catalog.lua", "test_addon_reports.lua", "test_addon_npc.lua", "test_addon_leveling.lua" }) do
 	-- a file that does not compile must fail the run, not silently drop its tests
 	local chunk = assert(loadfile(dir .. file))
 	chunk(H)

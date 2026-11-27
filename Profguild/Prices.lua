@@ -123,10 +123,18 @@ function Prices.SaleValue(itemID)
 		price = call(t.GetCustomPriceValue, "DBMarket", "i:" .. itemID)
 		if price then return price, "ah" end
 	end
+	price = Prices.SellPrice(itemID)
+	if price then return price, "vendor" end
+	return nil
+end
+
+-- What a vendor pays for one item (the game's sell price), or nil when the game has none or has
+-- not loaded the item.
+function Prices.SellPrice(itemID)
 	local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 	if type(itemID) ~= "number" or type(getInfo) ~= "function" then return nil end
 	local ok, name, _, _, _, _, _, _, _, _, _, sellPrice = pcall(getInfo, itemID)
-	if ok and name and type(sellPrice) == "number" and sellPrice > 0 then return sellPrice, "vendor" end
+	if ok and name and type(sellPrice) == "number" and sellPrice > 0 then return sellPrice end
 	return nil
 end
 
