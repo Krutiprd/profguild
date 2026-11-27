@@ -189,3 +189,271 @@ H.test("leveling input: no AH data at all: every recipe is missing a price, no e
 	H.eq(missing, 7, "every recipe with skill numbers or reagents")
 	H.eq(start, 250)
 end)
+
+-- The LEVELING tab ---------------------------------------------------------------------------
+
+local LV_KEYS = { "LV_PICK", "LV_PICK_HINT", "LV_OLD", "LV_NOW_HEAD", "LV_NOW_COUNT", "LV_NOW_SUB", "LV_NOW_EMPTY",
+	"LV_HEAD", "LV_TOTAL_LOSS", "LV_TOTAL_PROFIT", "LV_NOBODY", "LV_NOBODY_HINT", "LV_MISSING", "LV_MISSING_HINT",
+	"LV_DONE", "LV_COUNT", "LV_KNOWN", "LV_LEARN", "LV_LEARN_AT", "LV_LEARN_AH", "LV_ALT", "LV_ALL", "LV_ALL_HINT",
+	"LV_STOP", "LV_STOP_HINT", "LV_ORANGE", "LV_YELLOW", "LV_GREEN", "LV_SKILL", "LV_FOR", "LV_ME", "LV_NOBODY_SHORT",
+	"LV_RESET", "LV_NOW_BTN", "LV_NOW_HINT", "LV_NO_SOURCE", "LV_COMPUTING", "LV_COMPUTING_HINT" }
+
+-- the window on LEVELING, Tailoring
+local function window(opts)
+	local ns = boot(opts)
+	local UI = ns.UI
+	-- the test recipes are in the catalog only: the sidebar lists Tailoring with all recipes
+	ProfguildDB.settings.recipeFilter = "all"
+	UI:Toggle()
+	UI:SetView("leveling")
+	UI:SetCategory(TAILORING)
+	return ns, UI
+end
+
+local function levelRows(UI, lv)
+	local out = {}
+	for _, d in ipairs(UI.levelRows or {}) do
+		if d.lv == lv then out[#out + 1] = d end
+	end
+	return out
+end
+
+local function infoRow(UI, title)
+	for _, d in ipairs(UI.levelRows or {}) do
+		if d.kind == "lvinfo" and d.title == title then return d end
+	end
+end
+
+local function shownRow(UI, pred)
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and r:IsShown() and pred(d) then return r, d end
+	end
+end
+
+H.test("leveling tab: every text of the guide in English and Slovak", function()
+	local ns = boot()
+	for _, key in ipairs(LV_KEYS) do
+		H.ok(ns.Locales.en[key], "en " .. key)
+		H.ok(ns.Locales.sk[key], "sk " .. key)
+	end
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: the plan's head, total and one row per segment with ~count, loss and known or learn", function()
+	local ns, UI = window()
+	local plan = UI:LevelingPlan(TAILORING).plan
+	H.ok(#plan.segments > 0, "a plan")
+	local head = UI.levelRows[1]
+	H.eq(head.kind, "lvinfo")
+	H.eq(plain(head.title), "Tailoring 250 -> 300")
+	H.ok(plain(head.text):find(plain(ns.Prices.Format(math.abs(plan.total))), 1, true), "total: " .. plain(head.text))
+	local segs = levelRows(UI, "seg")
+	H.eq(#segs, #plan.segments)
+	for i, d in ipairs(segs) do
+		local seg = plan.segments[i]
+		H.ok(plain(d.lvName):find(seg.from .. "-" .. seg.to .. "  " .. seg.r.name, 1, true), plain(d.lvName))
+		H.ok(plain(d.lvSub):find("^~%d+ pcs"), plain(d.lvSub))
+		H.ok(plain(d.lvSub):find(seg.r.known and "[known]" or "[learn: ", 1, true), plain(d.lvSub))
+		H.ok(plain(d.lvRight):find("^[%+%-]"), "loss or profit")
+	end
+	-- the AH recipe item is the learn source of 50004
+	local learn
+	for _, d in ipairs(segs) do if d.recipeID == 50004 then learn = plain(d.lvSub) end end
+	H.ok(learn and learn:find("[learn: 70s 0c, AH]", 1, true), tostring(learn))
+	-- shown in the list, first
+	H.eq(rawget(UI.rows[1], "data"), head)
+	H.ok(UI.levelBar:IsShown(), "the controls")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: a segment opens to at most 3 alternatives and All (n), which opens gives skill now at its start", function()
+	local ns, UI = window()
+	local row, seg = shownRow(UI, function(d) return d.lv == "seg" end)
+	H.ok(row, "a segment row")
+	row._scripts.OnClick(row, "LeftButton")
+	H.eq(UI.selected.key, seg.key, "selected: the detail shows the recipe")
+	H.eq(UI.detail.name:GetText(), seg.name)
+	local alts = levelRows(UI, "alt")
+	H.ok(#alts <= 3, "at most 3")
+	local all
+	for _, d in ipairs(UI.levelRows) do if d.action == "all" then all = d end end
+	H.ok(all, "All (n)")
+	local planSeg
+	for _, s in ipairs(UI:LevelingPlan(TAILORING).plan.segments) do
+		if seg.key == "lvs" .. s.from .. ":" .. s.r.id then planSeg = s end
+	end
+	H.eq(all.title, ns.T("LV_ALL", planSeg.all))
+	-- the alternatives come right after their segment
+	local at
+	for i, d in ipairs(UI.levelRows) do if d.key == seg.key then at = i end end
+	for i = 1, #alts do H.eq(UI.levelRows[at + i].lv, "alt") end
+	H.eq(UI.levelRows[at + #alts + 1], all)
+	-- All (n): the list at the segment's start
+	local allRow = shownRow(UI, function(d) return d == all end)
+	H.ok(allRow, "All shown")
+	allRow._scripts.OnClick(allRow, "LeftButton")
+	H.eq(UI.levelNow, planSeg.from)
+	local now = levelRows(UI, "now")
+	H.eq(#now, planSeg.all, "All (n) is the list")
+	H.eq(#now, #ns.Leveling.GivesNow(UI:LevelingPlan(TAILORING).recipes, planSeg.from))
+	-- clicked again, the segment closes
+	UI.levelNow = nil
+	UI:Refresh()
+	row = shownRow(UI, function(d) return d.key == seg.key end)
+	row._scripts.OnClick(row, "LeftButton")
+	H.eq(#levelRows(UI, "alt"), 0, "closed")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: gives skill now opens at the start skill with colour, chance, cost, loss and known or learn", function()
+	local ns, UI = window()
+	UI.levelNowButton._scripts.OnClick(UI.levelNowButton)
+	H.eq(UI.levelNow, 250)
+	H.eq(plain(UI.levelRows[1].title), ns.T("LV_NOW_HEAD", "Tailoring", 250))
+	local now = levelRows(UI, "now")
+	local list = ns.Leveling.GivesNow(UI:LevelingPlan(TAILORING).recipes, 250)
+	H.ok(#list > 0, "something gives skill")
+	H.eq(#now, #list)
+	for i, d in ipairs(now) do
+		local g = list[i]
+		H.eq(d.recipeID, g.r.id, "same order")
+		local sub = plain(d.lvSub)
+		H.ok(sub:find(ns.T("LV_" .. g.colour:upper()), 1, true), sub)
+		H.ok(sub:find(math.floor(g.chance * 100 + 0.5) .. " %", 1, true), sub)
+		H.ok(sub:find(plain(ns.Prices.Format(g.cost)), 1, true), sub)
+		H.ok(sub:find(g.r.known and "[known]" or (g.r.learnPrice and "[learn" or "[no source known]"), 1, true), sub)
+		H.eq(plain(d.lvRight), ns.Prices.Short(-g.loss))
+	end
+	H.ok(UI.levelNowButton.active, "pressed")
+	UI.levelNowButton._scripts.OnClick(UI.levelNowButton)
+	H.eq(UI.levelNow, nil, "back to the plan")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: an edited start skill, For: a guild member, Reset", function()
+	local ns, UI = window()
+	ns.store:Apply(memberRecord({ [TAILORING] = { s = 120, m = 150, k = true, r = { [50003] = 60003 } } }))
+	UI.levelSkillBox:SetText("120")
+	UI.levelSkillBox._scripts.OnEnterPressed(UI.levelSkillBox)
+	H.eq(UI.levelSkill, 120)
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 120 -> 300")
+	H.eq(UI.levelRows[2].title, ns.T("LV_NOBODY"), "nobody's recipes said")
+	H.ok(UI.levelForButton.text:GetText():find(ns.T("LV_NOBODY_SHORT"), 1, true), UI.levelForButton.text:GetText())
+	-- For: the menu lists the player, then Ana (Tailoring)
+	UI.levelForButton._scripts.OnClick(UI.levelForButton)
+	H.ok(UI.levelForMenu:IsShown(), "menu")
+	local entries = UI:LevelingForEntries(TAILORING)
+	H.eq(entries[1].guid, nil, "me first")
+	H.eq(entries[2].guid, ANA)
+	H.eq(entries[2].skill, 120)
+	local anaRow = UI.levelForMenu.rows[2]
+	anaRow._scripts.OnClick(anaRow)
+	H.eq(UI.levelWho, ANA)
+	H.eq(UI.levelSkill, nil, "the edited skill gives way")
+	H.ok(not UI.levelForMenu:IsShown())
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 120 -> 300")
+	H.ok(UI.levelRows[2].title ~= ns.T("LV_NOBODY"), "Ana's own recipes")
+	H.ok(UI.levelForButton.text:GetText():find("Ana", 1, true), UI.levelForButton.text:GetText())
+	-- Reset: the player's own again
+	UI.levelResetButton._scripts.OnClick(UI.levelResetButton)
+	H.eq(UI.levelWho, nil); H.eq(UI.levelSkill, nil)
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 250 -> 300")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: For: a member who is stale or lacks the profession: nobody's recipes, no error", function()
+	local ns, UI = window()
+	ns.store:Apply(memberRecord({ [333] = { s = 50, m = 75, k = true, r = {} } }))
+	UI:SetLevelingFor(ANA)
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 1 -> 300")
+	H.eq(UI.levelRows[2].title, ns.T("LV_NOBODY"))
+	ns.store:Remove(ANA)
+	ns.store:Apply(memberRecord({ [TAILORING] = { s = 120, m = 150, k = true, r = {} } }))
+	local isStale = ns.store.IsStale
+	ns.store.IsStale = function() return true end
+	UI.levelPlans = nil
+	UI:Refresh()
+	ns.store.IsStale = isStale
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 120 -> 300")
+	H.eq(UI.levelRows[2].title, ns.T("LV_NOBODY"))
+	-- Ana left the guild's store: no error either
+	ns.store:Remove(ANA)
+	UI:Refresh()
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: no AH data: the missing prices line, no plan, no error; a gap says from which skill", function()
+	local ns, UI = window({ noPrices = true })
+	local missing = infoRow(UI, ns.T("LV_MISSING", 7))
+	H.ok(missing, "missing prices")
+	H.eq(missing.text, ns.T("LV_MISSING_HINT"))
+	H.eq(#levelRows(UI, "seg"), 0)
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	-- reagents priced, but no source of 50004 (its recipe item not on the AH): the player's
+	-- 50001 gives skill up to its grey 270, nothing known after it
+	auctionator({ [REAGENT] = 100 })
+	UI.levelPlans = nil
+	UI:Refresh()
+	H.eq(UI:LevelingPlan(TAILORING).plan.stopAt, 270)
+	H.ok(infoRow(UI, ns.T("LV_STOP", 270)), "Nothing known gives skill from 270")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	-- at or above 300: nothing to level
+	UI:SetLevelingSkill(300)
+	H.ok(infoRow(UI, ns.T("LV_DONE", 300)), "done")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: the old list sorted by grey skill stays under the guide", function()
+	local ns, UI = window()
+	H.eq(UI.levelRows[#UI.levelRows].title, ns.T("LV_OLD"), "the old list's title last")
+	local old = UI.listCache.data
+	H.ok(#old > 0, "old rows")
+	H.eq(old[1].lv, nil)
+	for i = 2, #old do H.ok(old[i - 1].grey <= old[i].grey, "sorted by grey") end
+	-- the old rows follow in the list
+	UI.offset = #UI.levelRows
+	UI:Refresh()
+	H.eq(rawget(UI.rows[1], "data"), old[1])
+	-- All professions: no plan, a line asks for one
+	UI:SetCategory(nil)
+	H.eq(UI.levelRows[1].title, ns.T("LV_PICK"))
+	H.ok(not UI.levelBar:IsShown(), "no controls without a profession")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: the plan is kept between draws and computed again at most once per 3 s", function()
+	local ns, UI = window()
+	local e = UI:LevelingPlan(TAILORING)
+	UI:Refresh()
+	H.ok(UI:LevelingPlan(TAILORING) == e, "kept")
+	ns.recipeInfoRevision = (ns.recipeInfoRevision or 0) + 1
+	H.ok(UI:LevelingPlan(TAILORING) == e, "a change within 3 s waits")
+	M.advance(3.5)
+	H.ok(UI:LevelingPlan(TAILORING) ~= e, "computed again")
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: computed as an NpcWork job: behind other work the tab says so, then shows the plan", function()
+	local ns, UI = window()
+	UI.levelPlans = nil
+	local release = false
+	ns.npcWork:Run(function() while not release do coroutine.yield() end end)
+	UI:Refresh()
+	H.ok(infoRow(UI, ns.T("LV_COMPUTING")), "computing")
+	H.eq(#levelRows(UI, "seg"), 0)
+	H.eq(UI.levelSkillBox:GetText(), "250", "the start skill already shown")
+	release = true
+	M.advance(1)
+	H.ok(not infoRow(UI, ns.T("LV_COMPUTING")), "done and drawn again")
+	H.ok(#levelRows(UI, "seg") > 0, "the plan")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)

@@ -29,6 +29,8 @@ local CRAFTER_ROWS, CRAFTER_STEP, CRAFTER_TOP = 4, 22, -334
 local REAGENT_ROWS, REAGENT_STEP, REAGENT_TOP = 5, 22, -154
 local FIND_ROWS, FIND_STEP, FIND_TOP = 3, 36, -154          -- FIND RECIPE: where the recipe is had
 local MENU_ROWS, MENU_STEP, MENU_W = 12, 20, 190
+-- the leveling guide's controls, under the list (which starts at -98)
+local LEVEL_BAR_TOP, LEVEL_BAR_H = -98 - LIST_ROWS * ROW_STEP - 8, 50
 local REQ_BOX_H = 190                                 -- the request box: item, count, note
 local REQ_PICK_ROWS, REQ_PICK_STEP = 5, 20            -- its recipe search (NEW REQUEST)
 local REQ_PICK_H = 78 + REQ_PICK_ROWS * REQ_PICK_STEP - 30
@@ -862,7 +864,10 @@ function UI:LevelingInput(skillLine, who)
 	add(known)
 
 	local recipes, missing = {}, 0
+	local work = ns.npcWork
 	for recipeID, itemID in pairs(items) do
+		-- in a job (UI:LevelingPlan) the recipes are spread over frames
+		if work then work:Pace(1, "leveling") end
 		local skill = recipeSkillNumbers(recipeID)
 		if skill.yellow and skill.grey then
 			local reagents = recipeReagents(recipeID)
@@ -889,6 +894,296 @@ function UI:LevelingInput(skillLine, who)
 	end
 	table.sort(recipes, function(a, b) return a.id < b.id end)
 	return recipes, start, missing
+end
+
+-- The guide's state: whose recipes (levelWho: a member's GUID, nil = the player), an edited
+-- start skill (levelSkill), the "gives skill now" list at a skill (levelNow, nil = the plan),
+-- the segments opened to their alternatives (levelOpen).
+UI.levelOpen = {}
+UI.LEVEL_RECOMPUTE = 3  -- seconds: the plan is computed again at most this often
+UI.LEVEL_MAX_AGE = 30   -- and at least this often while it is drawn (prices change silently)
+UI.LEVEL_CACHE = 8      -- plans kept (per profession and whose recipes)
+
+-- The plan of a profession for the current state, computed again when its data changed (at
+-- most once per LEVEL_RECOMPUTE seconds) and kept per profession and whose recipes.
+function UI:LevelingPlan(category)
+	local who = self.levelSkill and { skill = self.levelSkill } or self.levelWho
+	local key = table.concat({ category, tostring(self.levelWho), tostring(self.levelSkill) }, "\1")
+	local store = ns.store
+	local own = ns.OwnState and ns.OwnState()
+	local mine = own and own.profs and own.profs[category]
+	local stamp = table.concat({ store and store.revision or 0, store and store.rosterRevision or 0,
+		ns.catalog and ns.catalog.revision or 0, ns.recipeInfoRevision or 0, ns.npcSkillRevision or 0,
+		self.nameEpoch or 0, self.priceEpoch or 0, mine and mine.s or 0,
+		ns.guildPrices and ns.guildPrices.revision or 0, math.floor(GetTime() / self.LEVEL_MAX_AGE) }, "\1")
+	self.levelPlans = self.levelPlans or {}
+	self.levelJobs = self.levelJobs or {}
+	local e = self.levelPlans[key]
+	local now = GetTime()
+	if e and e.stamp ~= stamp and now - e.at < self.LEVEL_RECOMPUTE then
+		-- changed again right after a computation: once more when the pause is over
+		self:ScheduleRefresh(self.LEVEL_RECOMPUTE - (now - e.at) + 0.05)
+	elseif (not e or e.stamp ~= stamp) and not self.levelJobs[key] then
+		-- an NpcWork job: the recipes and the search spread over frames within its budget; when
+		-- nothing waits ahead and the work is small it is done before Run returns
+		local inline = true
+		local function compute()
+			local recipes, start, missing = UI:LevelingInput(category, who)
+			local work = ns.npcWork
+			local plan = ns.Leveling.Plan(recipes, start, ns.Leveling.MAX,
+				work and function(units) work:Pace(units, "plan") end or nil)
+			local entry = { stamp = stamp, at = GetTime(), recipes = recipes, start = start, missing = missing,
+				now = {}, plan = plan, category = category }
+			local n = 0
+			for _ in pairs(UI.levelPlans) do n = n + 1 end
+			if n >= UI.LEVEL_CACHE then UI.levelPlans = {} end
+			UI.levelPlans[key] = entry
+			UI.levelJobs[key] = nil
+			if not inline then UI:ScheduleRefresh(0) end
+		end
+		if ns.npcWork then
+			self.levelJobs[key] = true
+			ns.npcWork:Run(compute, "leveling", function() UI.levelJobs[key] = nil end)
+		else
+			compute()
+		end
+		inline = false
+		e = self.levelPlans[key] or e
+	end
+	if not e then
+		-- the first plan of this profession is still being computed
+		local start = self.levelSkill
+		if not start and not self.levelWho then start = mine and mine.s end
+		return { computing = true, start = math.max(1, start or 1), recipes = {}, missing = 0, now = {},
+			plan = { from = 1, to = ns.Leveling.MAX, total = 0, segments = {} }, category = category }
+	end
+	return e
+end
+
+local function lossShort(loss)
+	local money = -loss
+	return (money < 0 and HEX_LOSS or HEX_PROFIT) .. ns.Prices.Short(money) .. "|r"
+end
+
+-- "[known]", "[learn: 1g 80s, Kray]" ("AH" for the auction house) or "[no source known]"
+local function learnText(r)
+	if r.known then return HEX_MUTED .. "[" .. ns.T("LV_KNOWN") .. "]|r" end
+	if not r.learnPrice then return HEX_MUTED .. "[" .. ns.T("LV_NO_SOURCE") .. "]|r" end
+	local w = r.learnWhere
+	local where = w and (w.kind == "ah" and ns.T("LV_LEARN_AH") or w.name) or nil
+	local price = ns.Prices.Format(r.learnPrice)
+	return HEX_MUTED .. "[|r" .. (where and ns.T("LV_LEARN_AT", price, where) or ns.T("LV_LEARN", price)) .. HEX_MUTED .. "]|r"
+end
+
+local function countText(count)
+	return ns.T("LV_COUNT", math.max(1, math.floor(count + 0.5)))
+end
+
+local COLOUR_HEX = { orange = HEX_DIFFICULTY[0], yellow = HEX_DIFFICULTY[1], green = HEX_DIFFICULTY[2] }
+local COLOUR_KEY = { orange = "LV_ORANGE", yellow = "LV_YELLOW", green = "LV_GREEN" }
+
+-- The rows of the guide over the Leveling list: the plan (or "gives skill now"), then the title
+-- of the old list. Recipe rows are recipe rows of the list (the detail shows them) with lv set:
+-- "seg", "alt" or "now", and their texts in lvName, lvSub, lvRight. Other rows are "lvinfo":
+-- title, text, right, gold, action ("all": open "gives skill now" at skill).
+function UI:BuildLevelingPlanRows(category)
+	local out = {}
+	local function info(title, text, extra)
+		local r = { kind = "lvinfo", key = "lvi" .. #out, title = title, text = text or "" }
+		for k, v in pairs(extra or {}) do r[k] = v end
+		out[#out + 1] = r
+		return r
+	end
+	if not category then
+		info(ns.T("LV_PICK"), ns.T("LV_PICK_HINT"))
+		info(ns.T("LV_OLD"), "", { gold = true })
+		return out
+	end
+	local e = self:LevelingPlan(category)
+	local plan = e.plan
+	local prof = ns.Scanner.ProfessionName(category)
+	local index = ns.store and ns.store:Index().recipes or {}
+	local now, staleDays = GetServerTime(), ns.StaleDays()
+	local function recipeRow(lv, key, r)
+		local entry = index[r.id]
+		local crafters = entry and craftersOf(entry, false, now, staleDays, true) or {}
+		local row = { kind = "recipe", lv = lv, key = key, recipeID = r.id, itemID = r.itemID or 0, skillLine = category,
+			name = r.name, prof = prof, crafters = crafters, lvr = r, req = -1,
+			nobody = #crafters == 0 and not (entry and anyCrafter(entry, now, staleDays)) }
+		out[#out + 1] = row
+		return row
+	end
+	local nobody = self.levelSkill ~= nil
+	if not nobody and self.levelWho then
+		-- a member without the profession, not shared or stale: LevelingInput counted nobody's recipes
+		local rec = ns.store and ns.store:Get(self.levelWho)
+		local p = rec and rec.p[category]
+		nobody = not (p and p.k) or ns.store:IsStale(self.levelWho, staleDays, now)
+	elseif not nobody then
+		local own = ns.OwnState and ns.OwnState()
+		nobody = not (own and own.profs and own.profs[category] and own.recipes and own.recipes[category])
+	end
+
+	if e.computing then
+		info(ns.T("LV_COMPUTING"), ns.T("LV_COMPUTING_HINT"))
+	elseif self.levelNow then
+		local skill = self.levelNow
+		local list = e.now[skill]
+		if not list then
+			list = ns.Leveling.GivesNow(e.recipes, skill)
+			e.now[skill] = list
+		end
+		info(HEX_GOLD .. ns.T("LV_NOW_HEAD", prof, skill) .. "|r", ns.T("LV_NOW_COUNT", #list))
+		for _, g in ipairs(list) do
+			local row = recipeRow("now", "lvn" .. g.r.id, g.r)
+			row.lvName = COLOUR_HEX[g.colour] .. "•|r " .. qualityName(row)
+			row.lvSub = ns.T("LV_NOW_SUB", ns.T(COLOUR_KEY[g.colour]), math.floor(g.chance * 100 + 0.5), ns.Prices.Format(g.cost))
+				.. "  " .. learnText(g.r)
+			row.lvRight = lossShort(g.loss)
+		end
+		if #list == 0 then info(ns.T("LV_NOW_EMPTY", skill), "") end
+	else
+		local head = info(HEX_GOLD .. ns.T("LV_HEAD", prof, plan.from, plan.to) .. "|r", "")
+		if #plan.segments > 0 then
+			head.text = ns.T(plan.total > 0 and "LV_TOTAL_LOSS" or "LV_TOTAL_PROFIT", ns.Prices.Format(math.abs(plan.total)))
+			head.right = lossShort(plan.total)
+		end
+		if nobody then info(ns.T("LV_NOBODY"), ns.T("LV_NOBODY_HINT", e.start)) end
+		if e.missing > 0 then info(ns.T("LV_MISSING", e.missing), ns.T("LV_MISSING_HINT")) end
+		if plan.from >= plan.to then info(ns.T("LV_DONE", plan.from), "") end
+		for _, seg in ipairs(plan.segments) do
+			local segKey = seg.from .. ":" .. seg.r.id
+			local open = self.levelOpen[segKey] and true or false
+			local row = recipeRow("seg", "lvs" .. segKey, seg.r)
+			row.segKey = segKey
+			row.lvName = "|T" .. (open and MINUS_TEX or PLUS_TEX) .. ":14:14|t " .. HEX_GOLD .. seg.from .. "-" .. seg.to .. "|r  " .. qualityName(row)
+			row.lvSub = countText(seg.count) .. "  " .. learnText(seg.r)
+			row.lvRight = lossShort(seg.loss)
+			if open then
+				for _, a in ipairs(seg.alts) do
+					local alt = recipeRow("alt", "lva" .. segKey .. ":" .. a.r.id, a.r)
+					alt.lvName = HEX_MUTED .. ns.T("LV_ALT") .. "|r  " .. qualityName(alt)
+					alt.lvSub = countText(a.count) .. "  " .. learnText(a.r)
+					alt.lvRight = lossShort(a.loss)
+				end
+				info(ns.T("LV_ALL", seg.all), ns.T("LV_ALL_HINT", seg.from), { action = "all", skill = seg.from, key = "lvall" .. segKey })
+			end
+		end
+		if plan.stopAt then info(ns.T("LV_STOP", plan.stopAt), ns.T("LV_STOP_HINT")) end
+	end
+	info(ns.T("LV_OLD"), "", { gold = true })
+	return out
+end
+
+-- The guide's controls ------------------------------------------------------------------
+
+function UI:SetLevelingSkill(n)
+	n = math.floor(tonumber(n) or 1)
+	self.levelSkill = math.max(1, math.min(ns.Leveling.MAX, n))
+	self.levelNow = nil
+	self.offset = 0
+	self:Refresh()
+end
+
+-- guid nil: the player
+function UI:SetLevelingFor(guid)
+	if guid == UnitGUID("player") then guid = nil end
+	self.levelWho, self.levelSkill, self.levelNow = guid, nil, nil
+	self.offset = 0
+	self:Refresh()
+end
+
+function UI:ResetLeveling()
+	if self.levelForMenu then self.levelForMenu:Hide() end
+	self:SetLevelingFor(nil)
+end
+
+-- "Gives skill now" at the plan's start skill, or back to the plan.
+function UI:ToggleGivesNow()
+	if self.levelNow then
+		self.levelNow = nil
+	else
+		local e = self.shownCategory and self:LevelingPlan(self.shownCategory)
+		self.levelNow = e and e.start or 1
+	end
+	self.offset = 0
+	self:Refresh()
+end
+
+function UI:LevelingAction(d)
+	if d.action == "all" then
+		self.levelNow = d.skill
+		self.offset = 0
+		self:Refresh()
+	end
+end
+
+-- Whom the guide can plan for: the player first, then guild members (not stale) with the profession.
+function UI:LevelingForEntries(category)
+	local list = { { name = ns.T("LV_ME") } }
+	local store = ns.store
+	if not store or not category then return list end
+	local me = UnitGUID("player")
+	local now, staleDays = GetServerTime(), ns.StaleDays()
+	local others = {}
+	for guid, rec in pairs(store:All()) do
+		local p = rec.p[category]
+		if guid ~= me and p and not store:IsStale(guid, staleDays, now) then
+			others[#others + 1] = { guid = guid, name = ns.DisplayName(guid, rec), class = rec.c, skill = p.s, online = store:IsOnline(guid) }
+		end
+	end
+	table.sort(others, function(a, b)
+		if a.online ~= b.online then return a.online end
+		return a.name < b.name
+	end)
+	for _, o in ipairs(others) do list[#list + 1] = o end
+	return list
+end
+
+function UI:DrawLevelingForMenu()
+	local menu = self.levelForMenu
+	if not menu or not menu:IsShown() then return end
+	local entries = self:LevelingForEntries(self.shownCategory)
+	local maxOffset = math.max(0, #entries - MENU_ROWS)
+	self.levelForOffset = math.max(0, math.min(maxOffset, math.floor(self.levelForOffset or 0)))
+	for i = 1, MENU_ROWS do
+		local row, e = menu.rows[i], entries[self.levelForOffset + i]
+		row.data = e
+		if e then
+			row.active = e.guid == self.levelWho and not self.levelSkill
+			row.left:SetText(e.guid and ((e.online and HEX_ONLINE or HEX_OFFLINE) .. "•|r " .. classColored(e.name, e.class)) or (HEX_GOLD .. e.name .. "|r"))
+			row.right:SetText(e.skill and tostring(e.skill) or "")
+			row.bg:SetColorTexture(unpack(row.active and C.selected or C.clear))
+			row:Show()
+		else
+			row:Hide()
+		end
+	end
+	menu:SetHeight(math.min(#entries, MENU_ROWS) * MENU_STEP + 8)
+end
+
+-- The controls under the list, in the current language and state.
+function UI:DrawLevelingBar(show, category)
+	local bar = self.levelBar
+	showIf(bar, show)
+	if not show then
+		self.levelForMenu:Hide()
+		return
+	end
+	local e = self:LevelingPlan(category)
+	self.levelSkillLabel:SetText(ns.T("LV_SKILL"))
+	if not self.levelSkillBox:HasFocus() then self.levelSkillBox:SetText(tostring(e.start)) end
+	local whoName = ns.T("LV_ME")
+	if self.levelSkill then
+		whoName = ns.T("LV_NOBODY_SHORT")
+	elseif self.levelWho then
+		local rec = ns.store and ns.store:Get(self.levelWho)
+		whoName = rec and ns.DisplayName(self.levelWho, rec) or "?"
+	end
+	setPill(self.levelForButton, ns.T("LV_FOR", whoName), self.levelWho ~= nil or self.levelSkill ~= nil)
+	setPill(self.levelResetButton, ns.T("LV_RESET"), false, self.levelWho == nil and self.levelSkill == nil)
+	setPill(self.levelNowButton, ns.T("LV_NOW_BTN"), self.levelNow ~= nil)
+	self:DrawLevelingForMenu()
 end
 
 -- Members (not stale, online filter). Returns the rows (online first), the number of members
@@ -968,7 +1263,7 @@ end
 
 local function rowColor(row)
 	local d = row.data
-	if d and d.kind == "header" then
+	if d and (d.kind == "header" or (d.kind == "lvinfo" and not d.action)) then
 		paint(row, C.clear, C.clear)
 		return
 	end
@@ -1002,7 +1297,7 @@ local function createListRow(parent, index)
 	row:SetScript("OnMouseWheel", function(_, delta) UI:Scroll(delta) end)
 	row:SetScript("OnEnter", function(self)
 		paint(self, C.hover, C.border)
-		if self.data and self.data.kind == "header" then return end
+		if self.data and (self.data.kind == "header" or self.data.kind == "lvinfo") then return end
 		if self.data and self.data.kind == "recipe" then
 			local d = self.data
 			showTooltip(self, function() recipeTooltip(self, d) end, { [d.itemID or 0] = true })
@@ -1018,11 +1313,17 @@ local function createListRow(parent, index)
 			UI:ToggleGroup(d.group)
 			return
 		end
+		if d and d.kind == "lvinfo" then
+			if d.action then UI:LevelingAction(d) end
+			return
+		end
 		if not d then return end
 		if d.kind == "recipe" and IsShiftKeyDown() then
 			insertLink(d.recipeID, d.itemID)
 			return
 		end
+		-- a segment of the leveling plan opens (or closes) its alternatives
+		if d.segKey then UI.levelOpen[d.segKey] = not UI.levelOpen[d.segKey] or nil end
 		UI.selected = d
 		UI.detailOffset = 0
 		UI.reagentOffset = 0
@@ -1454,6 +1755,102 @@ function UI:Create()
 	self.listEmpty:SetWordWrap(true)
 	self.listEmpty:SetJustifyH("CENTER")
 
+	-- leveling guide (LEVELING with a profession): under the list the start skill, whose
+	-- recipes count, the way back to the player's own, and "gives skill now"
+	local lv = CreateFrame("Frame", nil, mid)
+	lv:SetSize(LIST_W - 24, LEVEL_BAR_H)
+	lv:SetPoint("TOPLEFT", 12, LEVEL_BAR_TOP)
+	lv:Hide()
+	self.levelBar = lv
+	self.levelSkillLabel = label(lv, "GameFontHighlightSmall", C.muted)
+	self.levelSkillLabel:SetPoint("TOPLEFT", 0, -4)
+	local skillHolder = panel(lv, C.bg, C.line)
+	skillHolder:SetSize(44, 22)
+	skillHolder:SetPoint("TOPLEFT", 34, 0)
+	skillHolder:EnableMouse(true)
+	local skillBox = CreateFrame("EditBox", nil, skillHolder)
+	skillBox:SetFontObject(ChatFontNormal or GameFontHighlightSmall)
+	skillBox:SetPoint("LEFT", 6, 0)
+	skillBox:SetPoint("RIGHT", -6, 0)
+	skillBox:SetHeight(20)
+	skillBox:SetAutoFocus(false)
+	skillBox:EnableMouse(true)
+	skillBox:SetMaxLetters(3)
+	skillBox:SetNumeric(true)
+	skillHolder:SetScript("OnMouseDown", function() skillBox:SetFocus() end)
+	skillBox:SetScript("OnEditFocusGained", function() paint(skillHolder, C.bg, C.border) end)
+	skillBox:SetScript("OnEditFocusLost", function() paint(skillHolder, C.bg, C.line) end)
+	skillBox:SetScript("OnEscapePressed", function(self)
+		self:ClearFocus()
+		UI:Refresh() -- the shown start skill again
+	end)
+	skillBox:SetScript("OnEnterPressed", function(self)
+		self:ClearFocus()
+		local n = tonumber(self:GetText() or "")
+		if n then UI:SetLevelingSkill(n) else UI:Refresh() end
+	end)
+	self.levelSkillBox = skillBox
+	self.levelForButton = pill(lv, 150, 20)
+	self.levelForButton:SetPoint("TOPLEFT", 86, -1)
+	self.levelForButton:SetScript("OnClick", function()
+		if UI.levelForMenu:IsShown() then
+			UI.levelForMenu:Hide()
+		else
+			UI.levelForMenu:Show()
+			UI:DrawLevelingForMenu()
+		end
+	end)
+	self.levelResetButton = pill(lv, 66, 20)
+	self.levelResetButton:SetPoint("TOPLEFT", 240, -1)
+	self.levelResetButton:SetScript("OnClick", function() UI:ResetLeveling() end)
+	self.levelNowButton = pill(lv, 180, 20)
+	self.levelNowButton:SetPoint("TOPLEFT", 0, -28)
+	self.levelNowButton:SetScript("OnClick", function() UI:ToggleGivesNow() end)
+	self.levelNowButton:HookScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:AddLine(ns.T("LV_NOW_HINT"), 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	self.levelNowButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
+	-- "For:": the player, then guild members with the profession; opens upwards
+	local forMenu = panel(mid, C.bg, C.border)
+	forMenu:SetFrameLevel((mid:GetFrameLevel() or 1) + 30)
+	forMenu:SetSize(MENU_W, MENU_ROWS * MENU_STEP + 8)
+	forMenu:SetPoint("BOTTOMLEFT", self.levelForButton, "TOPLEFT", 0, 2)
+	forMenu:EnableMouse(true)
+	forMenu:EnableMouseWheel(true)
+	forMenu:SetScript("OnMouseWheel", function(_, delta)
+		UI.levelForOffset = (UI.levelForOffset or 0) - (delta or 0) * 3
+		UI:DrawLevelingForMenu()
+	end)
+	forMenu:Hide()
+	forMenu.rows = {}
+	for i = 1, MENU_ROWS do
+		local row = CreateFrame("Button", nil, forMenu)
+		row:SetSize(MENU_W - 10, MENU_STEP - 1)
+		row:SetPoint("TOPLEFT", 5, -4 - (i - 1) * MENU_STEP)
+		row.bg = row:CreateTexture(nil, "BACKGROUND")
+		row.bg:SetAllPoints()
+		row.bg:SetColorTexture(unpack(C.clear))
+		row.left = label(row, "GameFontHighlightSmall", C.text)
+		row.left:SetPoint("LEFT", 6, 0)
+		row.left:SetWidth(MENU_W - 60)
+		row.right = label(row, "GameFontHighlightSmall", C.muted)
+		row.right:SetPoint("RIGHT", -6, 0)
+		row.right:SetJustifyH("RIGHT")
+		row:EnableMouseWheel(true)
+		row:SetScript("OnMouseWheel", function(_, delta) forMenu:GetScript("OnMouseWheel")(forMenu, delta) end)
+		row:SetScript("OnEnter", function(self) self.bg:SetColorTexture(unpack(C.hover)) end)
+		row:SetScript("OnLeave", function(self) self.bg:SetColorTexture(unpack(self.active and C.selected or C.clear)) end)
+		row:SetScript("OnClick", function(self)
+			if not self.data then return end
+			forMenu:Hide()
+			UI:SetLevelingFor(self.data.guid)
+		end)
+		forMenu.rows[i] = row
+	end
+	self.levelForMenu = forMenu
+
 	-- right: details
 	local det = panel(f, C.panel, C.line)
 	det:SetSize(DETAIL_W, PANEL_H)
@@ -1871,7 +2268,10 @@ function UI:Create()
 	events:SetScript("OnEvent", function(_, event, itemID, success)
 		if event ~= "GET_ITEM_INFO_RECEIVED" then
 			-- a scan may have added recipe items to the auction database
-			if event == "AUCTION_HOUSE_CLOSED" then ns.Prices.StartRecipeIndex(true) end
+			if event == "AUCTION_HOUSE_CLOSED" then
+				ns.Prices.StartRecipeIndex(true)
+				UI.priceEpoch = (UI.priceEpoch or 0) + 1 -- a scan may have brought new prices
+			end
 			if f:IsShown() then UI:ScheduleRefresh(0.3) end
 			return
 		end
@@ -2138,6 +2538,7 @@ end
 function UI:SetView(view)
 	if view == "members" then self.memberFilter = nil end
 	if self.playerMenu then self.playerMenu:Hide() end
+	if self.levelForMenu then self.levelForMenu:Hide() end
 	self.view = view
 	self.selected = nil
 	self.offset = 0
@@ -2160,6 +2561,9 @@ function UI:SetCategory(skillLine)
 	self.category = skillLine
 	ns.db.settings.category = skillLine
 	self.offset = 0
+	-- "gives skill now" was at a skill of the other profession: the new one opens at its plan
+	self.levelNow = nil
+	if self.levelForMenu then self.levelForMenu:Hide() end
 	self.levelJump = self.view == "leveling"
 	self:Refresh()
 end
@@ -2331,32 +2735,64 @@ function UI:DrawList(data)
 		local row, d = self.rows[i], data[self.offset + i]
 		row.data = d
 		if d then
-			-- a group header: gold title at the bottom of the row, next to its first recipe
+			-- a group header: gold title at the bottom of the row, next to its first recipe; a
+			-- line of the leveling guide (lvinfo): two lines without an icon
 			local header = d.kind == "header"
-			if header ~= row.isHeader then
-				row.isHeader = header
+			local layout = header and "header" or (d.kind == "lvinfo" and "info") or "item"
+			if layout ~= row.layout then
+				row.layout, row.isHeader = layout, header
 				row.name:ClearAllPoints()
+				row.sub:ClearAllPoints()
 				if header then
 					row.name:SetPoint("BOTTOMLEFT", 6, 5)
+					row.sub:SetPoint("TOPLEFT", 40, -20)
+				elseif layout == "info" then
+					row.name:SetPoint("TOPLEFT", 6, -4)
+					row.sub:SetPoint("TOPLEFT", 6, -20)
 				else
 					row.name:SetPoint("TOPLEFT", 40, -4)
 					row.name:SetWidth(LIST_W - 86)
+					row.sub:SetPoint("TOPLEFT", 40, -20)
 				end
-				showIf(row.icon, not header)
+				showIf(row.icon, layout == "item")
 			end
 			-- a recipe nobody in the guild knows has a grey icon
 			row.icon:SetDesaturated(d.kind == "recipe" and d.nobody or false)
 			-- items on screen are loaded first
 			if d.kind == "recipe" then ns.Scanner.WantItem(d.itemID, true) end
-			local profit = d.kind == "recipe" and not d.request and craftProfit(d) or nil
-			row.profit:SetText(profit and ((profit < 0 and HEX_LOSS or HEX_PROFIT) .. ns.Prices.Short(profit) .. "|r") or "")
-			if not header then row.name:SetWidth(LIST_W - 86 - (profit and 44 or 0)) end
+			if layout == "info" then
+				-- the leveling guide's lines: title, text, an amount at the right
+				row.name:SetText(d.gold and (HEX_GOLD .. d.title .. "|r") or d.title)
+				row.sub:SetText(HEX_MUTED .. (d.text or "") .. "|r")
+				row.profit:SetText(d.right or "")
+				row.level:SetText("")
+				row.name:SetWidth(LIST_W - 48 - (d.right and 44 or 0))
+				row.sub:SetWidth(LIST_W - 48)
+			elseif d.lv then
+				-- a recipe of the leveling guide: segment, alternative or "gives skill now"
+				setIcon(row.icon, recipeIcon(d))
+				row.name:SetText(d.lvName or qualityName(d))
+				row.sub:SetText(d.lvSub or "")
+				row.profit:SetText(d.lvRight or "")
+				row.level:SetText("")
+				row.name:SetWidth(LIST_W - 86 - 44)
+				row.sub:SetWidth(LIST_W - 86)
+			end
+			local profit = layout == "item" and not d.lv and d.kind == "recipe" and not d.request and craftProfit(d) or nil
+			if layout ~= "info" and not d.lv then
+				row.profit:SetText(profit and ((profit < 0 and HEX_LOSS or HEX_PROFIT) .. ns.Prices.Short(profit) .. "|r") or "")
+				if not header then row.name:SetWidth(LIST_W - 86 - (profit and 44 or 0)) end
+			end
 			local req = d.kind == "recipe" and d.req or -1
-			row.level:SetText(header and d.collapsed and (HEX_MUTED .. "(" .. d.count .. ")|r")
-				or (req > 1 and ns.T("LIST_LEVEL", req) or ""))
-			if header then row.name:SetWidth(LIST_W - 48 - (d.collapsed and 40 or 0)) end
-			row.sub:SetWidth(LIST_W - 86 - (req > 1 and 40 or 0))
-			if header then
+			if layout ~= "info" and not d.lv then
+				row.level:SetText(header and d.collapsed and (HEX_MUTED .. "(" .. d.count .. ")|r")
+					or (req > 1 and ns.T("LIST_LEVEL", req) or ""))
+				if header then row.name:SetWidth(LIST_W - 48 - (d.collapsed and 40 or 0)) end
+				row.sub:SetWidth(LIST_W - 86 - (req > 1 and 40 or 0))
+			end
+			if layout == "info" or d.lv then
+				-- drawn above
+			elseif header then
 				-- [+] / [-]: a click collapses or opens the group; a collapsed one says how many it hides
 				row.name:SetText("|T" .. (d.collapsed and PLUS_TEX or MINUS_TEX) .. ":14:14|t " .. HEX_GOLD .. d.title .. "|r")
 				row.sub:SetText("")
@@ -2530,6 +2966,7 @@ function UI:RefreshPrices()
 	if recipeItem then ids[#ids + 1] = recipeItem end
 	local function redraw()
 		UI.listCache = nil
+		UI.priceEpoch = (UI.priceEpoch or 0) + 1 -- the leveling plan counts the new prices
 		UI:ScheduleRefresh(0.5) -- Auctionator saves the prices a frame after its notice
 	end
 	local n, why = ns.Prices.Refresh(ids, redraw)
@@ -2834,7 +3271,11 @@ function UI:Draw()
 	local data, counts, category = cache.data, cache.counts, cache.category
 	self.memberTotal = cache.total
 	self.shownCategory = category
-	-- leveling opens at the first recipe that still gives skill to this character
+	-- leveling: the guide over the list sorted by grey skill
+	local planRows = leveling and self:BuildLevelingPlanRows(category) or nil
+	self.levelRows = planRows
+	-- leveling opens at the first recipe that still gives skill to this character; with the
+	-- guide shown it opens at the guide
 	if leveling and self.levelJump then
 		self.levelJump = false
 		local own = ns.OwnState and ns.OwnState()
@@ -2844,6 +3285,13 @@ function UI:Draw()
 				if d.grey and d.grey > mine.s then self.offset, self.levelStart = i - 1, i break end
 			end
 		end
+		if planRows and category then self.offset = 0 end
+	end
+	if planRows then
+		local all = {}
+		for _, d in ipairs(planRows) do all[#all + 1] = d end
+		for _, d in ipairs(data) do all[#all + 1] = d end
+		data = all
 	end
 
 	-- keep the selection while it is still listed, also inside a collapsed group
@@ -2878,6 +3326,7 @@ function UI:Draw()
 		self:DrawPlayerMenu()
 	end
 	self:DrawList(data)
+	self:DrawLevelingBar(leveling and category ~= nil, category)
 	if self.requestBox and self.requestBox:IsShown() and self.requestBox.pick:IsShown() then self:DrawRequestPicks() end
 
 	if not ns.store then
@@ -2893,6 +3342,8 @@ function UI:Draw()
 	else
 		self.listEmpty:SetText("")
 	end
+	-- the guide's lines fill the list: no text over them
+	if planRows then self.listEmpty:SetText("") end
 
 	self:DrawDetail()
 

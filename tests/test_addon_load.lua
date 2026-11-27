@@ -605,7 +605,14 @@ H.test("addon: loads in TOC order and survives login, scan, sync, UI and slash c
 	H.eq(#lv, 3, "no headers")
 	H.eq(lv[1].recipeID, 3866); H.eq(lv[2].recipeID, 3865); H.eq(lv[3].recipeID, 18560)
 	H.eq(UI.levelStart, 2, "Frost has 250 Tailoring: starts at the recipe grey at 260")
-	H.ok(UI.rows[2].sub:GetText():find("|cffff2020200|r  |cff808080260|r", 1, true), "skill in the row: " .. UI.rows[2].sub:GetText())
+	-- the leveling guide comes first (0.8.0): the old list follows it
+	local oldRow
+	for _, r in ipairs(UI.rows) do
+		local d = rawget(r, "data")
+		if d and d.recipeID == 3865 and not d.lv then oldRow = r end
+	end
+	H.ok(oldRow, "the old list under the guide")
+	H.ok(oldRow.sub:GetText():find("|cffff2020200|r  |cff808080260|r", 1, true), "skill in the row: " .. oldRow.sub:GetText())
 	H.eq(UI.listTitle:GetText(), ns.T("HEAD_LEVELING"))
 	-- a trainer says the skill every recipe needs
 	GetNumTrainerServices = function() return 2 end

@@ -62,6 +62,8 @@ NpcWork.RATES = {
 	text = 0.0001,    -- a character of a received text decoded to bytes (Comm)
 	inflate = 0.0007, -- a symbol inflated (NpcInflate: units of symbols and bytes)
 	deserialize = 0.0004, -- a value deserialized (LibSerialize)
+	leveling = 0.02,  -- a recipe of the leveling guide's input (skill numbers, reagent prices, sources)
+	plan = 0.0005,    -- a recipe-level of the leveling guide's path search
 }
 local RISE, FALL, JUMP = 0.5, 0.05, 4 -- learning: weights up and down, at most JUMP times at once
 
