@@ -197,7 +197,7 @@ local LV_KEYS = { "LV_PICK", "LV_PICK_HINT", "LV_OLD", "LV_NOW_HEAD", "LV_NOW_CO
 	"LV_DONE", "LV_COUNT", "LV_KNOWN", "LV_LEARN", "LV_LEARN_AT", "LV_LEARN_AH", "LV_ALT", "LV_ALL", "LV_ALL_HINT",
 	"LV_STOP", "LV_STOP_HINT", "LV_ORANGE", "LV_YELLOW", "LV_GREEN", "LV_SKILL", "LV_FOR", "LV_ME", "LV_CUSTOM",
 	"LV_RESET", "LV_NOW_BTN", "LV_NOW_HINT", "LV_NO_SOURCE", "LV_COMPUTING", "LV_COMPUTING_HINT",
-	"LV_FAILED", "LV_FAILED_HINT" }
+	"LV_FAILED", "LV_FAILED_HINT", "LV_NO_SOURCE_NOW", "LV_AH" }
 
 -- the window on LEVELING, Tailoring
 local function window(opts)
@@ -325,9 +325,31 @@ H.test("leveling tab: gives skill now opens at the start skill with colour, chan
 		H.ok(sub:find(ns.T("LV_" .. g.colour:upper()), 1, true), sub)
 		H.ok(sub:find(math.floor(g.chance * 100 + 0.5) .. " %", 1, true), sub)
 		H.ok(sub:find(plain(ns.Prices.Format(g.cost)), 1, true), sub)
-		H.ok(sub:find(g.r.known and "[known]" or (g.r.learnPrice and "[learn" or "[no source known]"), 1, true), sub)
+		if g.source then
+			H.ok(sub:find(g.r.known and "[known]" or "[learn", 1, true), sub)
+		else
+			-- no known source: muted, said in full first, after every recipe the plan can use
+			H.ok(sub:find("^unknown source – not in the plan"), sub)
+			H.ok(not sub:find("[no source", 1, true), sub)
+			H.ok(d.lvName:find("^|cff9a9ea3"), "muted name")
+			H.ok(d.lvSub:find("^|cff9a9ea3"), "muted text")
+			for j = i + 1, #list do H.eq(list[j].source, false, "unknown sources last") end
+		end
+		if g.r.avail then
+			H.ok(sub:find("AH: " .. math.floor(g.r.avail) .. " pcs", 1, true), "market depth: " .. sub)
+		else
+			H.ok(not sub:find("AH:", 1, true), "avail unknown: nothing: " .. sub)
+		end
 		H.eq(plain(d.lvRight), ns.Prices.Short(-g.loss))
 	end
+	local ids = {}
+	for _, d in ipairs(now) do ids[d.recipeID] = d end
+	H.ok(ids[50001] and plain(ids[50001].lvSub):find("AH: 3 pcs", 1, true), "50001: 3 on the AH")
+	H.ok(ids[50005] and now[#now] == ids[50005], "50005 (no source) last")
+	-- Slovak
+	H.eq(ns.Locales.sk.LV_NO_SOURCE_NOW, "neznámy zdroj – plán ho nepoužije")
+	H.eq(ns.Locales.sk.LV_AH, "AH: %d ks")
+	H.eq(ns.Locales.en.LV_AH, "AH: %d pcs")
 	H.ok(UI.levelNowButton.active, "pressed")
 	UI.levelNowButton._scripts.OnClick(UI.levelNowButton)
 	H.eq(UI.levelNow, nil, "back to the plan")

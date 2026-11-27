@@ -1049,10 +1049,19 @@ function UI:BuildLevelingPlanRows(category)
 		info(HEX_GOLD .. ns.T("LV_NOW_HEAD", prof, skill) .. "|r", ns.T("LV_NOW_COUNT", #list))
 		for _, g in ipairs(list) do
 			local row = recipeRow("now", "lvn" .. g.r.id, g.r)
-			row.lvName = COLOUR_HEX[g.colour] .. "•|r " .. qualityName(row)
-			row.lvSub = ns.T("LV_NOW_SUB", ns.T(COLOUR_KEY[g.colour]), math.floor(g.chance * 100 + 0.5), ns.Prices.Format(g.cost))
-				.. "  " .. learnText(g.r)
-			row.lvRight = lossShort(g.loss)
+			local sub = ns.T("LV_NOW_SUB", ns.T(COLOUR_KEY[g.colour]), math.floor(g.chance * 100 + 0.5), ns.Prices.Format(g.cost))
+			-- the market depth: a loss from a thin market shows why
+			if type(g.r.avail) == "number" then sub = sub .. " · " .. ns.T("LV_AH", math.floor(g.r.avail)) end
+			if g.source then
+				row.lvName = COLOUR_HEX[g.colour] .. "•|r " .. qualityName(row)
+				row.lvSub = sub .. "  " .. learnText(g.r)
+				row.lvRight = lossShort(g.loss)
+			else
+				-- no known source: muted, the reason first (the plan never uses it)
+				row.lvName = HEX_MUTED .. "• " .. row.name .. "|r"
+				row.lvSub = HEX_MUTED .. ns.T("LV_NO_SOURCE_NOW") .. " · " .. sub .. "|r"
+				row.lvRight = HEX_MUTED .. ns.Prices.Short(-g.loss) .. "|r"
+			end
 		end
 		if #list == 0 then info(ns.T("LV_NOW_EMPTY", skill), "") end
 	else

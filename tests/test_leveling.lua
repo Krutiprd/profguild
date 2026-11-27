@@ -51,7 +51,7 @@ H.test("leveling: gives skill now, sorted by loss per point, grey ones absent", 
 	H.eq(rows[1].r.id, 3); H.eq(rows[1].loss, -400); H.eq(rows[1].colour, "green"); H.eq(rows[1].chance, 0.25)
 	H.eq(rows[2].r.id, 2); H.eq(rows[2].loss, 90); H.eq(rows[2].colour, "orange")
 	H.eq(rows[3].r.id, 1); H.eq(rows[3].loss, 106); H.eq(rows[3].colour, "yellow"); H.eq(rows[3].cost, 100)
-	H.eq(rows[4].r.id, 5); H.eq(rows[4].loss, math.floor(10 / (1 / 66)), "rounded down")
+	H.eq(rows[4].r.id, 5); H.eq(rows[4].loss, math.floor(10 / (1 / 66)), "rounded down; no source: last")
 end)
 
 H.test("leveling: the cheapest whole path beats greedy (a learn price paid for a few points)", function()
@@ -145,7 +145,9 @@ H.test("leveling: a recipe without a known source is never planned, but gives sk
 	end
 	H.eq(plan.segments[1].r, dear)
 	local now = L.GivesNow({ nosrc, dear }, 10)
-	H.eq(now[1].r, nosrc)
+	H.eq(#now, 2, "listed")
+	H.eq(now[1].r, dear, "after the recipes the plan can use, though cheaper")
+	H.eq(now[2].r, nosrc); H.eq(now[2].source, false); H.eq(now[1].source, true)
 	H.eq(L.Plan({ nosrc }, 1, 300).stopAt, 1, "only an unknown source: stops at once")
 end)
 
@@ -161,4 +163,61 @@ H.test("leveling: the thin market limits a recipe's value over its whole range",
 	local plan = L.Plan({ r }, 200, 300)
 	local value = (10 * 1000 + 90 * 10) / 100
 	H.ok(math.abs(plan.total - 100 * (100 - value)) < 1e-6, "total " .. plan.total)
+end)
+
+H.test("leveling: gives skill now values the product by the crafts from that skill to grey (an alternative's rule)", function()
+	-- orange from 250 to 274, grey 275: 25 crafts; 2 sell on the AH at 1000, the rest at the vendor's 50
+	local r = rec({ id = 1, learn = 250, yellow = 274, grey = 275, cost = 100, ah = 1000, vendor = 50, avail = 2 })
+	local rows = L.GivesNow({ r }, 250)
+	local value = (2 * 1000 + 23 * 50) / 25
+	H.ok(math.abs(rows[1].crafts - 25) < 1e-9, "crafts " .. rows[1].crafts)
+	H.ok(math.abs(rows[1].net - (100 - value)) < 1e-9, "net " .. rows[1].net)
+	H.eq(rows[1].loss, math.floor(100 - value), "a loss per point, not the first unit's profit")
+	-- yellow levels need more crafts: N sums 1/chance up to grey, capped at 300
+	local y = rec({ id = 2, learn = 1, yellow = 280, grey = 320, cost = 100, ah = 1000, vendor = 0, avail = 5 })
+	local n = 0
+	for s = 290, 299 do n = n + 1 / L.Chance(y, s) end
+	local g = L.GivesNow({ y }, 290)[1]
+	H.ok(math.abs(g.crafts - n) < 1e-9, "capped at 300: " .. g.crafts .. " vs " .. n)
+end)
+
+H.test("leveling: the Ironfeather case: the list and the plan's segment give the same loss", function()
+	local iron = rec({ id = 1, name = "IRON", learn = 250, yellow = 274, grey = 275, cost = 150, ah = 1000, vendor = 50, avail = 2 })
+	local dear = rec({ id = 2, name = "DEAR", learn = 250, yellow = 300, grey = 310, cost = 200 })
+	local plan = L.Plan({ iron, dear }, 250, 300)
+	local s = plan.segments[1]
+	H.eq(s.r, iron); H.eq(s.from, 250); H.eq(s.to, 275)
+	H.ok(math.abs(s.count - 25) < 1e-9)
+	local row
+	for _, g in ipairs(L.GivesNow({ iron, dear }, 250)) do if g.r == iron then row = g end end
+	H.ok(math.abs(s.loss - row.net * s.count) < 1e-6, "segment " .. s.loss .. " list " .. row.net * s.count)
+	H.ok(s.loss > 0, "a loss in both")
+	H.ok(row.loss > 0, "the list does not show the first unit's profit")
+end)
+
+H.test("leveling: a segment's value counts the crafts it uses, not the recipe's whole range", function()
+	-- THIN gives 250..289 (40 crafts) but 5 sell on the AH at 1000: over its whole range it looks
+	-- worse than CHEAPA, so the old plan used it only at 260 (where nothing else gives a point).
+	-- Valued by the crafts it uses it is a profit, and the plan takes it from 250 to 265 (where
+	-- RICH, a big profit, takes over).
+	local thin = rec({ id = 1, name = "THIN", learn = 250, yellow = 289, grey = 290, cost = 300, ah = 1000, vendor = 0, avail = 5 })
+	local cheapA = rec({ id = 2, name = "CHEAPA", learn = 250, yellow = 259, grey = 260, cost = 150 })
+	local cheapB = rec({ id = 3, name = "CHEAPB", learn = 261, yellow = 264, grey = 265, cost = 150 })
+	local rich = rec({ id = 4, name = "RICH", learn = 265, yellow = 300, grey = 310, cost = 0, ah = 1000 })
+	local plan = L.Plan({ thin, cheapA, cheapB, rich }, 250, 300)
+	H.eq(plan.segments[1].r, thin, "THIN from the start")
+	H.eq(plan.segments[1].from, 250); H.eq(plan.segments[1].to, 265)
+	H.eq(plan.segments[2].r, rich)
+	local value = 5 * 1000 / 15
+	H.ok(math.abs(plan.segments[1].loss - 15 * (300 - value)) < 1e-6, "valued by its 15 crafts: " .. plan.segments[1].loss)
+	H.ok(math.abs(plan.total - (plan.segments[1].loss + plan.segments[2].loss)) < 1e-6)
+end)
+
+H.test("leveling: a segment's value uses the crafts of its recipe in the plan", function()
+	-- the old rule valued SHORT's 10 crafts by its 50 (250..299): now by the 10 it makes
+	local short = rec({ id = 1, name = "SHORT", learn = 250, yellow = 299, grey = 300, cost = 100, ah = 1000, vendor = 0, avail = 10 })
+	local after = rec({ id = 2, name = "AFTER", learn = 260, yellow = 300, grey = 310, cost = 0, ah = 5000 })
+	local plan = L.Plan({ short, after }, 250, 300)
+	H.eq(plan.segments[1].r, short); H.eq(plan.segments[1].to, 260)
+	H.ok(math.abs(plan.segments[1].loss - 10 * (100 - 1000)) < 1e-6, "loss " .. plan.segments[1].loss)
 end)

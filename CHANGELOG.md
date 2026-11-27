@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.1 – unreleased
+
+- Leveling guide: a recipe's product is valued by the crafts that are actually made of it. The
+  plan values each recipe it uses by the crafts its segments need (searched again with those
+  values until the path stays the same, at most 4 times; the cheapest path wins), not by every
+  craft the recipe could give. "RECIPES THAT LEVEL YOU" (and "All (n)") values a recipe as an
+  alternative from that skill: the crafts until it turns grey. The list and the plan now give the
+  same loss for the same recipe and range; before, the list valued only the first piece at the
+  full AH price and could show a profit where the plan showed a loss.
+- "RECIPES THAT LEVEL YOU" shows the market depth per recipe ("AH: n pcs") when it is known, so a
+  loss from a thin market is visible. Recipes without a known source are muted, say "unknown
+  source – not in the plan" and come after the recipes the plan can use.
+
 ## 0.8.0 – 2026-11-27
 
 - Leveling guide: the LEVELING tab with a profession chosen shows the cheapest plan from the
