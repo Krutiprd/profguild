@@ -34,6 +34,7 @@ NpcReader.lua
 NpcView.lua
 NpcInflate.lua
 Prices.lua
+Leveling.lua
 Data.lua
 Scanner.lua
 Comm.lua
