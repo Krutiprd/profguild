@@ -134,9 +134,11 @@ Stačí 1 hráč s Auctionatorom a čerstvým skenom aukcie; na „Pre:“ druh�
 | Karta LEVELING, vľavo tvoja profesia | Hore „<Profesia> <tvoj skill> -> 300“ a „Spolu: strata ~…“ (alebo zisk); pod tým úseky „od-do recept ~ks“ so stratou/ziskom vpravo a „[známy]“ alebo „[naučiť: cena, kde]“. Žiadna Lua chyba, hra sa nezasekne |
 | Plán | Dáva zmysel: lacné známe recepty, recept sa učí, len keď sa oplatí; počty sú odhady so `~` |
 | Klik na úsek | Vpravo detail receptu (suroviny, ceny, NÁJSŤ RECEPT); pod úsekom najviac 3 alternatívy a riadok „Všetky (n) ->“; ďalší klik úsek zavrie |
-| Klik na „Všetky (n) ->“ | „DÁVA SKILL TERAZ – <profesia> <skill začiatku úseku>“: všetky recepty, ktoré tam dávajú bod, najlacnejší bod prvý, s farbou, šancou, cenou craftu a známy/naučiť |
-| Tlačidlo „DÁVA SKILL TERAZ“ pod zoznamom | Ten istý zoznam pri tvojom skille; ďalší klik späť na plán |
-| Do poľa Skill napíš 120 a Enter | Plán „<Profesia> 120 -> 300“ a riadok „Ničie recepty“ (recepty od trénera pod 120 sa berú ako naučené); tlačidlo „Pre: nikoho“ |
+| Klik na „Všetky (n) ->“ | „RECEPTY NA SKILL – <profesia> <skill začiatku úseku>“: všetky recepty, ktoré tam dávajú bod, najlacnejší bod prvý, s farbou, šancou, cenou craftu a známy/naučiť |
+| Tlačidlo „RECEPTY NA SKILL“ pod zoznamom | Ten istý zoznam pri tvojom skille; ďalší klik späť na plán |
+| V zozname „RECEPTY NA SKILL“ | Len recepty, ktoré pri tom skille vieš craftiť a ešte dávajú bod: žiadny sivý, žiadny s „naučiť od“ nad skillom |
+| Do poľa Skill napíš 120 a Enter | Plán „<Profesia> 120 -> 300“ a riadok „Ničie recepty“ (recepty od trénera pod 120 sa berú ako naučené); tlačidlo „Pre: Vlastné“ |
+| „Pre:“ a vyber „Vlastné“ | Plán „<Profesia> 1 -> 300“ s „Ničie recepty“, celý návod naraz; tlačidlo „Pre: Vlastné“; do poľa Skill sa dá napísať napr. 75 alebo 150 (plán odtiaľ, stále „Vlastné“); „RESET“ vráti tvoje |
 | „Pre:“ a vyber spoluhráča | Plán z jeho skillu a jeho receptov; „RESET“ vráti tvoje |
 | Spoluhráč bez tej profesie alebo dlho neprihlásený | Plán od 1 (alebo jeho skillu) s „Ničie recepty“, žiadna chyba |
 | Bez Auctionatora (alebo bez skenu) | Riadok „Chýbajú ceny: vynechaných receptov n“ a „Naskenuj aukciu.“, žiadny plán, žiadna chyba |

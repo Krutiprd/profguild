@@ -195,8 +195,9 @@ end)
 local LV_KEYS = { "LV_PICK", "LV_PICK_HINT", "LV_OLD", "LV_NOW_HEAD", "LV_NOW_COUNT", "LV_NOW_SUB", "LV_NOW_EMPTY",
 	"LV_HEAD", "LV_TOTAL_LOSS", "LV_TOTAL_PROFIT", "LV_NOBODY", "LV_NOBODY_HINT", "LV_MISSING", "LV_MISSING_HINT",
 	"LV_DONE", "LV_COUNT", "LV_KNOWN", "LV_LEARN", "LV_LEARN_AT", "LV_LEARN_AH", "LV_ALT", "LV_ALL", "LV_ALL_HINT",
-	"LV_STOP", "LV_STOP_HINT", "LV_ORANGE", "LV_YELLOW", "LV_GREEN", "LV_SKILL", "LV_FOR", "LV_ME", "LV_NOBODY_SHORT",
-	"LV_RESET", "LV_NOW_BTN", "LV_NOW_HINT", "LV_NO_SOURCE", "LV_COMPUTING", "LV_COMPUTING_HINT" }
+	"LV_STOP", "LV_STOP_HINT", "LV_ORANGE", "LV_YELLOW", "LV_GREEN", "LV_SKILL", "LV_FOR", "LV_ME", "LV_CUSTOM",
+	"LV_RESET", "LV_NOW_BTN", "LV_NOW_HINT", "LV_NO_SOURCE", "LV_COMPUTING", "LV_COMPUTING_HINT",
+	"LV_FAILED", "LV_FAILED_HINT" }
 
 -- the window on LEVELING, Tailoring
 local function window(opts)
@@ -342,15 +343,17 @@ H.test("leveling tab: an edited start skill, For: a guild member, Reset", functi
 	H.eq(UI.levelSkill, 120)
 	H.eq(plain(UI.levelRows[1].title), "Tailoring 120 -> 300")
 	H.eq(UI.levelRows[2].title, ns.T("LV_NOBODY"), "nobody's recipes said")
-	H.ok(UI.levelForButton.text:GetText():find(ns.T("LV_NOBODY_SHORT"), 1, true), UI.levelForButton.text:GetText())
-	-- For: the menu lists the player, then Ana (Tailoring)
+	H.ok(UI.levelForButton.text:GetText():find(ns.T("LV_CUSTOM"), 1, true), UI.levelForButton.text:GetText())
+	-- For: the menu lists the player, Custom, then Ana (Tailoring)
 	UI.levelForButton._scripts.OnClick(UI.levelForButton)
 	H.ok(UI.levelForMenu:IsShown(), "menu")
 	local entries = UI:LevelingForEntries(TAILORING)
 	H.eq(entries[1].guid, nil, "me first")
-	H.eq(entries[2].guid, ANA)
-	H.eq(entries[2].skill, 120)
-	local anaRow = UI.levelForMenu.rows[2]
+	H.eq(entries[2].custom, true, "Custom second")
+	H.eq(entries[3].guid, ANA)
+	H.eq(entries[3].skill, 120)
+	H.ok(UI.levelForMenu.rows[2].active, "Custom active: the typed skill is Custom")
+	local anaRow = UI.levelForMenu.rows[3]
 	anaRow._scripts.OnClick(anaRow)
 	H.eq(UI.levelWho, ANA)
 	H.eq(UI.levelSkill, nil, "the edited skill gives way")
@@ -454,6 +457,119 @@ H.test("leveling tab: computed as an NpcWork job: behind other work the tab says
 	M.advance(1)
 	H.ok(not infoRow(UI, ns.T("LV_COMPUTING")), "done and drawn again")
 	H.ok(#levelRows(UI, "seg") > 0, "the plan")
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: For: Custom: nobody's recipes from 1 to 300, the skill box still edits, Reset to me", function()
+	local ns, UI = window()
+	local entries = UI:LevelingForEntries(TAILORING)
+	H.eq(entries[2].custom, true)
+	H.eq(entries[2].name, ns.T("LV_CUSTOM"))
+	UI.levelForButton._scripts.OnClick(UI.levelForButton)
+	local row = UI.levelForMenu.rows[2]
+	H.ok(plain(row.left:GetText()):find(ns.T("LV_CUSTOM"), 1, true), row.left:GetText())
+	row._scripts.OnClick(row)
+	H.ok(not UI.levelForMenu:IsShown())
+	H.eq(UI.levelWho, nil); H.eq(UI.levelSkill, 1)
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 1 -> 300", "the whole guide")
+	H.eq(UI.levelRows[2].title, ns.T("LV_NOBODY"), "nobody's recipes")
+	H.eq(UI.levelSkillBox:GetText(), "1")
+	H.ok(UI.levelForButton.text:GetText():find(ns.T("LV_CUSTOM"), 1, true), UI.levelForButton.text:GetText())
+	H.ok(UI.levelForButton.active, "the label marked")
+	UI.levelForButton._scripts.OnClick(UI.levelForButton)
+	H.ok(UI.levelForMenu.rows[2].active, "Custom row active")
+	H.ok(not UI.levelForMenu.rows[1].active, "me not active")
+	UI.levelForMenu:Hide()
+	-- the skill box starts anywhere, still Custom
+	UI.levelSkillBox:SetText("75")
+	UI.levelSkillBox._scripts.OnEnterPressed(UI.levelSkillBox)
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 75 -> 300")
+	H.ok(UI.levelForButton.text:GetText():find(ns.T("LV_CUSTOM"), 1, true), UI.levelForButton.text:GetText())
+	-- Reset: me again
+	UI.levelResetButton._scripts.OnClick(UI.levelResetButton)
+	H.eq(UI.levelSkill, nil)
+	H.eq(plain(UI.levelRows[1].title), "Tailoring 250 -> 300")
+	H.ok(UI.levelForButton.text:GetText():find(ns.T("LV_ME"), 1, true), UI.levelForButton.text:GetText())
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: a failed plan job: an error line, one retry later, not on every draw", function()
+	local ns, UI = window()
+	UI.levelPlans = nil
+	local plan, calls = ns.Leveling.Plan, 0
+	ns.Leveling.Plan = function() calls = calls + 1 error("boom") end
+	UI:Refresh()
+	H.eq(calls, 1)
+	H.ok(infoRow(UI, ns.T("LV_FAILED")), "the error line")
+	H.ok(not infoRow(UI, ns.T("LV_COMPUTING")), "not computing")
+	UI:Refresh(); UI:Refresh()
+	H.eq(calls, 1, "no retry on every draw")
+	H.ok(infoRow(UI, ns.T("LV_FAILED")), "still the error line")
+	ns.Leveling.Plan = plan
+	M.advance(3.5)
+	H.ok(not infoRow(UI, ns.T("LV_FAILED")), "retried")
+	H.ok(#levelRows(UI, "seg") > 0, "the plan")
+	ns.lastError = nil
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: RECIPES THAT LEVEL YOU lists only recipes with learn <= skill < grey (button, All, Custom)", function()
+	local ns, UI = window()
+	local function nowIDs(skill)
+		local ids = {}
+		for _, d in ipairs(levelRows(UI, "now")) do
+			local r = d.lvr
+			H.ok(type(r.learn) == "number", "a learn skill always (unknown: the yellow)")
+			H.ok(r.learn <= skill and skill < r.grey, d.recipeID .. " at " .. skill)
+			ids[d.recipeID] = true
+		end
+		return ids
+	end
+	-- Custom at 140: 50004 (learn 150) and 50005 (learn 200) not yet
+	UI:SetLevelingCustom()
+	UI:SetLevelingSkill(140)
+	UI:ToggleGivesNow()
+	local ids = nowIDs(140)
+	H.ok(ids[50001] and ids[50002] and ids[50003], "learn <= 140")
+	H.ok(not ids[50004] and not ids[50005], "learn above the skill: absent")
+	-- the "All (n) ->" path at 275: 50001 (grey 270) is grey
+	UI:LevelingAction({ action = "all", skill = 275 })
+	ids = nowIDs(275)
+	H.ok(not ids[50001], "grey: absent")
+	H.ok(ids[50002] and ids[50005], "still gives skill")
+	-- the player's own at 250 by the button
+	UI:ResetLeveling()
+	UI:ToggleGivesNow()
+	nowIDs(250)
+	H.eq(ns.lastError, nil, tostring(ns.lastError))
+	_G.Auctionator = nil
+end)
+
+H.test("leveling tab: RESET is idle only in the player's own state, normal once anything differs", function()
+	local ns, UI = window()
+	local b = UI.levelResetButton
+	H.ok(b.idle, "the player's own: idle")
+	H.ok(not b.disabled, "never the disabled look")
+	-- a skill typed, before Enter
+	UI.levelSkillBox:SetText("120")
+	UI.levelSkillBox._scripts.OnTextChanged(UI.levelSkillBox, true)
+	H.ok(not b.idle, "typed: normal")
+	UI.levelSkillBox:SetText("250")
+	UI.levelSkillBox._scripts.OnTextChanged(UI.levelSkillBox, true)
+	H.ok(b.idle, "the own skill typed back: idle")
+	-- Custom
+	UI:SetLevelingCustom()
+	H.ok(not b.idle, "Custom: normal")
+	b._scripts.OnClick(b)
+	H.ok(b.idle, "after RESET: idle")
+	-- For: a member
+	ns.store:Apply(memberRecord({ [TAILORING] = { s = 120, m = 150, k = true, r = {} } }))
+	UI:SetLevelingFor(ANA)
+	H.ok(not b.idle, "a member: normal")
+	b._scripts.OnClick(b)
+	H.ok(b.idle and not b.disabled, "after RESET: idle again")
 	H.eq(ns.lastError, nil, tostring(ns.lastError))
 	_G.Auctionator = nil
 end)

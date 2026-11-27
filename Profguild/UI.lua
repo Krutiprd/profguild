@@ -898,7 +898,9 @@ end
 
 -- The guide's state: whose recipes (levelWho: a member's GUID, nil = the player), an edited
 -- start skill (levelSkill), the "gives skill now" list at a skill (levelNow, nil = the plan),
--- the segments opened to their alternatives (levelOpen).
+-- the segments opened to their alternatives (levelOpen). An edited skill is "Custom" in the For:
+-- menu: nobody's recipes from that skill. A plan job that failed is tried again once after
+-- LEVEL_RECOMPUTE (levelFailed: when it failed, per key), not on every draw.
 UI.levelOpen = {}
 UI.LEVEL_RECOMPUTE = 3  -- seconds: the plan is computed again at most this often
 UI.LEVEL_MAX_AGE = 30   -- and at least this often while it is drawn (prices change silently)
@@ -918,9 +920,13 @@ function UI:LevelingPlan(category)
 		ns.guildPrices and ns.guildPrices.revision or 0, math.floor(GetTime() / self.LEVEL_MAX_AGE) }, "\1")
 	self.levelPlans = self.levelPlans or {}
 	self.levelJobs = self.levelJobs or {}
+	self.levelFailed = self.levelFailed or {}
 	local e = self.levelPlans[key]
 	local now = GetTime()
-	if e and e.stamp ~= stamp and now - e.at < self.LEVEL_RECOMPUTE then
+	local failed = self.levelFailed[key]
+	if failed and now - failed < self.LEVEL_RECOMPUTE then
+		-- the last job failed: the retry waits for the refresh scheduled then
+	elseif e and e.stamp ~= stamp and now - e.at < self.LEVEL_RECOMPUTE then
 		-- changed again right after a computation: once more when the pause is over
 		self:ScheduleRefresh(self.LEVEL_RECOMPUTE - (now - e.at) + 0.05)
 	elseif (not e or e.stamp ~= stamp) and not self.levelJobs[key] then
@@ -939,11 +945,16 @@ function UI:LevelingPlan(category)
 			if n >= UI.LEVEL_CACHE then UI.levelPlans = {} end
 			UI.levelPlans[key] = entry
 			UI.levelJobs[key] = nil
+			UI.levelFailed[key] = nil
 			if not inline then UI:ScheduleRefresh(0) end
 		end
 		if ns.npcWork then
 			self.levelJobs[key] = true
-			ns.npcWork:Run(compute, "leveling", function() UI.levelJobs[key] = nil end)
+			ns.npcWork:Run(compute, "leveling", function()
+				UI.levelJobs[key] = nil
+				UI.levelFailed[key] = GetTime()
+				UI:ScheduleRefresh(UI.LEVEL_RECOMPUTE + 0.05)
+			end)
 		else
 			compute()
 		end
@@ -954,7 +965,7 @@ function UI:LevelingPlan(category)
 		-- the first plan of this profession is still being computed
 		local start = self.levelSkill
 		if not start and not self.levelWho then start = mine and mine.s end
-		return { computing = true, start = math.max(1, start or 1), recipes = {}, missing = 0, now = {},
+		return { computing = not self.levelFailed[key], failed = self.levelFailed[key] ~= nil, start = math.max(1, start or 1), recipes = {}, missing = 0, now = {},
 			plan = { from = 1, to = ns.Leveling.MAX, total = 0, segments = {} }, category = category }
 	end
 	return e
@@ -1024,7 +1035,9 @@ function UI:BuildLevelingPlanRows(category)
 		nobody = not (own and own.profs and own.profs[category] and own.recipes and own.recipes[category])
 	end
 
-	if e.computing then
+	if e.failed then
+		info(ns.T("LV_FAILED"), ns.T("LV_FAILED_HINT"))
+	elseif e.computing then
 		info(ns.T("LV_COMPUTING"), ns.T("LV_COMPUTING_HINT"))
 	elseif self.levelNow then
 		local skill = self.levelNow
@@ -1093,6 +1106,12 @@ function UI:SetLevelingFor(guid)
 	self:Refresh()
 end
 
+-- "Custom": nobody's recipes from skill 1 (the whole guide); the skill box then starts anywhere
+function UI:SetLevelingCustom()
+	self.levelWho = nil
+	self:SetLevelingSkill(1)
+end
+
 function UI:ResetLeveling()
 	if self.levelForMenu then self.levelForMenu:Hide() end
 	self:SetLevelingFor(nil)
@@ -1118,9 +1137,10 @@ function UI:LevelingAction(d)
 	end
 end
 
--- Whom the guide can plan for: the player first, then guild members (not stale) with the profession.
+-- Whom the guide can plan for: the player first, "Custom" (nobody's recipes, an edited skill),
+-- then guild members (not stale) with the profession.
 function UI:LevelingForEntries(category)
-	local list = { { name = ns.T("LV_ME") } }
+	local list = { { name = ns.T("LV_ME") }, { custom = true, name = ns.T("LV_CUSTOM") } }
 	local store = ns.store
 	if not store or not category then return list end
 	local me = UnitGUID("player")
@@ -1150,7 +1170,11 @@ function UI:DrawLevelingForMenu()
 		local row, e = menu.rows[i], entries[self.levelForOffset + i]
 		row.data = e
 		if e then
-			row.active = e.guid == self.levelWho and not self.levelSkill
+			if e.custom then
+				row.active = self.levelSkill ~= nil
+			else
+				row.active = e.guid == self.levelWho and not self.levelSkill
+			end
 			row.left:SetText(e.guid and ((e.online and HEX_ONLINE or HEX_OFFLINE) .. "•|r " .. classColored(e.name, e.class)) or (HEX_GOLD .. e.name .. "|r"))
 			row.right:SetText(e.skill and tostring(e.skill) or "")
 			row.bg:SetColorTexture(unpack(row.active and C.selected or C.clear))
@@ -1160,6 +1184,20 @@ function UI:DrawLevelingForMenu()
 		end
 	end
 	menu:SetHeight(math.min(#entries, MENU_ROWS) * MENU_STEP + 8)
+end
+
+-- RESET: the normal look as soon as the state is not the player's own (For: a member, Custom, a
+-- skill typed in the box, before Enter too); otherwise the normal face with a muted text (idle),
+-- since the disabled look made it seem not to work.
+function UI:DrawLevelingReset()
+	local b, box = self.levelResetButton, self.levelSkillBox
+	if not b then return end
+	local typed = box and tonumber(box:GetText() or "")
+	local idle = self.levelWho == nil and self.levelSkill == nil
+		and not (typed and math.floor(typed) ~= self.levelShownStart)
+	setPill(b, ns.T("LV_RESET"), false)
+	b.idle = idle
+	if idle then b.text:SetTextColor(0.72, 0.62, 0.35) end
 end
 
 -- The controls under the list, in the current language and state.
@@ -1175,13 +1213,14 @@ function UI:DrawLevelingBar(show, category)
 	if not self.levelSkillBox:HasFocus() then self.levelSkillBox:SetText(tostring(e.start)) end
 	local whoName = ns.T("LV_ME")
 	if self.levelSkill then
-		whoName = ns.T("LV_NOBODY_SHORT")
+		whoName = ns.T("LV_CUSTOM")
 	elseif self.levelWho then
 		local rec = ns.store and ns.store:Get(self.levelWho)
 		whoName = rec and ns.DisplayName(self.levelWho, rec) or "?"
 	end
 	setPill(self.levelForButton, ns.T("LV_FOR", whoName), self.levelWho ~= nil or self.levelSkill ~= nil)
-	setPill(self.levelResetButton, ns.T("LV_RESET"), false, self.levelWho == nil and self.levelSkill == nil)
+	self.levelShownStart = e.start
+	self:DrawLevelingReset()
 	setPill(self.levelNowButton, ns.T("LV_NOW_BTN"), self.levelNow ~= nil)
 	self:DrawLevelingForMenu()
 end
@@ -1784,6 +1823,9 @@ function UI:Create()
 		self:ClearFocus()
 		UI:Refresh() -- the shown start skill again
 	end)
+	skillBox:SetScript("OnTextChanged", function(_, userInput)
+		if userInput then UI:DrawLevelingReset() end
+	end)
 	skillBox:SetScript("OnEnterPressed", function(self)
 		self:ClearFocus()
 		local n = tonumber(self:GetText() or "")
@@ -1812,7 +1854,7 @@ function UI:Create()
 		GameTooltip:Show()
 	end)
 	self.levelNowButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
-	-- "For:": the player, then guild members with the profession; opens upwards
+	-- "For:": the player, Custom, then guild members with the profession; opens upwards
 	local forMenu = panel(mid, C.bg, C.border)
 	forMenu:SetFrameLevel((mid:GetFrameLevel() or 1) + 30)
 	forMenu:SetSize(MENU_W, MENU_ROWS * MENU_STEP + 8)
@@ -1845,7 +1887,7 @@ function UI:Create()
 		row:SetScript("OnClick", function(self)
 			if not self.data then return end
 			forMenu:Hide()
-			UI:SetLevelingFor(self.data.guid)
+			if self.data.custom then UI:SetLevelingCustom() else UI:SetLevelingFor(self.data.guid) end
 		end)
 		forMenu.rows[i] = row
 	end

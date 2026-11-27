@@ -9,10 +9,11 @@
   your bags) and products (minus the 5 % cut, only as many as the market holds, the rest at the
   vendor price); the vendor price only when the AH knows nothing of the item. Recipes without a
   price are left out and the tab says so. A segment opens to its 3 best alternatives and "All (n)",
-  which opens "GIVES SKILL NOW": every recipe that gives a point at that skill, with colour,
+  which opens "RECIPES THAT LEVEL YOU": every recipe that gives a point at that skill, with colour,
   chance, cost per craft, loss per point and known or learn. The start skill can be edited and
-  "For:" plans with a guild member's skill and recipes (an edited skill counts nobody's recipes:
-  trainer recipes below it as learned). The old list sorted by grey skill stays below. The plan is
+  "For:" plans with a guild member's skill and recipes or "Custom" (nobody's recipes from skill
+  1, the whole guide at once; an edited skill is Custom too; nobody's recipes count trainer
+  recipes below the start skill as learned). The old list sorted by grey skill stays below. The plan is
   computed over a few frames, at most once per 3 s.
 
 ## 0.7.0 – 2026-11-26
