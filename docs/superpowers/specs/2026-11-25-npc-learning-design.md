@@ -17,7 +17,7 @@ Non-goals: reagents sold by vendors (a later version, *(user)* starts with recip
 quest rewards come from, routes, data shipped with the addon, sharing between guilds, judging
 whether the viewer meets a recipe's requirements (the game's tooltip on hover says them).
 
-Anti-goals: the addon changes filters or anything else in the trainer or merchant window; the other
+Anti-goals: the addon visibly changes the trainer or merchant window (its filters or selection); the other
 messages of the addon get slower; clients overwrite each other back and forth; made-up or wrong
 data cannot be got rid of.
 
@@ -99,7 +99,12 @@ traffic within bounds; kicking and EPOCH help.
 ## Reading
 
 Trainer: the NPC and place are taken at TRAINER_SHOW; the services 0.5 s later (existing debounce) and
-at TRAINER_UPDATE, only while the same NPC is open. Only profession trainers. The profession is the one
+at TRAINER_UPDATE, only while the same NPC is open. Only profession trainers. *(user, after the in-game test)*
+A profession trainer is read whole whatever the player's filters: the filters that are off (available,
+unavailable, used) are switched on, every service is read, and the filters and the selected service
+(found by name and skill, else by its old index) are put back as they were, all in one frame and also when
+reading fails, so the window never visibly changes; the TRAINER_UPDATE this fires reads nothing. Without
+the filter API, or when the client refuses a switch, the list is read as the window shows it. The profession is the one
 GetTrainerServiceSkillReq names; a service without a requirement takes the only profession of the other
 services, else it is left out. Service to recipe, among the recipes (Data.lua and catalog) of that profession:
 1. an exact spell ID, if the probe finds one;

@@ -99,10 +99,11 @@ založená postava alebo hráč, ktorý sa práve prihlásil. Požiadavky aj cen
 
 | Krok | Očakávaný výsledok |
 | --- | --- |
-| A otvorí trénera povolania a zavrie okno | Žiadna Lua chyba, okno trénera sa nezmenilo (filtre ostali). `/pg npc` ukáže +1 NPC a počet receptov |
+| A otvorí trénera povolania a zavrie okno | Žiadna Lua chyba, okno trénera sa viditeľne nezmenilo: filtre aj vybraný recept ostali, ako boli. Tréner sa prečíta celý, nech je nastavený akýkoľvek filter. `/pg npc` ukáže +1 NPC a počet receptov |
+| Tréner, kde vieš všetko (napr. alchýmia 300, skryté známe recepty) | `/pg npc` ukáže všetky jeho recepty, nie len tie, ktoré okno práve zobrazuje |
 | B po ~1 minúte otvorí v `/pg` recept, ktorý ten tréner učí, a dá „NÁJSŤ RECEPT“ | Riadok „Tréner: <meno>“ so zónou, polohou a cenou so `~` (cena od spoluhráča); hover ukáže „videné pred n dňami“ |
 | A otvorí predajcu receptov (recept s cenou, s „obmedzené množstvo“) | `/pg npc` ukáže predajcu; u B riadok „Vendor: …“ s cenou, „obmedzené množstvo“ |
-| A znova otvorí toho istého trénera s iným filtrom (napr. skryté známe recepty) | Nič sa nestratí: u B ostanú všetky recepty z predošlého čítania |
+| A znova otvorí toho istého trénera s iným filtrom (napr. skryté známe recepty) | Tréner sa prečíta celý ako predtým, nič sa nestratí; filter a výber v okne ostanú, ako ich A nastavil |
 | Nová postava C sa prihlási a hneď (do 5 s) otvorí trénera | Dáta od A a B ostanú, C dostane tabuľku guildy do pár minút (`/pg npc` rastie) |
 | A otvorí trénera v boji (alebo B v boji otvorí predajcu) | Kým trvá boj, nič sa nezapíše, žiadna chyba; ak je okno po boji ešte otvorené, zapíše sa hneď po boji (inak pri ďalšom otvorení) |
 | A vidí vlastnú cenu iného dňa | Vlastná cena z posledných 30 dní je bez `~`, cena guildy so `~` |
@@ -121,7 +122,7 @@ Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
 - Predajca s inou menou (žetóny, odznaky, predmet namiesto zlata): cena a „iná cena“ v riadku.
 - Obmedzený počet pri predajcovi: riadok hovorí „obmedzené množstvo“ (pred zónou; hover ho ukáže tiež), cena je v riadku mena.
 - Dve reputácie: tá istá cena pri inej reputácii (zľava) nerobí zmätok; po čase zostane základná cena.
-- Tréner s ponechanými všetkými filtrami (zobraziť aj nedostupné/známe): recepty sa prečítajú, žiadne dvojité.
+- Tréner s akýmikoľvek filtrami (všetky zapnuté, alebo skryté nedostupné/známe): prečítajú sa všetky recepty, žiadne dvojité; filtre a vybraný recept v okne ostanú, ako boli, okno nebliká a iný doplnok trénera (napr. OneForAll) sa nespráva inak.
 - Neanglické názvy povolaní a receptov (klient v inom jazyku): recepty sa priradia, `/pg npc` nehlási veľa preskočených mien.
 
 ## 7. Hlásenie chyby

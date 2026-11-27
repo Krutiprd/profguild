@@ -5,7 +5,7 @@
 - The guild learns where recipes are had. Whoever opens a profession trainer or a vendor of
   recipes feeds the guild's table: which recipes the NPC teaches or sells, from which skill, for
   how much (also other costs and limited stock), and where the NPC stands. Nobody has to do
-  anything for it; nothing in the trainer or merchant window is changed. Data is merged entry by
+  anything for it; the trainer or merchant window does not visibly change. Data is merged entry by
   entry with the day it was read, so a partial reading never wipes a fuller one, and entries
   nobody reads again expire after 120 days.
 - The data travels on its own channel (`ProfguildNPC`) in small, throttled messages, behind
@@ -17,6 +17,8 @@
   pin at the NPC (or a TomTom waypoint when TomTom is there). "BACK TO REAGENTS" returns.
 - Skill numbers (learn, yellow, green, grey) sit at the right end of the profession line and use
   the trainer's data when the guild knows it; Leveling uses the same numbers.
+- A profession trainer is read whole whatever filter the player has set (also a trainer whose
+  recipes are all known and hidden); its filters and the selected recipe stay as they were.
 - `/pg npc` shows what is held (NPCs, recipes, readings skipped for an unclear name),
   `/pg npc clear` forgets the data of your faction (the guild sends it again); `/pg status` has a
   line for it.
