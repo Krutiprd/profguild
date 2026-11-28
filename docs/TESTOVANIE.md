@@ -152,6 +152,13 @@ Zatiaľ neoverené v hre, pozorne skontroluj a pošli výsledok:
 - Recepty, ktorých oranžová hranica nie je známa (trénerove bez údaja): plán ich berie od žltej.
 - Riadok „Počítam plán…“ by mal byť vidieť nanajvýš na okamih.
 
+### Slovenská diakritika (0.8.1)
+
+- `/pg lang sk`: v okne žiadne štvorčeky, č ž ľ ť ň ď sa zobrazia (písmo Inter). Texty sa zmestia do tlačidiel a riadkov.
+- Tooltipy (riadok „Vyrobí:“ na predmete, ikona pri minimape, tlačidlá okna): diakritika bez štvorčekov; tooltip iných doplnkov a hry ostane v pôvodnom písme.
+- Písanie do poľa hľadania a do hlásenia chyby: „čučoriedka“ sa zobrazí správne.
+- `/pg lang en`: okno v pôvodnom písme hry (po `/reload` určite).
+
 ## 8. Hlásenie chyby
 
 Keď niečo nesedí, nahlás to hneď, kým je to na obrazovke:

@@ -97,6 +97,8 @@ local function initDB()
 	if type(db.settings.collapsed) ~= "table" then db.settings.collapsed = {} end
 	ns.db = db
 	ns.SetLanguage(db.settings.lang)
+	-- Slovak letters the game's font lacks: the bundled font and the tooltip fix (Fonts.lua)
+	if ns.Fonts then ns.Fonts.Init() end
 	-- bug reports and the last Lua errors of Profguild (see Bugs.lua)
 	if ns.Bugs then ns.Bugs.Init() end
 end

@@ -603,6 +603,8 @@ end
 function ns.SetLanguage(lang)
 	if strings[lang] then
 		ns.lang = lang
+		-- the game's font has no č, ž, ľ...: Slovak uses the bundled one (Fonts.lua)
+		if ns.Fonts then ns.Fonts.Apply() end
 		return true
 	end
 	return false

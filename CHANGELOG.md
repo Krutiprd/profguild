@@ -2,6 +2,10 @@
 
 ## 0.8.1 – unreleased
 
+- Slovak letters (č, ž, ľ, ť, ň, ď…) are no longer drawn as squares. The game's font of the
+  English client lacks them, so in Slovak the window uses the bundled Inter font (SIL Open Font
+  License, Media/Fonts); English keeps the game's fonts. A tooltip line with such a letter gets
+  Inter in any language and its own font back when the tooltip is cleared.
 - Leveling guide: a recipe's product is valued by the crafts that are actually made of it. The
   plan values each recipe it uses by the crafts its segments need (searched again with those
   values until the path stays the same, at most 4 times; the cheapest path wins), not by every

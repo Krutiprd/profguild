@@ -18,6 +18,7 @@ Libs\LibSerialize\LibSerialize.lua
 Libs\LibDeflate\LibDeflate.lua
 
 Locale.lua
+Fonts.lua
 Bugs.lua
 Store.lua
 Sync.lua
