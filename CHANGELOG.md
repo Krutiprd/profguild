@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.1 – unreleased
+## 0.8.1 – 2026-11-28
 
 - Slovak letters (č, ž, ľ, ť, ň, ď…) are no longer drawn as squares. The game's font of the
   English client lacks them, so in Slovak the window uses the bundled Inter font (SIL Open Font
